@@ -133,15 +133,32 @@ enum End {
 
 type Notify = Arc<dyn Fn(UiEvent) + Send + Sync>;
 
-async fn manager(opts: ConnectOpts, mut cmd_rx: mpsc::UnboundedReceiver<Cmd>, view: SharedView, notify: Notify) {
+type ClientEndpoint = Option<(std::net::SocketAddr, quinn::Endpoint)>;
+
+async fn manager(opts: ConnectOpts, cmd_rx: mpsc::UnboundedReceiver<Cmd>, view: SharedView, notify: Notify) {
+    let mut endpoint: ClientEndpoint = None;
+    reconnect_loop(opts, cmd_rx, view, notify, &mut endpoint).await;
+    // `close()` only queues CONNECTION_CLOSE; without this the runtime shuts down before it is
+    // sent and the host only notices the client is gone after its idle timeout.
+    if let Some((_, ep)) = endpoint {
+        let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
+    }
+}
+
+async fn reconnect_loop(
+    opts: ConnectOpts,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    view: SharedView,
+    notify: Notify,
+    endpoint: &mut ClientEndpoint,
+) {
     let mut resume: Option<(SessionId, [u8; 32])> = None;
     let mut monitor = opts.monitor;
     let mut failures = 0u32;
-    let mut endpoint: Option<(std::net::SocketAddr, quinn::Endpoint)> = None;
     loop {
         notify(UiEvent::Status(if failures == 0 { "Connecting…".into() } else { "Reconnecting…".into() }));
         let started = Instant::now();
-        let end = once(&opts, &mut endpoint, &mut resume, &mut monitor, &mut cmd_rx, &view, &notify).await;
+        let end = once(&opts, endpoint, &mut resume, &mut monitor, &mut cmd_rx, &view, &notify).await;
         match end {
             End::Quit => return,
             End::Fatal(msg) => {
@@ -222,7 +239,7 @@ pub async fn credentials(e: &HostEntry, resume: Option<(SessionId, [u8; 32])>) -
 #[allow(clippy::too_many_arguments)]
 async fn once(
     opts: &ConnectOpts,
-    endpoint: &mut Option<(std::net::SocketAddr, quinn::Endpoint)>,
+    endpoint: &mut ClientEndpoint,
     resume: &mut Option<(SessionId, [u8; 32])>,
     monitor: &mut Option<u32>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,

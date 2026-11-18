@@ -16,11 +16,14 @@ tracing.workspace = true
 
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 xcap = "0.9"
-enigo = "0.6"
 rayon = "1"
 blake3 = "1"
 rand = "0.8"
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
+
+# Windows injects input with SendInput directly (scancodes), so enigo is only for macOS/Linux.
+[target.'cfg(not(windows))'.dependencies]
+enigo = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_Power", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

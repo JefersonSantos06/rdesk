@@ -19,7 +19,7 @@ impl Frame {
     pub fn new(width: u32, height: u32) -> Self {
         let mut data = vec![0u8; width as usize * height as usize * 4];
         // Opaque black.
-        for px in data.chunks_exact_mut(4) {
+        for px in data.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         Self { width, height, data }
@@ -99,8 +99,9 @@ pub fn tile_rect(col: u32, row: u32, width: u32, height: u32) -> TileRect {
 }
 
 fn solid_color(px: &[u8]) -> Option<[u8; 4]> {
-    let first: [u8; 4] = px[..4].try_into().ok()?;
-    px.chunks_exact(4).all(|p| p == first).then_some(first)
+    let pixels = px.as_chunks::<4>().0;
+    let first = *pixels.first()?;
+    pixels.iter().all(|p| *p == first).then_some(first)
 }
 
 /// Encode a tight RGBA tile. `lossy` selects JPEG (for content in motion).

@@ -78,7 +78,7 @@ pub fn run(connect: ConnectOpts, opts: HeadlessOpts) -> Result<()> {
 fn write_ppm(path: &PathBuf, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     out.reserve(w as usize * h as usize * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         out.extend_from_slice(&px[..3]);
     }
     std::fs::write(path, out)?;
