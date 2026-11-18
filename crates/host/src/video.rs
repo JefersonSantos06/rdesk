@@ -1,0 +1,422 @@
+//! Video pipeline: capture → tile diff → encode → one QUIC stream per frame,
+//! gated by client acknowledgements.
+//!
+//! At most [`MAX_IN_FLIGHT`] frames are unacknowledged at once. On a slow link
+//! the frame rate drops instead of latency growing. A frame not acknowledged in
+//! time is reset and its tiles become dirty again, so the picture always
+//! converges without explicit resync.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use rayon::prelude::*;
+use rdesk_common::tiles::{self, Frame, TileHash, TileRect};
+use rdesk_proto::{FrameHeader, Tile, encode_into};
+use tokio::sync::{mpsc, oneshot, watch};
+
+use crate::capture::Capturer;
+
+pub const MAX_IN_FLIGHT: usize = 2;
+/// A tile that changed within this window is sent lossy (JPEG);
+/// once still for this long it is refined losslessly.
+const MOTION_WINDOW: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoSettings {
+    pub monitor: u32,
+    pub max_fps: u8,
+    pub jpeg_quality: u8,
+    /// Incremented to force a full resend.
+    pub epoch: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TileState {
+    /// Hash of what the client has (acknowledged).
+    confirmed: Option<TileHash>,
+    confirmed_lossless: bool,
+    /// Hash currently in flight and in which frame.
+    inflight: Option<(u64, TileHash, bool)>,
+    /// Hash at the previous capture and when it last changed.
+    current: Option<TileHash>,
+    changed_at: Option<Instant>,
+}
+
+/// Pure bookkeeping for which tiles must be sent; independent of I/O so it can be tested.
+pub struct Scheduler {
+    width: u32,
+    height: u32,
+    cols: u32,
+    tiles: Vec<TileState>,
+}
+
+pub struct Planned {
+    pub rect: TileRect,
+    pub lossy: bool,
+    pub hash: TileHash,
+}
+
+impl Scheduler {
+    pub fn new(width: u32, height: u32) -> Self {
+        let (cols, rows) = tiles::grid(width, height);
+        Self { width, height, cols, tiles: vec![TileState::default(); (cols * rows) as usize] }
+    }
+
+    pub fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Decide which tiles of `frame` to send in frame `frame_id`.
+    pub fn plan(&mut self, frame: &Frame, frame_id: u64, now: Instant) -> Vec<Planned> {
+        let hashes: Vec<TileHash> =
+            (0..self.tiles.len()).into_par_iter().map(|i| frame.hash_tile(self.rect(i))).collect();
+        let mut out = Vec::new();
+        for (i, hash) in hashes.into_iter().enumerate() {
+            let t = &mut self.tiles[i];
+            if t.current != Some(hash) {
+                if t.current.is_some() {
+                    t.changed_at = Some(now);
+                }
+                t.current = Some(hash);
+            }
+            let moving = t.changed_at.is_some_and(|c| now.duration_since(c) < MOTION_WINDOW);
+            let inflight_same = t.inflight.is_some_and(|(_, h, _)| h == hash);
+            let send = if t.confirmed != Some(hash) {
+                // Client has something else: send unless this exact content is already on its way.
+                !inflight_same
+            } else {
+                // Client has this content; refine if it was lossy and has settled.
+                !t.confirmed_lossless && !moving && t.inflight.is_none()
+            };
+            if send {
+                let lossy = moving;
+                t.inflight = Some((frame_id, hash, !lossy));
+                out.push(Planned { rect: self.rect(i), lossy, hash });
+            }
+        }
+        out
+    }
+
+    pub fn acked(&mut self, frame_id: u64) {
+        for t in &mut self.tiles {
+            if let Some((f, h, lossless)) = t.inflight
+                && f == frame_id
+            {
+                t.confirmed = Some(h);
+                t.confirmed_lossless = lossless;
+                t.inflight = None;
+            }
+        }
+    }
+
+    pub fn lost(&mut self, frame_id: u64) {
+        for t in &mut self.tiles {
+            if t.inflight.is_some_and(|(f, _, _)| f == frame_id) {
+                t.inflight = None;
+            }
+        }
+    }
+
+    /// Tiles whose content is known to the client but was sent lossy.
+    #[cfg(test)]
+    fn lossy_count(&self) -> usize {
+        self.tiles.iter().filter(|t| t.confirmed.is_some() && !t.confirmed_lossless).count()
+    }
+
+    fn rect(&self, i: usize) -> TileRect {
+        let i = i as u32;
+        tiles::tile_rect(i % self.cols, i / self.cols, self.width, self.height)
+    }
+}
+
+/// Encode planned tiles into one framed buffer (header + tiles) in parallel.
+fn encode_frame(frame: &Frame, header: FrameHeader, planned: &[Planned], quality: u8) -> Result<Vec<u8>> {
+    let encoded: Vec<Result<Tile>> = planned
+        .par_iter()
+        .map_init(Vec::new, |buf, p| {
+            frame.extract(p.rect, buf);
+            tiles::encode_tile(p.rect, buf, p.lossy, quality)
+        })
+        .collect();
+    let mut out = Vec::with_capacity(64 * 1024);
+    encode_into(&header, &mut out)?;
+    for t in encoded {
+        encode_into(&t?, &mut out)?;
+    }
+    Ok(out)
+}
+
+pub struct VideoStats {
+    pub frames: u64,
+    pub bytes: u64,
+}
+
+struct InFlight {
+    sent_at: Instant,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+/// Results reported back by frame-writer tasks.
+enum WriteDone {
+    Ok,
+    Failed(u64),
+}
+
+/// Run the video loop until the connection closes or `settings` is dropped.
+pub async fn run(
+    conn: quinn::Connection,
+    capturer: Capturer,
+    mut settings: watch::Receiver<VideoSettings>,
+    mut acks: mpsc::UnboundedReceiver<u64>,
+    stats: Arc<std::sync::Mutex<VideoStats>>,
+) -> Result<()> {
+    let mut sched: Option<Scheduler> = None;
+    let mut current = *settings.borrow_and_update();
+    let mut next_id: u64 = 1;
+    let mut inflight: HashMap<u64, InFlight> = HashMap::new();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<WriteDone>();
+    let mut last_capture = Instant::now() - Duration::from_secs(1);
+    let mut full_pending = true;
+    let mut consecutive_errors = 0u32;
+
+    loop {
+        // Housekeeping: settings, acks, finished writes, stale frames.
+        if settings.has_changed().unwrap_or(true) {
+            let s = *settings.borrow_and_update();
+            if settings.has_changed().is_err() {
+                return Ok(());
+            }
+            if s.monitor != current.monitor || s.epoch != current.epoch {
+                sched = None;
+                full_pending = true;
+                for (_, f) in inflight.drain() {
+                    if let Some(c) = f.cancel {
+                        let _ = c.send(());
+                    }
+                }
+            }
+            current = s;
+        }
+        while let Ok(id) = acks.try_recv() {
+            if inflight.remove(&id).is_some()
+                && let Some(s) = sched.as_mut()
+            {
+                s.acked(id);
+            }
+        }
+        while let Ok(d) = done_rx.try_recv() {
+            if let WriteDone::Failed(id) = d
+                && inflight.remove(&id).is_some()
+                && let Some(s) = sched.as_mut()
+            {
+                s.lost(id);
+            }
+        }
+        let rtt = conn.rtt();
+        let stale_after = Duration::from_millis(600).max(rtt * 4);
+        let stale: Vec<u64> =
+            inflight.iter().filter(|(_, f)| f.sent_at.elapsed() > stale_after).map(|(id, _)| *id).collect();
+        for id in stale {
+            if let Some(mut f) = inflight.remove(&id) {
+                tracing::debug!("frame {id} stale after {stale_after:?}, resending its tiles");
+                if let Some(c) = f.cancel.take() {
+                    let _ = c.send(());
+                }
+                if let Some(s) = sched.as_mut() {
+                    s.lost(id);
+                }
+            }
+        }
+
+        let interval = Duration::from_secs_f64(1.0 / current.max_fps.clamp(1, 60) as f64);
+        let since = last_capture.elapsed();
+        if inflight.len() >= MAX_IN_FLIGHT || since < interval {
+            let wait = if inflight.len() >= MAX_IN_FLIGHT { Duration::from_millis(50) } else { interval - since };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                Some(id) = acks.recv() => {
+                    if inflight.remove(&id).is_some() && let Some(s) = sched.as_mut() { s.acked(id); }
+                }
+                r = settings.changed() => { if r.is_err() { return Ok(()); } }
+                _ = conn.closed() => return Ok(()),
+            }
+            continue;
+        }
+        last_capture = Instant::now();
+
+        let frame = match capturer.grab(current.monitor).await {
+            Ok(f) => {
+                consecutive_errors = 0;
+                f
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors == 1 || consecutive_errors.is_multiple_of(50) {
+                    tracing::warn!("capture failed ({consecutive_errors}x): {e:#}");
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        if sched.as_ref().is_none_or(|s| s.dims() != (frame.width, frame.height)) {
+            sched = Some(Scheduler::new(frame.width, frame.height));
+            full_pending = true;
+        }
+        let s = sched.as_mut().expect("scheduler just set");
+        let id = next_id;
+        let planned = s.plan(&frame, id, Instant::now());
+        if planned.is_empty() {
+            continue;
+        }
+        next_id += 1;
+        let header = FrameHeader {
+            frame_id: id,
+            monitor_id: current.monitor,
+            width: frame.width,
+            height: frame.height,
+            full: std::mem::take(&mut full_pending),
+        };
+        let quality = current.jpeg_quality;
+        let frame = Arc::new(frame);
+        let buf = {
+            let frame = frame.clone();
+            match tokio::task::spawn_blocking(move || encode_frame(&frame, header, &planned, quality)).await? {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("encoding frame failed: {e:#}");
+                    s.lost(id);
+                    continue;
+                }
+            }
+        };
+        {
+            let mut st = stats.lock().unwrap();
+            st.frames += 1;
+            st.bytes += buf.len() as u64;
+        }
+
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        inflight.insert(id, InFlight { sent_at: Instant::now(), cancel: Some(cancel_tx) });
+        let conn2 = conn.clone();
+        let done = done_tx.clone();
+        tokio::spawn(async move {
+            let ok = write_frame(&conn2, &buf, cancel_rx).await;
+            let _ = done.send(if ok { WriteDone::Ok } else { WriteDone::Failed(id) });
+        });
+    }
+}
+
+async fn write_frame(conn: &quinn::Connection, buf: &[u8], mut cancel: oneshot::Receiver<()>) -> bool {
+    let Ok(mut s) = conn.open_uni().await else { return false };
+    let _ = s.set_priority(10);
+    let r = tokio::select! {
+        r = s.write_all(buf) => r.is_ok(),
+        _ = &mut cancel => false,
+    };
+    if r {
+        s.finish().is_ok()
+    } else {
+        let _ = s.reset(quinn::VarInt::from_u32(0));
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_with(w: u32, h: u32, v: u8) -> Frame {
+        let mut f = Frame::new(w, h);
+        for (i, b) in f.data.iter_mut().enumerate() {
+            if i % 4 != 3 {
+                *b = v.wrapping_add((i / 4 % 251) as u8);
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn first_frame_sends_everything_then_nothing() {
+        let f = frame_with(200, 100, 1);
+        let mut s = Scheduler::new(200, 100);
+        let t0 = Instant::now();
+        let p = s.plan(&f, 1, t0);
+        assert_eq!(p.len(), 4 * 2);
+        assert!(p.iter().all(|p| !p.lossy), "static first frame is lossless");
+        // Not acked yet, same content: nothing new.
+        assert!(s.plan(&f, 2, t0).is_empty());
+        s.acked(1);
+        assert!(s.plan(&f, 3, t0 + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn lost_frame_tiles_are_resent() {
+        let f = frame_with(128, 64, 1);
+        let mut s = Scheduler::new(128, 64);
+        let t0 = Instant::now();
+        assert_eq!(s.plan(&f, 1, t0).len(), 2);
+        s.lost(1);
+        assert_eq!(s.plan(&f, 2, t0).len(), 2);
+    }
+
+    #[test]
+    fn motion_is_lossy_then_refined() {
+        let mut s = Scheduler::new(64, 64);
+        let t0 = Instant::now();
+        let a = frame_with(64, 64, 1);
+        let b = frame_with(64, 64, 9);
+        s.plan(&a, 1, t0);
+        s.acked(1);
+        let p = s.plan(&b, 2, t0 + Duration::from_millis(10));
+        assert_eq!(p.len(), 1);
+        assert!(p[0].lossy);
+        s.acked(2);
+        assert_eq!(s.lossy_count(), 1);
+        // Still moving window: no refinement yet.
+        assert!(s.plan(&b, 3, t0 + Duration::from_millis(100)).is_empty());
+        // Settled: lossless refinement.
+        let p = s.plan(&b, 4, t0 + Duration::from_millis(500));
+        assert_eq!(p.len(), 1);
+        assert!(!p[0].lossy);
+        s.acked(4);
+        assert_eq!(s.lossy_count(), 0);
+        assert!(s.plan(&b, 5, t0 + Duration::from_secs(2)).is_empty());
+    }
+
+    #[test]
+    fn change_during_flight_is_sent_again() {
+        let mut s = Scheduler::new(64, 64);
+        let t0 = Instant::now();
+        s.plan(&frame_with(64, 64, 1), 1, t0);
+        // Content changes before frame 1 is acked: frame 2 must carry it.
+        assert_eq!(s.plan(&frame_with(64, 64, 2), 2, t0).len(), 1);
+        // Late ack for frame 1 must not mark the newer content as confirmed.
+        s.acked(1);
+        assert_eq!(s.plan(&frame_with(64, 64, 2), 3, t0).len(), 0, "frame 2 still in flight");
+        s.lost(2);
+        assert_eq!(s.plan(&frame_with(64, 64, 2), 4, t0).len(), 1);
+    }
+
+    #[test]
+    fn encoded_frame_decodes_to_same_image() {
+        let f = frame_with(130, 70, 3);
+        let mut s = Scheduler::new(130, 70);
+        let planned = s.plan(&f, 1, Instant::now());
+        let header = FrameHeader { frame_id: 1, monitor_id: 0, width: 130, height: 70, full: true };
+        let buf = encode_frame(&f, header, &planned, 80).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let out = rt.block_on(async {
+            let mut r: &[u8] = &buf;
+            let h: FrameHeader = rdesk_proto::expect_msg(&mut r, rdesk_proto::MAX_VIDEO_MSG).await.unwrap();
+            assert_eq!(h, header);
+            let mut fb = Frame::new(h.width, h.height);
+            while let Some(t) = rdesk_proto::read_msg::<_, Tile>(&mut r, rdesk_proto::MAX_VIDEO_MSG).await.unwrap() {
+                fb.apply(&t, &mut Vec::new()).unwrap();
+            }
+            fb
+        });
+        assert!(out.data == f.data);
+    }
+}

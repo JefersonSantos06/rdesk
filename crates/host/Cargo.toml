@@ -1,0 +1,26 @@
+[package]
+name = "rdesk-host"
+description = "rdesk host: screen capture, input injection, clipboard and file service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdesk-proto.workspace = true
+rdesk-common.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+xcap = "0.9"
+enigo = "0.6"
+rayon = "1"
+blake3 = "1"
+rand = "0.8"
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_Power", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

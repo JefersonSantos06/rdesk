@@ -1,0 +1,17 @@
+[package]
+name = "rdesk-proto"
+description = "Wire protocol for rdesk: message types and the length-prefixed postcard codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+proptest.workspace = true
