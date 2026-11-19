@@ -10,15 +10,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const HOST_CONFIG: &str = "host.toml";
 pub const CLIENT_CONFIG: &str = "client.toml";
 pub const AUTHORIZED_KEYS: &str = "authorized_keys";
-pub const KNOWN_HOSTS: &str = "known_hosts";
-pub const HOST_KEY: &str = "host_key.der";
-pub const HOST_CERT: &str = "host_cert.der";
+pub const NETWORK_CONFIG: &str = "network.toml";
+/// The host's secret key (32 bytes); its public half is the host ID.
+pub const HOST_KEY: &str = "host_id.key";
 pub const OPAQUE_SETUP: &str = "opaque_server_setup.bin";
 pub const OPAQUE_PASSWORD: &str = "password.opaque";
 
@@ -76,29 +76,27 @@ pub enum Congestion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TransportTuning {
-    /// QUIC PING interval. Keeps NAT/Tailscale paths warm and detects dead links.
+    /// QUIC PING interval. Keeps NAT mappings warm and detects dead links.
     pub keep_alive_ms: u64,
     /// Connection is declared dead after this long without hearing from the peer.
     pub idle_timeout_ms: u64,
-    /// Largest UDP payload we will send. 1232 fits Tailscale's 1280-byte MTU.
+    /// Upper bound for path MTU discovery (UDP payload bytes). 1452 fits a 1500-byte link.
     pub max_udp_payload: u16,
     pub congestion: Congestion,
 }
 
 impl Default for TransportTuning {
     fn default() -> Self {
-        Self { keep_alive_ms: 1000, idle_timeout_ms: 6000, max_udp_payload: 1232, congestion: Congestion::Cubic }
+        Self { keep_alive_ms: 1000, idle_timeout_ms: 6000, max_udp_payload: 1452, congestion: Congestion::Cubic }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HostConfig {
-    /// Addresses to listen on. `"tailscale"` means "every address `tailscale ip` reports".
-    pub listen: Vec<String>,
+    /// UDP port for direct connections (LAN, port forwarding). Clients that know only the
+    /// host's address use it; through a relay any port works.
     pub port: u16,
-    /// Accept peers outside the Tailscale CGNAT/ULA ranges (e.g. LAN or loopback testing).
-    pub allow_non_tailnet: bool,
     /// Where pushed files land. Defaults to `~/Downloads/rdesk`.
     pub inbox_dir: Option<PathBuf>,
     pub max_fps: u8,
@@ -111,9 +109,7 @@ pub struct HostConfig {
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
-            listen: vec!["tailscale".into()],
             port: rdesk_proto::DEFAULT_PORT,
-            allow_non_tailnet: false,
             inbox_dir: None,
             max_fps: 30,
             jpeg_quality: 70,
@@ -149,7 +145,11 @@ pub enum AuthPref {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HostEntry {
-    /// `host:port` or `host` (default port). MagicDNS names work.
+    /// The host's ID (`rdesk host id` on that machine). Connections are authenticated
+    /// against it, so it is also what makes the host trusted.
+    pub id: String,
+    /// Optional direct address, `host:port` or `host` (default port): LAN or port forwarding.
+    /// Not needed when a relay is configured.
     pub addr: String,
     pub auth: AuthPref,
     /// SHA256 fingerprint (as printed by `rdesk agent-keys`) of the agent key to use.
@@ -190,6 +190,25 @@ impl Default for AppSettings {
     }
 }
 
+/// `network.toml`: how this computer reaches others (shared by the host and the client).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct NetworkConfig {
+    /// Your private relay, e.g. `https://relay.example.com`. Unset: no relay, so computers
+    /// are reached only through their address (LAN, port forwarding).
+    pub relay: Option<String>,
+}
+
+pub fn load_network() -> NetworkConfig {
+    match load_toml(NETWORK_CONFIG) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("{e:#}");
+            NetworkConfig::default()
+        }
+    }
+}
+
 pub fn load_toml<T: for<'de> Deserialize<'de> + Default>(name: &str) -> Result<T> {
     let path = config_path(name)?;
     match std::fs::read_to_string(&path) {
@@ -205,53 +224,18 @@ pub fn save_toml<T: Serialize>(name: &str, value: &T) -> Result<()> {
     write_private(&path, s.as_bytes())
 }
 
-/// `known_hosts`: one `<name> <sha256-hex>` per line.
-#[derive(Debug, Default, Clone)]
-pub struct KnownHosts {
-    pub entries: BTreeMap<String, [u8; 32]>,
+/// Host IDs are shown as 64 lowercase hex characters.
+pub fn format_host_id(id: &[u8; 32]) -> String {
+    hex::encode(id)
 }
 
-impl KnownHosts {
-    pub fn load() -> Result<Self> {
-        let path = config_path(KNOWN_HOSTS)?;
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e.into()),
-        };
-        let mut entries = BTreeMap::new();
-        for (i, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let mut parts = line.split_whitespace();
-            let (Some(name), Some(fp)) = (parts.next(), parts.next()) else {
-                bail!("{}:{}: expected `<name> <fingerprint>`", path.display(), i + 1);
-            };
-            entries.insert(name.to_string(), parse_fingerprint(fp)?);
-        }
-        Ok(Self { entries })
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let mut out = String::from("# rdesk known hosts: <name> <host certificate SHA-256>\n");
-        for (name, fp) in &self.entries {
-            out.push_str(&format!("{name} {}\n", format_fingerprint(fp)));
-        }
-        write_private(&config_path(KNOWN_HOSTS)?, out.as_bytes())
-    }
-}
-
-/// Fingerprints are printed as `SHA256:` + lowercase hex.
-pub fn format_fingerprint(fp: &[u8; 32]) -> String {
-    format!("SHA256:{}", hex::encode(fp))
-}
-
-pub fn parse_fingerprint(s: &str) -> Result<[u8; 32]> {
-    let hexpart = s.strip_prefix("SHA256:").unwrap_or(s).replace(':', "");
-    let bytes = hex::decode(hexpart.trim()).context("fingerprint is not hex")?;
-    bytes.try_into().map_err(|_| anyhow::anyhow!("fingerprint must be 32 bytes (SHA-256)"))
+/// Accepts the hex form (spaces and colons ignored) or iroh's base32 form.
+pub fn parse_host_id(s: &str) -> Result<[u8; 32]> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
+    let clean = if clean.len() == 64 { clean.to_ascii_lowercase() } else { clean };
+    let key: iroh::EndpointId =
+        clean.parse().map_err(|_| anyhow::anyhow!("{s:?} is not a host ID (64 hex characters)"))?;
+    Ok(*key.as_bytes())
 }
 
 #[cfg(test)]
@@ -259,12 +243,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fingerprint_roundtrip() {
-        let fp = [0xab; 32];
-        let s = format_fingerprint(&fp);
-        assert_eq!(parse_fingerprint(&s).unwrap(), fp);
-        assert_eq!(parse_fingerprint(&hex::encode(fp)).unwrap(), fp);
-        assert!(parse_fingerprint("SHA256:abcd").is_err());
+    fn host_id_forms() {
+        let id = *iroh::SecretKey::generate().public().as_bytes();
+        let s = format_host_id(&id);
+        assert_eq!(s.len(), 64);
+        assert_eq!(parse_host_id(&s).unwrap(), id);
+        assert_eq!(parse_host_id(&format!("  {} ", s.to_uppercase())).unwrap(), id);
+        assert!(parse_host_id("SHA256:abcd").is_err());
+        assert!(parse_host_id("").is_err());
     }
 
     #[test]
@@ -273,6 +259,8 @@ mod tests {
         assert_eq!(c.port, 9000);
         assert_eq!(c.transport.congestion, Congestion::Bbr);
         assert_eq!(c.transport.idle_timeout_ms, 6000);
-        assert_eq!(c.listen, vec!["tailscale".to_string()]);
+        // Settings of older versions are ignored, not an error.
+        let old: HostConfig = toml::from_str("listen = [\"tailscale\"]\nallow_non_tailnet = true\n").unwrap();
+        assert_eq!(old.port, rdesk_proto::DEFAULT_PORT);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rdesk-common"
-description = "Shared rdesk logic: QUIC transport, auth handshake, config, tile codec, file transfer"
+description = "Shared rdesk logic: iroh/QUIC transport, auth handshake, config, tile codec, file transfer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,9 +15,9 @@ postcard.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
-rcgen = "0.14"
+# QUIC with hole punching and relays; `noq-proto` (iroh's QUIC) for the congestion controllers.
+iroh = { version = "1.4", default-features = false, features = ["tls-ring", "portmapper", "fast-apple-datapath"] }
+noq-proto = { version = "1.4", default-features = false }
 ring = "0.17"
 sha2 = "0.10"
 hmac = "0.12"
@@ -45,5 +45,7 @@ zune-jpeg = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+# An in-process relay for the end-to-end tests.
+iroh-relay = { version = "1.4", default-features = false, features = ["server", "tls-ring"] }
 rsa = { version = "0.9", features = ["sha2"] }
 tokio = { workspace = true, features = ["test-util"] }

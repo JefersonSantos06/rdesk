@@ -1,5 +1,6 @@
 //! `rdesk` command line.
 
+#[cfg(feature = "host")]
 use std::io::Write as _;
 use std::path::PathBuf;
 #[cfg(feature = "client")]
@@ -10,9 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use rdesk_common::agent::{self, Agent};
 #[cfg(feature = "client")]
 use rdesk_common::auth;
-use rdesk_common::config::{
-    self, AuthPref, ClientConfig, HostEntry, KnownHosts, format_fingerprint, parse_fingerprint,
-};
+use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfig, format_host_id, parse_host_id};
 #[cfg(feature = "client")]
 use rdesk_common::transport;
 #[cfg(feature = "host")]
@@ -23,12 +22,12 @@ use ssh_key::PublicKey;
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
-#[command(name = "rdesk", version, about = "Remote desktop over QUIC + Tailscale, authenticated with 1Password")]
+#[command(name = "rdesk", version, about = "Remote desktop over QUIC (iroh), authenticated with 1Password")]
 struct Cli {
     /// More logging (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
-    /// Without a command: open the launcher window (saved computers and tailnet devices).
+    /// Without a command: open the app window (saved computers, this computer's host, settings).
     #[command(subcommand)]
     cmd: Option<Command>,
 }
@@ -55,12 +54,15 @@ enum Command {
         #[arg(value_parser = ["off", "login", "login-admin"])]
         mode: String,
     },
-    /// Open a viewer window to a host (alias from client.toml or address).
+    /// Open a viewer window to a host: a saved name, a host ID, or ID@address.
     #[cfg(feature = "client")]
     Connect(ConnectArgs),
-    /// Manage saved hosts (client.toml) and trusted fingerprints.
+    /// Manage saved hosts (client.toml).
     #[command(subcommand)]
     Hosts(HostsCmd),
+    /// Network settings shared by the host and the client (network.toml).
+    #[command(subcommand)]
+    Net(NetCmd),
     /// List the keys your SSH agent (1Password) offers.
     AgentKeys {
         #[arg(long)]
@@ -101,20 +103,15 @@ enum Command {
 enum HostCmd {
     /// Create the host identity and default config.
     Init {
-        /// Regenerate the host certificate (clients will need to re-trust it).
+        /// Regenerate the host identity: the host gets a new ID (give it to your clients again).
         #[arg(long)]
         force: bool,
     },
     /// Run the host (foreground).
     Run {
-        /// Listen address(es); default from host.toml ("tailscale").
-        #[arg(long)]
-        listen: Vec<String>,
+        /// UDP port for direct connections (default from host.toml, 7420).
         #[arg(long)]
         port: Option<u16>,
-        /// Accept clients outside the tailnet (LAN / loopback testing).
-        #[arg(long)]
-        allow_non_tailnet: bool,
         /// Use a synthetic test picture instead of the real screen.
         #[arg(long, hide = true)]
         fake_capture: bool,
@@ -122,8 +119,9 @@ enum HostCmd {
         #[arg(long, hide = true)]
         fake_input: bool,
     },
-    /// Print this host's certificate fingerprint (compare it on first connect).
-    Fingerprint,
+    /// Print this host's ID (clients add the host with it).
+    #[command(alias = "fingerprint")]
+    Id,
     /// Authorize an SSH public key (OpenSSH line, .pub file, or from the agent).
     AddKey {
         key: Option<String>,
@@ -154,10 +152,14 @@ enum HostCmd {
 
 #[derive(Subcommand)]
 enum HostsCmd {
-    /// Save a host: `rdesk hosts add casa casa-pc.tailnet-xyz.ts.net`
+    /// Save a host: `rdesk hosts add casa <host ID> [--addr 192.168.0.10]`
     Add {
         alias: String,
-        addr: String,
+        /// The host's ID (`rdesk host id` on that machine).
+        id: String,
+        /// Direct address (LAN, port forwarding); optional with a relay.
+        #[arg(long)]
+        addr: Option<String>,
         #[arg(long, value_enum, default_value = "auto")]
         auth: AuthArg,
         /// Agent key fingerprint to use (SHA256:...).
@@ -171,11 +173,14 @@ enum HostsCmd {
     Remove {
         alias: String,
     },
-    /// Pin a host fingerprint without connecting.
-    Trust {
-        name: String,
-        fingerprint: String,
-    },
+}
+
+#[derive(Subcommand)]
+enum NetCmd {
+    /// Show the network settings and whether the relay answers.
+    Status,
+    /// Use your private relay (`https://relay.example.com`), or `off` for none.
+    Relay { url: String },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -210,9 +215,9 @@ struct AuthArgs {
     /// Unencrypted OpenSSH private key file to use instead of the agent.
     #[arg(long)]
     identity: Option<PathBuf>,
-    /// Expected host fingerprint (skips the trust prompt on first connect).
+    /// Host ID, when the target is an address (`--id <ID> 192.168.0.10`).
     #[arg(long)]
-    fingerprint: Option<String>,
+    id: Option<String>,
 }
 
 #[cfg(feature = "client")]
@@ -251,7 +256,7 @@ struct ConnectArgs {
 fn init_logging(verbose: u8) {
     use tracing_subscriber::EnvFilter;
     let default = match verbose {
-        0 => "warn,rdesk=info,rdesk_host=info,rdesk_client=info,rdesk_common=info",
+        0 => "warn,rdesk=info,rdesk_host=info,rdesk_client=info,rdesk_common=info,iroh::socket::transports::relay=off",
         1 => "info,rdesk=debug,rdesk_host=debug,rdesk_client=debug,rdesk_common=debug",
         _ => "debug",
     };
@@ -277,7 +282,7 @@ fn init_app_logging(verbose: u8) {
         return init_logging(verbose);
     };
     let default = if verbose == 0 {
-        "warn,rdesk=info,rdesk_host=info,rdesk_client=info,rdesk_common=info"
+        "warn,rdesk=info,rdesk_host=info,rdesk_client=info,rdesk_common=info,iroh::socket::transports::relay=off"
     } else {
         "info,rdesk=debug,rdesk_host=debug,rdesk_client=debug,rdesk_common=debug"
     };
@@ -319,6 +324,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
         Command::Hosts(h) => hosts_cmd(h),
+        Command::Net(n) => net_cmd(n),
         Command::AgentKeys { agent_sock } => runtime()?.block_on(agent_keys(agent_sock)),
         #[cfg(feature = "client")]
         Command::Send { target, files, auth } => runtime()?.block_on(cli_send(target, files, auth)),
@@ -363,6 +369,7 @@ fn detach_console_if_owned() {
 #[cfg(all(not(windows), feature = "client"))]
 fn detach_console_if_owned() {}
 
+#[cfg(feature = "host")]
 fn prompt(q: &str) -> Result<String> {
     eprint!("{q}");
     std::io::stderr().flush()?;
@@ -390,7 +397,7 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
                 if had && !force { "Host identity already exists." } else { "Generated a new host identity." }
             );
             println!("Config directory: {}", config::config_dir()?.display());
-            println!("Fingerprint: {}", format_fingerprint(&fp));
+            println!("Host ID: {}", format_host_id(&fp));
             println!();
             println!("Next steps:");
             println!("  rdesk host add-key --from-agent      # authorize your 1Password SSH key");
@@ -398,17 +405,13 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             println!("  rdesk host run                       # or just `rdesk` for the app");
             Ok(())
         }
-        HostCmd::Run { listen, port, allow_non_tailnet, fake_capture, fake_input } => {
-            runtime()?.block_on(rdesk_host::run(rdesk_host::RunOpts {
-                listen,
-                port,
-                allow_non_tailnet,
-                fake_capture: fake_capture || std::env::var_os("RDESK_FAKE_CAPTURE").is_some(),
-                fake_input: fake_input || std::env::var_os("RDESK_FAKE_INPUT").is_some(),
-            }))
-        }
-        HostCmd::Fingerprint => {
-            println!("{}", format_fingerprint(&HostIdentity::load()?.fingerprint()));
+        HostCmd::Run { port, fake_capture, fake_input } => runtime()?.block_on(rdesk_host::run(rdesk_host::RunOpts {
+            port,
+            fake_capture: fake_capture || std::env::var_os("RDESK_FAKE_CAPTURE").is_some(),
+            fake_input: fake_input || std::env::var_os("RDESK_FAKE_INPUT").is_some(),
+        })),
+        HostCmd::Id => {
+            println!("{}", format_host_id(&HostIdentity::load()?.fingerprint()));
             Ok(())
         }
         HostCmd::AddKey { key, from_agent, key_fp, agent_sock } => {
@@ -510,40 +513,75 @@ async fn host_check() -> Result<()> {
 
 fn hosts_cmd(cmd: HostsCmd) -> Result<()> {
     match cmd {
-        HostsCmd::Add { alias, addr, auth, key, password_ref } => {
+        HostsCmd::Add { alias, id, addr, auth, key, password_ref } => {
+            let id = format_host_id(&parse_host_id(&id)?);
             config::ensure_config_dir()?;
             let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-            cfg.hosts
-                .insert(alias.clone(), HostEntry { addr, auth: auth.into(), key, password_ref, ..Default::default() });
+            let addr = addr.unwrap_or_default();
+            if addr.is_empty() && config::load_network().relay.is_none() {
+                eprintln!(
+                    "note: no relay configured, so {alias} is reachable only with --addr (see `rdesk net relay`)"
+                );
+            }
+            cfg.hosts.insert(
+                alias.clone(),
+                HostEntry { id, addr, auth: auth.into(), key, password_ref, ..Default::default() },
+            );
             config::save_toml(config::CLIENT_CONFIG, &cfg)?;
             println!("Saved {alias}. Connect with: rdesk connect {alias}");
             Ok(())
         }
         HostsCmd::List => {
             let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-            let kh = KnownHosts::load()?;
             for (alias, e) in &cfg.hosts {
-                let fp = kh.entries.get(alias).map(format_fingerprint).unwrap_or_else(|| "(not trusted yet)".into());
-                println!("{alias}\t{}\t{:?}\t{fp}", e.addr, e.auth);
+                let addr = if e.addr.is_empty() { "-" } else { e.addr.as_str() };
+                let id = if e.id.is_empty() { "(no ID)" } else { e.id.as_str() };
+                println!("{alias}\t{id}\t{addr}\t{:?}", e.auth);
             }
             Ok(())
         }
         HostsCmd::Remove { alias } => {
             let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
             cfg.hosts.remove(&alias);
-            config::save_toml(config::CLIENT_CONFIG, &cfg)?;
-            let mut kh = KnownHosts::load()?;
-            kh.entries.remove(&alias);
-            kh.save()?;
-            Ok(())
-        }
-        HostsCmd::Trust { name, fingerprint } => {
-            config::ensure_config_dir()?;
-            let mut kh = KnownHosts::load()?;
-            kh.entries.insert(name, parse_fingerprint(&fingerprint)?);
-            kh.save()
+            config::save_toml(config::CLIENT_CONFIG, &cfg)
         }
     }
+}
+
+fn net_cmd(cmd: NetCmd) -> Result<()> {
+    match cmd {
+        NetCmd::Relay { url } => {
+            let mut net = config::load_network();
+            net.relay = if matches!(url.trim(), "" | "off" | "none") { None } else { Some(url.trim().to_string()) };
+            rdesk_common::transport::relay_url(&net)?;
+            config::ensure_config_dir()?;
+            config::save_toml(config::NETWORK_CONFIG, &net)?;
+            match &net.relay {
+                Some(u) => println!("Relay set to {u}. Restart running hosts to use it."),
+                None => println!("No relay: computers are reached by address only."),
+            }
+            Ok(())
+        }
+        NetCmd::Status => runtime()?.block_on(net_status()),
+    }
+}
+
+async fn net_status() -> Result<()> {
+    use rdesk_common::transport::{self, Role};
+    let net = config::load_network();
+    println!("Config:  {}", config::config_path(config::NETWORK_CONFIG)?.display());
+    let Some(url) = transport::relay_url(&net)? else {
+        println!("Relay:   none (direct addresses only)");
+        return Ok(());
+    };
+    let ep = transport::bind(None, &net, &Default::default(), Role::Client).await?;
+    let r = transport::wait_relay(&ep, &net, std::time::Duration::from_secs(8)).await;
+    ep.close().await;
+    match r {
+        Ok(_) => println!("Relay:   {url} (reachable)"),
+        Err(e) => println!("Relay:   {url} — {e:#}"),
+    }
+    Ok(())
 }
 
 async fn agent_keys(sock: Option<String>) -> Result<()> {
@@ -560,14 +598,33 @@ async fn agent_keys(sock: Option<String>) -> Result<()> {
 struct Target {
     name: String,
     entry: HostEntry,
+    id: [u8; 32],
     cfg: ClientConfig,
+    net: NetworkConfig,
 }
 
+/// `target` is a saved name, a host ID, `ID@address`, or an address with `--id`.
 #[cfg(feature = "client")]
 fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-    let mut entry =
-        cfg.hosts.get(target).cloned().unwrap_or_else(|| HostEntry { addr: target.to_string(), ..Default::default() });
+    let mut entry = match cfg.hosts.get(target) {
+        Some(e) => e.clone(),
+        None => {
+            let (id, addr) = match (target.split_once('@'), &a.id) {
+                (Some((id, addr)), _) => (id.to_string(), addr.to_string()),
+                (None, Some(id)) => (id.clone(), target.to_string()),
+                (None, None) => (target.to_string(), String::new()),
+            };
+            if parse_host_id(&id).is_err() {
+                bail!("{target}: not a saved computer (rdesk hosts list) nor a host ID; use ID, ID@address or --id");
+            }
+            HostEntry { id, addr, ..Default::default() }
+        }
+    };
+    if let Some(id) = &a.id {
+        entry.id = id.clone();
+    }
+    let id = parse_host_id(&entry.id).with_context(|| format!("{target} has no valid host ID"))?;
     if let Some(x) = a.auth {
         entry.auth = x.into();
     }
@@ -583,62 +640,22 @@ fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     if a.identity.is_some() {
         entry.identity = a.identity.clone();
     }
-    Ok(Target { name: target.to_string(), entry, cfg })
-}
-
-/// Return the pinned fingerprint for `t`, asking the user to trust it on first contact.
-#[cfg(feature = "client")]
-async fn ensure_trusted(t: &Target, expected: Option<&str>) -> Result<[u8; 32]> {
-    let mut kh = KnownHosts::load()?;
-    if let Some(fp) = expected {
-        let fp = parse_fingerprint(fp)?;
-        if let Some(old) = kh.entries.get(&t.name)
-            && *old != fp
-        {
-            bail!("{} is already trusted with a different fingerprint; run `rdesk hosts trust` to replace it", t.name);
-        }
-        config::ensure_config_dir()?;
-        kh.entries.insert(t.name.clone(), fp);
-        kh.save()?;
-        return Ok(fp);
-    }
-    if let Some(fp) = kh.entries.get(&t.name) {
-        return Ok(*fp);
-    }
-    let addr = transport::resolve(&t.entry.addr, rdesk_proto::DEFAULT_PORT).await?;
-    let ep = transport::client_endpoint(&addr)?;
-    let c = transport::connect(&ep, addr, None, &t.cfg.transport, Duration::from_secs(10)).await?;
-    let fp = c.host_fingerprint;
-    c.conn.close(transport::close::UNTRUSTED_HOST, b"checking fingerprint");
-    eprintln!("First connection to {} ({addr}).", t.name);
-    eprintln!("Host fingerprint: {}", format_fingerprint(&fp));
-    eprintln!("Compare with `rdesk host fingerprint` on that machine.");
-    let ans = prompt("Trust this host? [y/N] ")?;
-    if !matches!(ans.to_lowercase().as_str(), "y" | "yes" | "s" | "sim") {
-        bail!("host not trusted");
-    }
-    config::ensure_config_dir()?;
-    kh.entries.insert(t.name.clone(), fp);
-    kh.save()?;
-    Ok(fp)
+    Ok(Target { name: target.to_string(), entry, id, cfg, net: config::load_network() })
 }
 
 #[cfg(feature = "client")]
 fn connect(a: ConnectArgs) -> Result<()> {
     use rdesk_client::conn::ConnectOpts;
     let t = resolve_target(&a.target, &a.auth)?;
-    let pin = {
-        let rt = runtime()?;
-        rt.block_on(ensure_trusted(&t, a.auth.fingerprint.as_deref()))?
-    };
     let opts = ConnectOpts {
         name: t.name.clone(),
         // The window asks in a dialog; --headless asks on the terminal.
         ask_password_in_ui: !a.headless,
         entry: t.entry.clone(),
-        pin,
+        id: t.id,
         monitor: a.monitor,
         transport: t.cfg.transport.clone(),
+        net: t.net.clone(),
         clipboard: !a.no_clipboard,
     };
     if a.headless {
@@ -663,13 +680,41 @@ fn connect(a: ConnectArgs) -> Result<()> {
     })
 }
 
-/// Connect + authenticate without the video/UI machinery, for one-shot CLI commands.
+/// A logged-in connection for one-shot CLI commands (no video/UI machinery).
 #[cfg(feature = "client")]
-async fn cli_session(t: &Target, a: &AuthArgs) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let pin = ensure_trusted(t, a.fingerprint.as_deref()).await?;
-    let addr = transport::resolve(&t.entry.addr, rdesk_proto::DEFAULT_PORT).await?;
-    let ep = transport::client_endpoint(&addr)?;
-    let c = transport::connect(&ep, addr, Some(pin), &t.cfg.transport, Duration::from_secs(10)).await?;
+struct CliSession {
+    ep: transport::Endpoint,
+    conn: transport::Connection,
+    w: transport::SendStream,
+    r: transport::RecvStream,
+}
+
+#[cfg(feature = "client")]
+impl CliSession {
+    async fn close(self) {
+        self.conn.close(transport::close::NORMAL, b"done");
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.ep.close()).await;
+    }
+}
+
+#[cfg(feature = "client")]
+async fn cli_session(t: &Target) -> Result<CliSession> {
+    let ep = transport::bind(None, &t.net, &t.cfg.transport, transport::Role::Client).await?;
+    match cli_login(t, &ep).await {
+        Ok((conn, w, r)) => Ok(CliSession { ep, conn, w, r }),
+        Err(e) => {
+            let _ = tokio::time::timeout(Duration::from_secs(3), ep.close()).await;
+            Err(e)
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+async fn cli_login(
+    t: &Target,
+    ep: &transport::Endpoint,
+) -> Result<(transport::Connection, transport::SendStream, transport::RecvStream)> {
+    let c = transport::connect(ep, t.id, Some(&t.entry.addr), &t.net, Duration::from_secs(10)).await?;
     let (mut w, mut r) = c.conn.open_bi().await?;
     let used = std::sync::Arc::new(std::sync::Mutex::new(None));
     let asker = rdesk_client::conn::password_asker(&t.name, &t.entry, used.clone(), None);
@@ -695,26 +740,26 @@ fn progress_printer(name: String) -> impl FnMut(u64, u64) + Send {
 #[cfg(feature = "client")]
 async fn cli_send(target: String, files: Vec<PathBuf>, a: AuthArgs) -> Result<()> {
     let t = resolve_target(&target, &a)?;
-    let (conn, _w, _r) = cli_session(&t, &a).await?;
+    let s = cli_session(&t).await?;
     for f in files {
         let mut p = progress_printer(f.display().to_string());
-        let saved = rdesk_common::files::push(&conn, &f, &mut p).await?;
+        let saved = rdesk_common::files::push(&s.conn, &f, &mut p).await?;
         eprintln!();
         println!("{} → host inbox as {saved}", f.display());
     }
-    conn.close(transport::close::NORMAL, b"done");
+    s.close().await;
     Ok(())
 }
 
 #[cfg(feature = "client")]
 async fn cli_get(target: String, remote: String, out: PathBuf, a: AuthArgs) -> Result<()> {
     let t = resolve_target(&target, &a)?;
-    let (conn, _w, _r) = cli_session(&t, &a).await?;
+    let s = cli_session(&t).await?;
     let mut p = progress_printer(remote.clone());
-    let path = rdesk_common::files::pull(&conn, &remote, &out, &mut p).await?;
+    let path = rdesk_common::files::pull(&s.conn, &remote, &out, &mut p).await?;
     eprintln!();
     println!("saved {}", path.display());
-    conn.close(transport::close::NORMAL, b"done");
+    s.close().await;
     Ok(())
 }
 
@@ -722,10 +767,10 @@ async fn cli_get(target: String, remote: String, out: PathBuf, a: AuthArgs) -> R
 async fn cli_ls(target: String, path: String, a: AuthArgs) -> Result<()> {
     use rdesk_proto::{ClientMsg, HostMsg};
     let t = resolve_target(&target, &a)?;
-    let (conn, mut w, mut r) = cli_session(&t, &a).await?;
-    rdesk_proto::write_msg(&mut w, &ClientMsg::ListDir { req: 1, path }).await?;
+    let mut s = cli_session(&t).await?;
+    rdesk_proto::write_msg(&mut s.w, &ClientMsg::ListDir { req: 1, path }).await?;
     loop {
-        match rdesk_proto::expect_msg::<_, HostMsg>(&mut r, rdesk_proto::MAX_CONTROL_MSG).await? {
+        match rdesk_proto::expect_msg::<_, HostMsg>(&mut s.r, rdesk_proto::MAX_CONTROL_MSG).await? {
             HostMsg::DirListing { path, result, .. } => {
                 println!("{path}");
                 for e in result.map_err(|e| anyhow!(e))? {
@@ -740,6 +785,6 @@ async fn cli_ls(target: String, path: String, a: AuthArgs) -> Result<()> {
             _ => continue,
         }
     }
-    conn.close(transport::close::NORMAL, b"done");
+    s.close().await;
     Ok(())
 }

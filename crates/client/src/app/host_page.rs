@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{Color32, RichText};
 use rdesk_common::agent::{self, Agent};
-use rdesk_common::config::{self, HostConfig, format_fingerprint};
+use rdesk_common::config::{self, HostConfig, format_host_id};
 use rdesk_common::directory;
 use rdesk_host::admin::{self, CheckLine};
 use rdesk_host::{HostHandle, HostState, HostStatus, Reporter, RunOpts};
@@ -52,7 +52,6 @@ pub(super) struct HostPage {
     reporter: Reporter,
     handle: Option<HostHandle>,
     cfg: HostConfig,
-    custom_listen: String,
     keys: Vec<PublicKey>,
     has_password: bool,
     fingerprint: Option<[u8; 32]>,
@@ -82,7 +81,6 @@ impl HostPage {
             reporter,
             handle: None,
             cfg: HostConfig::default(),
-            custom_listen: String::new(),
             keys: Vec::new(),
             has_password: false,
             fingerprint: None,
@@ -99,14 +97,6 @@ impl HostPage {
 
     fn reload(&mut self) {
         self.cfg = admin::load_config().unwrap_or_default();
-        self.custom_listen = self
-            .cfg
-            .listen
-            .iter()
-            .filter(|l| !l.eq_ignore_ascii_case("tailscale"))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
         self.keys = admin::load_keys().unwrap_or_default();
         self.has_password = admin::has_password();
         self.fingerprint = admin::fingerprint().ok();
@@ -131,14 +121,14 @@ impl HostPage {
             (_, Some(s)) if self.running() => format!("in use by {}", s.client),
             (HostState::Listening(_), _) => "on".into(),
             (HostState::Starting, _) => "starting".into(),
-            (HostState::WaitingForTailscale(_), _) => "waiting for Tailscale".into(),
             (HostState::Failed(_), _) => "error".into(),
             (HostState::Stopped, _) => "off".into(),
         }
     }
 
+    /// The host ID, as clients enter it.
     pub(super) fn fingerprint_text(&self) -> Option<String> {
-        self.fingerprint.or(self.status().fingerprint).map(|f| format_fingerprint(&f))
+        self.fingerprint.or(self.status().fingerprint).map(|f| format_host_id(&f))
     }
 
     pub(super) fn start(&mut self) {
@@ -163,7 +153,8 @@ impl HostPage {
         remember_enabled(false);
     }
 
-    fn restart(&mut self) {
+    /// Restart if running (after a settings change).
+    pub(super) fn restart(&mut self) {
         if let Some(h) = self.handle.take() {
             self.rt.block_on(h.shutdown());
             self.start();
@@ -250,7 +241,6 @@ impl HostPage {
             }
             HostState::Listening(_) => (GREEN, "On: ready for connections".to_string()),
             HostState::Starting => (ORANGE, "Starting…".to_string()),
-            HostState::WaitingForTailscale(e) => (ORANGE, format!("Waiting for Tailscale ({e})")),
             HostState::Failed(e) => (RED, format!("Not running: {e}")),
             HostState::Stopped => (Color32::GRAY, "Off".to_string()),
         };
@@ -267,22 +257,32 @@ impl HostPage {
                     }
                 });
             });
-            if let HostState::Listening(addrs) = &st.state
-                && running
-            {
-                ui.label(format!(
-                    "Listening on {}",
-                    addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
-                ));
-            }
             if let Some(fp) = self.fingerprint_text() {
                 ui.horizontal(|ui| {
-                    ui.label("Fingerprint:");
+                    ui.label("Host ID:");
                     ui.label(RichText::new(&fp).monospace().small());
-                    if ui.small_button("Copy").on_hover_text("Compare it on the first connection").clicked() {
+                    if ui.small_button("Copy").on_hover_text("Others add this computer with this ID").clicked() {
                         ui.ctx().copy_text(fp.clone());
                     }
                 });
+            }
+            if let HostState::Listening(addrs) = &st.state
+                && running
+            {
+                let port = addrs.first().map(|a| a.port()).unwrap_or_default();
+                match &st.relay {
+                    Some(Ok(url)) => {
+                        ui.label(format!("Reachable through the relay {url}; direct connections on UDP {port}."));
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(ORANGE, format!("Relay unreachable ({e}); direct connections on UDP {port}."));
+                    }
+                    None => {
+                        ui.label(format!(
+                            "No relay: others need this computer's address (LAN or port forwarding, UDP {port})."
+                        ));
+                    }
+                }
             }
             if cfg!(windows) {
                 ui.horizontal(|ui| {
@@ -313,7 +313,7 @@ impl HostPage {
                     ui.label(format!(
                         "{} from {} · {} · since {}",
                         s.client,
-                        s.peer.ip(),
+                        s.peer,
                         s.method,
                         directory::ago(unix(s.since), unix(SystemTime::now()))
                     ));
@@ -382,27 +382,10 @@ impl HostPage {
 
     fn options_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(RichText::new("Options").strong().size(16.0)).default_open(false).show(ui, |ui| {
-            let mut tailscale = self.cfg.listen.iter().any(|l| l.eq_ignore_ascii_case("tailscale"));
             egui::Grid::new("host-opts").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Listen on");
-                ui.vertical(|ui| {
-                    ui.checkbox(&mut tailscale, "Tailscale addresses (recommended)");
-                    ui.horizontal(|ui| {
-                        ui.label("Other addresses:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.custom_listen)
-                                .hint_text("e.g. 192.168.1.10, 0.0.0.0")
-                                .desired_width(220.0),
-                        );
-                    });
-                });
-                ui.end_row();
                 ui.label("Port");
-                ui.add(egui::DragValue::new(&mut self.cfg.port).range(1..=65535));
-                ui.end_row();
-                ui.label("Outside the tailnet");
-                ui.checkbox(&mut self.cfg.allow_non_tailnet, "accept connections from non-Tailscale addresses")
-                    .on_hover_text("Only for a LAN you trust; logins still need the password or a key.");
+                ui.add(egui::DragValue::new(&mut self.cfg.port).range(1..=65535))
+                    .on_hover_text("UDP port for direct connections (LAN, port forwarding)");
                 ui.end_row();
                 ui.label("Received files");
                 ui.horizontal(|ui| {
@@ -424,25 +407,15 @@ impl HostPage {
                 ui.checkbox(&mut self.cfg.clipboard, "share text in both directions");
                 ui.end_row();
             });
-            let mut listen: Vec<String> = Vec::new();
-            if tailscale {
-                listen.push("tailscale".into());
-            }
-            listen.extend(self.custom_listen.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
-            self.cfg.listen = listen;
             ui.horizontal(|ui| {
                 if ui.button("Save options").clicked() {
-                    if self.cfg.listen.is_empty() {
-                        self.notify("Choose at least one address to listen on.", true);
-                    } else {
-                        match admin::save_config(&self.cfg) {
-                            Ok(()) => {
-                                let was = self.running();
-                                self.restart();
-                                self.notify(if was { "Saved; host restarted." } else { "Saved." }, false);
-                            }
-                            Err(e) => self.notify(format!("Saving: {e:#}"), true),
+                    match admin::save_config(&self.cfg) {
+                        Ok(()) => {
+                            let was = self.running();
+                            self.restart();
+                            self.notify(if was { "Saved; host restarted." } else { "Saved." }, false);
                         }
+                        Err(e) => self.notify(format!("Saving: {e:#}"), true),
                     }
                 }
                 if ui.button("Revert").clicked() {
@@ -452,7 +425,7 @@ impl HostPage {
             ui.add_space(8.0);
             if ui
                 .button("New host identity…")
-                .on_hover_text("Every client will have to trust this computer again")
+                .on_hover_text("This computer gets a new host ID; others must be given the new one")
                 .clicked()
             {
                 self.dialog = Some(Dialog::NewIdentity);
@@ -532,7 +505,7 @@ impl HostPage {
                 let m = egui::Modal::new(egui::Id::unique("host-password")).show(ctx, |ui| {
                     ui.set_width(460.0);
                     ui.heading("Password for this computer");
-                    ui.label("People who know it can control this computer (over Tailscale).");
+                    ui.label("People who know it can control this computer.");
                     ui.label(
                         "Only a derived record is stored (OPAQUE + Argon2id); the password itself never leaves the client.",
                     );
@@ -713,7 +686,7 @@ impl HostPage {
                 let r = confirm(
                     ctx,
                     "Create a new host identity?",
-                    "Every computer that connects here will show \"identity changed\" and must trust the new fingerprint.",
+                    "This computer gets a new host ID. Others can no longer reach it until they are given the new ID.",
                     "Create new identity",
                 );
                 if let Some(yes) = r {
@@ -722,7 +695,7 @@ impl HostPage {
                             Ok(fp) => {
                                 self.fingerprint = Some(fp);
                                 self.restart();
-                                self.notify(format!("New fingerprint: {}", format_fingerprint(&fp)), false);
+                                self.notify(format!("New host ID: {}", format_host_id(&fp)), false);
                             }
                             Err(e) => self.notify(format!("{e:#}"), true),
                         }

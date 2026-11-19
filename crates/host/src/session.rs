@@ -8,6 +8,7 @@ use rdesk_common::auth::Authenticated;
 use rdesk_common::clipboard::ClipboardSync;
 use rdesk_common::config::HostConfig;
 use rdesk_common::files;
+use rdesk_common::transport;
 use rdesk_proto::{
     ClientMsg, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MonitorInfo, StreamOpen, expect_msg,
     read_msg, write_msg,
@@ -35,14 +36,14 @@ pub fn infos(monitors: &[MonitorDesc]) -> Vec<MonitorInfo> {
 }
 
 pub async fn run(
-    conn: quinn::Connection,
-    mut ctrl_w: quinn::SendStream,
-    mut ctrl_r: quinn::RecvStream,
+    conn: transport::Connection,
+    mut ctrl_w: transport::SendStream,
+    mut ctrl_r: transport::RecvStream,
     auth: Authenticated,
     shared: Arc<Shared>,
     monitors: Vec<MonitorDesc>,
 ) -> Result<()> {
-    let peer = conn.remote_address();
+    let peer = transport::describe_peer(&conn);
     tracing::info!("session {} started: {} ({:?}) from {peer}", hex(&auth.session_id), auth.client_name, auth.kind);
     let _awake = KeepAwake::start();
     let injector = shared.injector.clone();
@@ -261,7 +262,7 @@ pub async fn run(
                     "video: {:.1} fps, {:.0} kbit/s, rtt {} ms",
                     df as f64 / 30.0,
                     db as f64 * 8.0 / 30.0 / 1000.0,
-                    conn.rtt().as_millis()
+                    transport::rtt(&conn).as_millis()
                 );
             }
         });

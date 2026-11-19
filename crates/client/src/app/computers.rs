@@ -1,16 +1,13 @@
 //! The "Computers" page: an address book of computers with live status, in the spirit
 //! of AnyDesk/TeamViewer's start screen.
 //!
-//! * "My computers" are the hosts saved in client.toml.
-//! * "Tailnet" lists the other devices Tailscale knows about, so a new machine shows up
-//!   without typing its address.
-//! * A background worker asks Tailscale who is online and probes each machine
-//!   ([`rdesk_common::directory::probe`]) to see whether rdesk is running and busy.
-//! * Every session runs as its own `rdesk connect` process (its own window); the
-//!   launcher handles first-contact trust with a dialog instead of a terminal prompt.
+//! * "My computers" are the hosts saved in client.toml, each known by its host ID.
+//! * A background worker probes each one ([`rdesk_common::directory::probe`]) through the
+//!   relay and/or its address to see whether rdesk is running and busy.
+//! * Every session runs as its own `rdesk connect` process (its own window). The host ID
+//!   is checked by the connection itself, so there is no trust dialog.
 
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,17 +15,17 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText, Sense, Vec2};
 use rdesk_common::agent::{self, Agent};
-use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, KnownHosts, format_fingerprint};
-use rdesk_common::directory::{self, ProbeInfo, Tailnet, TailnetDevice};
-use rdesk_common::transport;
+use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfig, format_host_id, parse_host_id};
+use rdesk_common::directory::{self, ProbeInfo};
+use rdesk_common::transport::{self, Endpoint, Role};
 use tokio::sync::mpsc;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(5);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CARD: Vec2 = Vec2::new(260.0, 128.0);
 
 // ---------------------------------------------------------------------------
-// Background worker: Tailscale status + probes
+// Background worker: probes
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -39,8 +36,9 @@ pub(super) enum Probe {
 
 #[derive(Default, Clone)]
 pub(super) struct Snapshot {
-    tailnet: Option<Result<Tailnet, String>>,
-    /// Keyed by the address string that was probed (a saved host's `addr` or a device IP).
+    /// The relay as this launcher sees it: `None` = none configured.
+    relay: Option<Result<String, String>>,
+    /// Keyed by the saved host's name.
     probes: HashMap<String, (Probe, Instant)>,
     agent_keys: Option<Result<Vec<(String, String)>, String>>,
     refreshing: bool,
@@ -48,7 +46,6 @@ pub(super) struct Snapshot {
 
 pub(super) enum WorkerCmd {
     Refresh,
-    ProbeNow(String),
     AgentKeys(Option<String>),
 }
 
@@ -59,7 +56,7 @@ pub(super) fn spawn_worker(shared: Arc<Mutex<Snapshot>>, rx: mpsc::UnboundedRece
             let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    shared.lock().unwrap().tailnet = Some(Err(format!("cannot start worker: {e}")));
+                    shared.lock().unwrap().relay = Some(Err(format!("cannot start worker: {e}")));
                     return;
                 }
             };
@@ -70,51 +67,75 @@ pub(super) fn spawn_worker(shared: Arc<Mutex<Snapshot>>, rx: mpsc::UnboundedRece
 
 #[derive(Clone)]
 struct Prober {
-    v4: Option<quinn::Endpoint>,
-    v6: Option<quinn::Endpoint>,
+    ep: Endpoint,
+    net: NetworkConfig,
     shared: Arc<Mutex<Snapshot>>,
     ctx: egui::Context,
 }
 
 impl Prober {
-    async fn probe(&self, target: String, tuning: config::TransportTuning) {
+    async fn probe(&self, name: String, entry: HostEntry) {
         let result = async {
-            let addr: SocketAddr = transport::resolve(&target, rdesk_proto::DEFAULT_PORT).await?;
-            let ep = if addr.is_ipv6() { self.v6.as_ref() } else { self.v4.as_ref() }
-                .ok_or_else(|| anyhow!("no {} socket", if addr.is_ipv6() { "IPv6" } else { "IPv4" }))?;
-            directory::probe(ep, addr, &tuning, PROBE_TIMEOUT).await
+            let id = parse_host_id(&entry.id).map_err(|_| anyhow!("no host ID"))?;
+            directory::probe(&self.ep, id, Some(&entry.addr), &self.net, PROBE_TIMEOUT).await
         }
         .await;
         let p = match result {
             Ok(info) => Probe::Ok(info),
             Err(e) => Probe::Err(short_error(&e)),
         };
-        self.shared.lock().unwrap().probes.insert(target, (p, Instant::now()));
+        self.shared.lock().unwrap().probes.insert(name, (p, Instant::now()));
         self.ctx.request_repaint();
     }
 }
 
+/// An endpoint for the current network settings (re-created when they change).
+async fn prober(current: &mut Option<Prober>, shared: &Arc<Mutex<Snapshot>>, ctx: &egui::Context) -> Option<Prober> {
+    let net = config::load_network();
+    if let Some(p) = current
+        && p.net == net
+    {
+        return Some(p.clone());
+    }
+    if let Some(old) = current.take() {
+        old.ep.close().await;
+    }
+    let tuning = load_client_config().transport;
+    match transport::bind(None, &net, &tuning, Role::Client).await {
+        Ok(ep) => {
+            let p = Prober { ep, net: net.clone(), shared: shared.clone(), ctx: ctx.clone() };
+            // Report the relay in the background: probes don't wait for it.
+            let (ep, shared, ctx) = (p.ep.clone(), shared.clone(), ctx.clone());
+            tokio::spawn(async move {
+                let url = net.relay.clone().unwrap_or_default();
+                let state = match transport::wait_relay(&ep, &net, Duration::from_secs(10)).await {
+                    Ok(true) => Some(Ok(url)),
+                    Ok(false) => None,
+                    Err(e) => Some(Err(format!("{url}: {e:#}"))),
+                };
+                shared.lock().unwrap().relay = state;
+                ctx.request_repaint();
+            });
+            *current = Some(p.clone());
+            Some(p)
+        }
+        Err(e) => {
+            shared.lock().unwrap().relay = Some(Err(format!("{e:#}")));
+            None
+        }
+    }
+}
+
 async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<WorkerCmd>, ctx: egui::Context) {
-    let prober = Prober {
-        v4: transport::client_endpoint(&"0.0.0.0:0".parse().unwrap()).ok(),
-        v6: transport::client_endpoint(&"[::]:0".parse().unwrap()).ok(),
-        shared: shared.clone(),
-        ctx: ctx.clone(),
-    };
+    let mut current: Option<Prober> = None;
     let mut next = Instant::now();
     loop {
         let wait = tokio::time::sleep_until(next.into());
         tokio::select! {
             _ = wait => {}
             cmd = rx.recv() => match cmd {
-                None => return,
+                None => break,
                 Some(WorkerCmd::Refresh) => {}
-                Some(WorkerCmd::ProbeNow(target)) => {
-                    let p = prober.clone();
-                    let tuning = load_client_config().transport;
-                    tokio::spawn(async move { p.probe(target, tuning).await });
-                    continue;
-                }
                 Some(WorkerCmd::AgentKeys(sock)) => {
                     let keys = agent_keys(sock.as_deref()).await.map_err(|e| short_error(&e));
                     shared.lock().unwrap().agent_keys = Some(keys);
@@ -127,43 +148,21 @@ async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<Wo
         shared.lock().unwrap().refreshing = true;
         ctx.request_repaint();
         let cfg = load_client_config();
-        let tailnet = directory::tailnet_status().await;
-        let targets = probe_targets(&cfg, tailnet.as_ref().ok());
-        shared.lock().unwrap().tailnet = Some(tailnet.map_err(|e| short_error(&e)));
-        ctx.request_repaint();
-
-        let mut set = tokio::task::JoinSet::new();
-        for t in targets {
-            let p = prober.clone();
-            let tuning = cfg.transport.clone();
-            set.spawn(async move { p.probe(t, tuning).await });
+        if let Some(p) = prober(&mut current, &shared, &ctx).await {
+            let mut set = tokio::task::JoinSet::new();
+            for (name, entry) in cfg.hosts {
+                let p = p.clone();
+                set.spawn(async move { p.probe(name, entry).await });
+            }
+            while set.join_next().await.is_some() {}
         }
-        while set.join_next().await.is_some() {}
         shared.lock().unwrap().refreshing = false;
         ctx.request_repaint();
         next = Instant::now() + REFRESH_EVERY;
     }
-}
-
-/// Saved hosts (unless Tailscale says they are offline) and every online tailnet device.
-fn probe_targets(cfg: &ClientConfig, tailnet: Option<&Tailnet>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen = HashSet::new();
-    for e in cfg.hosts.values() {
-        let offline = tailnet.and_then(|t| t.find(&e.addr)).is_some_and(|d| !d.online);
-        if !offline && seen.insert(e.addr.clone()) {
-            out.push(e.addr.clone());
-        }
+    if let Some(p) = current {
+        p.ep.close().await;
     }
-    for d in tailnet.map(|t| t.devices.as_slice()).unwrap_or_default() {
-        if let Some(ip) = d.ip()
-            && d.online
-            && seen.insert(ip.to_string())
-        {
-            out.push(ip.to_string());
-        }
-    }
-    out
 }
 
 async fn agent_keys(sock: Option<&str>) -> Result<Vec<(String, String)>> {
@@ -193,16 +192,16 @@ fn short_error(e: &anyhow::Error) -> String {
 // UI state
 // ---------------------------------------------------------------------------
 
+const ERROR: Color32 = Color32::from_rgb(230, 70, 70);
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Status {
     Checking,
-    Offline,
-    /// Online in Tailscale, but nothing answers on the rdesk port.
-    NoRdesk,
     Unreachable,
+    /// Saved without a valid host ID.
+    NoId,
     Ready,
     Busy,
-    IdentityChanged,
     /// A session window from this launcher is open.
     Open,
 }
@@ -213,9 +212,8 @@ impl Status {
             Status::Ready => Color32::from_rgb(46, 184, 92),
             Status::Busy => Color32::from_rgb(240, 160, 40),
             Status::Open => Color32::from_rgb(70, 140, 240),
-            Status::IdentityChanged => Color32::from_rgb(230, 70, 70),
-            Status::NoRdesk => Color32::from_rgb(170, 150, 90),
-            Status::Checking | Status::Offline | Status::Unreachable => Color32::from_gray(120),
+            Status::NoId => ERROR,
+            Status::Checking | Status::Unreachable => Color32::from_gray(120),
         }
     }
 
@@ -225,14 +223,13 @@ impl Status {
 }
 
 struct Card {
-    /// What `rdesk connect` gets, and the known_hosts key: alias, MagicDNS name or IP.
+    /// The saved name: what `rdesk connect` gets.
     target: String,
     title: String,
+    /// Address, or the start of the ID when there is none.
     addr: String,
-    saved: bool,
-    device: Option<TailnetDevice>,
+    id: String,
     probe: Option<Probe>,
-    known_fp: Option<[u8; 32]>,
     status: Status,
     detail: String,
 }
@@ -248,6 +245,7 @@ struct Editor {
     /// Alias being edited (`None` for a new host).
     original: Option<String>,
     alias: String,
+    id: String,
     addr: String,
     auth: AuthPref,
     key: String,
@@ -265,11 +263,12 @@ struct Editor {
 }
 
 impl Editor {
-    fn new(alias: String, addr: String) -> Self {
+    fn new(alias: String, id: String) -> Self {
         Self {
             original: None,
             alias,
-            addr,
+            id,
+            addr: String::new(),
             auth: AuthPref::Auto,
             key: String::new(),
             password_ref: String::new(),
@@ -287,6 +286,7 @@ impl Editor {
         Self {
             original: Some(alias.to_string()),
             alias: alias.to_string(),
+            id: e.id.clone(),
             addr: e.addr.clone(),
             auth: e.auth,
             key: e.key.clone().unwrap_or_default(),
@@ -303,9 +303,8 @@ impl Editor {
 }
 
 enum Dialog {
-    Edit(Editor),
+    Edit(Box<Editor>),
     Remove(String),
-    Trust { target: String, fp: [u8; 32], old: Option<[u8; 32]>, about: String, files: bool },
 }
 
 pub(super) struct Computers {
@@ -313,15 +312,11 @@ pub(super) struct Computers {
     shared: Arc<Mutex<Snapshot>>,
     tx: mpsc::UnboundedSender<WorkerCmd>,
     cfg: ClientConfig,
-    known: KnownHosts,
     loaded: Instant,
     search: String,
     quick: String,
-    show_offline: bool,
     dialog: Option<Dialog>,
     sessions: Vec<Session>,
-    /// Waiting for a probe of this target before connecting (trust check); `bool` = files.
-    pending_connect: Option<(String, Instant, bool)>,
     pub(super) toast: Option<(String, bool, Instant)>,
 }
 
@@ -332,27 +327,23 @@ impl Computers {
             shared,
             tx,
             cfg: ClientConfig::default(),
-            known: KnownHosts::default(),
             loaded: Instant::now(),
             search: String::new(),
             quick: String::new(),
-            show_offline: false,
             dialog: None,
             sessions: Vec::new(),
-            pending_connect: None,
             toast: None,
         };
         l.reload();
         l
     }
 
-    /// Re-read client.toml and known_hosts (the CLI may change them behind our back).
+    /// Re-read client.toml (the CLI may change it behind our back).
     fn reload(&mut self) {
         match config::load_toml::<ClientConfig>(config::CLIENT_CONFIG) {
             Ok(c) => self.cfg = c,
             Err(e) => self.notify(format!("client.toml: {e:#}"), true),
         }
-        self.known = KnownHosts::load().unwrap_or_default();
         self.loaded = Instant::now();
     }
 
@@ -368,73 +359,40 @@ impl Computers {
         self.sessions.iter().any(|s| s.target == target)
     }
 
-    fn cards(&self, snap: &Snapshot) -> (Vec<Card>, Vec<Card>) {
-        let tailnet = snap.tailnet.as_ref().and_then(|t| t.as_ref().ok());
-        let probe_of = |key: &str| snap.probes.get(key).map(|(p, _)| p.clone());
-        let mut claimed: HashSet<String> = HashSet::new();
-
-        let mut saved = Vec::new();
-        for (alias, e) in &self.cfg.hosts {
-            let device = tailnet.and_then(|t| t.find(&e.addr)).cloned();
-            if let Some(d) = &device {
-                claimed.insert(d.dns_name.clone());
-            }
-            let probe = probe_of(&e.addr);
-            saved.push(self.card(alias.clone(), alias.clone(), e.addr.clone(), true, device, probe));
-        }
-
-        let mut others = Vec::new();
-        for d in tailnet.map(|t| t.devices.as_slice()).unwrap_or_default() {
-            if d.is_self || claimed.contains(&d.dns_name) {
-                continue;
-            }
-            let ip = d.ip().map(|i| i.to_string()).unwrap_or_default();
-            let target = if d.dns_name.is_empty() { ip.clone() } else { d.dns_name.clone() };
-            let probe = probe_of(&ip);
-            others.push(self.card(target, d.name.clone(), ip, false, Some(d.clone()), probe));
-        }
-        (saved, others)
+    fn cards(&self, snap: &Snapshot) -> Vec<Card> {
+        self.cfg
+            .hosts
+            .iter()
+            .map(|(alias, e)| {
+                let probe = snap.probes.get(alias).map(|(p, _)| p.clone());
+                self.card(alias, e, probe)
+            })
+            .collect()
     }
 
-    fn card(
-        &self,
-        target: String,
-        title: String,
-        addr: String,
-        saved: bool,
-        device: Option<TailnetDevice>,
-        probe: Option<Probe>,
-    ) -> Card {
-        let known_fp = self.known.entries.get(&target).copied();
-        let now = unix_now();
-        let (status, detail) = match (&device, &probe) {
-            _ if self.session_open(&target) => (Status::Open, "Session open".to_string()),
-            (Some(d), _) if !d.online => (
-                Status::Offline,
-                match d.last_seen {
-                    Some(t) => format!("Offline · seen {}", directory::ago(t, now)),
-                    None => "Offline".into(),
-                },
-            ),
-            (_, Some(Probe::Ok(info))) => {
-                let link = match &device {
-                    Some(d) if d.direct => " · direct".to_string(),
-                    Some(d) if !d.relay.is_empty() => format!(" · relay {}", d.relay),
-                    _ => String::new(),
-                };
-                let rtt = format!("{} ms{link}", info.rtt.as_millis());
-                match known_fp {
-                    Some(k) if k != info.fingerprint => (Status::IdentityChanged, "Identity changed!".into()),
-                    _ if info.in_session => (Status::Busy, format!("In use · {rtt}")),
-                    None => (Status::Ready, format!("Ready (new) · {rtt}")),
-                    Some(_) => (Status::Ready, format!("Ready · {rtt}")),
+    fn card(&self, alias: &str, e: &HostEntry, probe: Option<Probe>) -> Card {
+        let valid_id = parse_host_id(&e.id).is_ok();
+        let (status, detail) = match &probe {
+            _ if self.session_open(alias) => (Status::Open, "Session open".to_string()),
+            _ if !valid_id => (Status::NoId, "No host ID: edit it".into()),
+            Some(Probe::Ok(info)) => {
+                let route = info.route.map(|r| format!(" · {}", r.label())).unwrap_or_default();
+                let rtt = format!("{} ms{route}", info.rtt.as_millis());
+                if info.in_session {
+                    (Status::Busy, format!("In use · {rtt}"))
+                } else {
+                    (Status::Ready, format!("Ready · {rtt}"))
                 }
             }
-            (Some(_), Some(Probe::Err(_))) => (Status::NoRdesk, "Online · rdesk not running".into()),
-            (None, Some(Probe::Err(e))) => (Status::Unreachable, e.clone()),
-            (_, None) => (Status::Checking, "Checking…".into()),
+            Some(Probe::Err(err)) => (Status::Unreachable, err.clone()),
+            None => (Status::Checking, "Checking…".into()),
         };
-        Card { target, title, addr, saved, device, probe, known_fp, status, detail }
+        let addr = if e.addr.trim().is_empty() {
+            format!("ID {}…", e.id.chars().take(12).collect::<String>())
+        } else {
+            e.addr.clone()
+        };
+        Card { target: alias.to_string(), title: alias.to_string(), addr, id: e.id.clone(), probe, status, detail }
     }
 
     // ---- actions ----------------------------------------------------------
@@ -443,65 +401,16 @@ impl Computers {
         self.open(target, false);
     }
 
-    /// Open a session window (`files`: start on the file-transfer panel), checking the
-    /// host's identity first.
+    /// Open a session window (`files`: start on the file-transfer panel). `target` is a saved
+    /// name or `ID[@address]`; the connection itself verifies the host ID.
     fn open(&mut self, target: &str, files: bool) {
-        let snap = self.shared.lock().unwrap();
-        let addr = self.cfg.hosts.get(target).map(|e| e.addr.clone()).unwrap_or_else(|| target.to_string());
-        let device_ip = snap
-            .tailnet
-            .as_ref()
-            .and_then(|t| t.as_ref().ok())
-            .and_then(|t| t.find(&addr))
-            .and_then(|d| d.ip())
-            .map(|ip| ip.to_string());
-        let probe = snap
-            .probes
-            .get(&addr)
-            .or_else(|| device_ip.as_ref().and_then(|ip| snap.probes.get(ip)))
-            .map(|(p, _)| p.clone());
-        drop(snap);
-        let known = self.known.entries.get(target).copied();
-
-        match (known, probe) {
-            (Some(k), Some(Probe::Ok(info))) if k != info.fingerprint => {
-                self.dialog = Some(Dialog::Trust {
-                    target: target.to_string(),
-                    fp: info.fingerprint,
-                    old: Some(k),
-                    about: describe(&info),
-                    files,
-                });
-            }
-            (None, Some(Probe::Ok(info))) => {
-                self.dialog = Some(Dialog::Trust {
-                    target: target.to_string(),
-                    fp: info.fingerprint,
-                    old: None,
-                    about: describe(&info),
-                    files,
-                });
-            }
-            (None, Some(Probe::Err(e))) if self.pending_connect.is_some() => {
-                self.pending_connect = None;
-                self.notify(format!("Cannot reach {target} to check its identity: {e}"), true);
-            }
-            (None, _) => {
-                // Never seen and no fresh probe: ask for one, then come back here.
-                self.pending_connect = Some((target.to_string(), Instant::now(), files));
-                let _ = self.tx.send(WorkerCmd::ProbeNow(addr));
-            }
-            (Some(_), _) => self.spawn_session(target, files),
+        let known = self.cfg.hosts.contains_key(target);
+        let id_part = target.split('@').next().unwrap_or_default();
+        if !known && parse_host_id(id_part).is_err() {
+            self.notify(format!("{target}: not a saved computer nor a host ID (ID or ID@address)."), true);
+            return;
         }
-    }
-
-    fn trust_and_connect(&mut self, target: &str, fp: [u8; 32], files: bool) {
-        self.known.entries.insert(target.to_string(), fp);
-        let res = config::ensure_config_dir().and_then(|_| self.known.save());
-        match res {
-            Ok(()) => self.spawn_session(target, files),
-            Err(e) => self.notify(format!("Saving known_hosts: {e:#}"), true),
-        }
+        self.spawn_session(target, files);
     }
 
     fn spawn_session(&mut self, target: &str, files: bool) {
@@ -567,8 +476,16 @@ impl Computers {
             ed.error = Some("The name must be one word (no spaces).".into());
             return false;
         }
-        if addr.is_empty() {
-            ed.error = Some("Enter an address: MagicDNS name, Tailscale IP, or host:port.".into());
+        let id = match parse_host_id(&ed.id) {
+            Ok(id) => format_host_id(&id),
+            Err(_) => {
+                ed.error =
+                    Some("Paste the host ID shown on that computer (This computer page, or `rdesk host id`).".into());
+                return false;
+            }
+        };
+        if addr.is_empty() && config::load_network().relay.is_none() {
+            ed.error = Some("Without a relay (Settings → Network) the address is needed: host or host:port.".into());
             return false;
         }
         let mut cfg = load_client_config();
@@ -578,6 +495,7 @@ impl Computers {
         }
         let mut entry = ed.original.as_ref().and_then(|o| cfg.hosts.remove(o)).unwrap_or_default();
         let opt = |s: &str| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) };
+        entry.id = id;
         entry.addr = addr;
         entry.auth = ed.auth;
         entry.key = opt(&ed.key);
@@ -586,16 +504,7 @@ impl Computers {
         entry.identity = opt(&ed.identity).map(PathBuf::from);
         cfg.hosts.insert(alias.clone(), entry);
 
-        let mut known = KnownHosts::load().unwrap_or_default();
-        if let Some(old) = &ed.original
-            && *old != alias
-            && let Some(fp) = known.entries.remove(old)
-        {
-            known.entries.insert(alias.clone(), fp);
-        }
-        let res = config::ensure_config_dir()
-            .and_then(|_| config::save_toml(config::CLIENT_CONFIG, &cfg))
-            .and_then(|_| known.save());
+        let res = config::ensure_config_dir().and_then(|_| config::save_toml(config::CLIENT_CONFIG, &cfg));
         if let Err(e) = res {
             ed.error = Some(format!("Saving: {e:#}"));
             return false;
@@ -627,11 +536,7 @@ impl Computers {
     fn remove(&mut self, alias: &str) {
         let mut cfg = load_client_config();
         cfg.hosts.remove(alias);
-        let mut known = KnownHosts::load().unwrap_or_default();
-        known.entries.remove(alias);
-        let res = config::save_toml(config::CLIENT_CONFIG, &cfg)
-            .and_then(|_| known.save())
-            .and_then(|_| crate::secrets::forget(alias));
+        let res = config::save_toml(config::CLIENT_CONFIG, &cfg).and_then(|_| crate::secrets::forget(alias));
         match res {
             Ok(()) => self.notify(format!("Removed {alias}."), false),
             Err(e) => self.notify(format!("Removing {alias}: {e:#}"), true),
@@ -645,7 +550,7 @@ impl Computers {
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.quick)
-                    .hint_text("Name or address to connect…")
+                    .hint_text("Name, or host ID[@address]…")
                     .desired_width(260.0),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -661,21 +566,13 @@ impl Computers {
                 if snap.refreshing {
                     ui.spinner();
                 }
-                ui.label(self_summary(snap));
+                match &snap.relay {
+                    Some(Ok(url)) => ui.weak(format!("Relay: {url}")),
+                    Some(Err(e)) => ui.colored_label(ERROR, format!("Relay unreachable ({e})")),
+                    None => ui.weak("No relay: direct addresses only"),
+                };
             });
         });
-        match &snap.tailnet {
-            Some(Err(e)) => {
-                ui.colored_label(Status::IdentityChanged.color(), format!("Tailscale: {e}"));
-            }
-            Some(Ok(t)) if !t.running() => {
-                ui.colored_label(
-                    Status::Busy.color(),
-                    format!("Tailscale is {} — start it and log in to see your computers.", t.state),
-                );
-            }
-            _ => {}
-        }
     }
 
     fn section(&mut self, ui: &mut egui::Ui, cards: &[Card], empty: &str) {
@@ -723,7 +620,7 @@ impl Computers {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let connect = ui.add_enabled(
-                            c.status.connectable() || c.status == Status::IdentityChanged,
+                            c.status != Status::NoId,
                             egui::Button::new(if c.status == Status::Open { "Focus" } else { "Connect" }),
                         );
                         if connect.clicked() {
@@ -736,21 +633,16 @@ impl Computers {
                         {
                             self.open(&c.target, true);
                         }
-                        if c.saved {
-                            if ui.small_button("Edit").clicked()
-                                && let Some(e) = self.cfg.hosts.get(&c.target)
-                            {
-                                self.dialog = Some(Dialog::Edit(Editor::edit(&c.target, e)));
-                            }
-                        } else if ui.small_button("Save").clicked() {
-                            let alias = c.title.to_lowercase().replace(char::is_whitespace, "-");
-                            self.dialog = Some(Dialog::Edit(Editor::new(alias, c.target.clone())));
+                        if ui.small_button("Edit").clicked()
+                            && let Some(e) = self.cfg.hosts.get(&c.target)
+                        {
+                            self.dialog = Some(Dialog::Edit(Box::new(Editor::edit(&c.target, e))));
                         }
                     });
                 });
         });
         let resp = resp.response;
-        if resp.double_clicked() && c.status.connectable() {
+        if resp.double_clicked() && c.status != Status::NoId {
             self.connect(&c.target);
         }
         resp.context_menu(|ui| {
@@ -766,31 +658,20 @@ impl Computers {
                 self.open(&c.target, true);
                 ui.close();
             }
-            if let Some(fp) = c.known_fp {
-                if ui.button("Copy trusted fingerprint").clicked() {
-                    ui.ctx().copy_text(format_fingerprint(&fp));
-                    ui.close();
-                }
-                if ui.button("Forget trusted fingerprint").on_hover_text("Ask again on the next connection").clicked() {
-                    self.known.entries.remove(&c.target);
-                    if let Err(e) = self.known.save() {
-                        self.notify(format!("Saving known_hosts: {e:#}"), true);
-                    }
-                    ui.close();
-                }
+            if !c.id.is_empty() && ui.button("Copy host ID").clicked() {
+                ui.ctx().copy_text(c.id.clone());
+                ui.close();
             }
-            if c.saved {
-                ui.separator();
-                if ui.button("Edit…").clicked() {
-                    if let Some(e) = self.cfg.hosts.get(&c.target) {
-                        self.dialog = Some(Dialog::Edit(Editor::edit(&c.target, e)));
-                    }
-                    ui.close();
+            ui.separator();
+            if ui.button("Edit…").clicked() {
+                if let Some(e) = self.cfg.hosts.get(&c.target) {
+                    self.dialog = Some(Dialog::Edit(Box::new(Editor::edit(&c.target, e))));
                 }
-                if ui.button("Remove…").clicked() {
-                    self.dialog = Some(Dialog::Remove(c.target.clone()));
-                    ui.close();
-                }
+                ui.close();
+            }
+            if ui.button("Remove…").clicked() {
+                self.dialog = Some(Dialog::Remove(c.target.clone()));
+                ui.close();
             }
         });
     }
@@ -809,46 +690,20 @@ impl Computers {
                         ui.label("Name");
                         ui.add(egui::TextEdit::singleline(&mut ed.alias).hint_text("casa"));
                         ui.end_row();
+                        ui.label("Host ID");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut ed.id)
+                                .hint_text("64 characters, from that computer's This computer page")
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(330.0),
+                        );
+                        ui.end_row();
                         ui.label("Address");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut ed.addr)
-                                    .hint_text("casa-pc.tailnet.ts.net or 100.x.y.z")
-                                    .desired_width(250.0),
-                            );
-                            let devices: Vec<TailnetDevice> = snap
-                                .tailnet
-                                .as_ref()
-                                .and_then(|t| t.as_ref().ok())
-                                .map(|t| t.devices.iter().filter(|d| !d.is_self).cloned().collect())
-                                .unwrap_or_default();
-                            if !devices.is_empty() {
-                                egui::ComboBox::from_id_salt("pick-device").selected_text("Tailnet…").show_ui(
-                                    ui,
-                                    |ui| {
-                                        for d in devices {
-                                            let addr = if d.dns_name.is_empty() {
-                                                d.ip().map(|i| i.to_string()).unwrap_or_default()
-                                            } else {
-                                                d.dns_name.clone()
-                                            };
-                                            let label = format!(
-                                                "{} ({}){}",
-                                                d.name,
-                                                d.os,
-                                                if d.online { "" } else { " · offline" }
-                                            );
-                                            if ui.selectable_label(ed.addr == addr, label).clicked() {
-                                                if ed.alias.is_empty() {
-                                                    ed.alias = d.name.to_lowercase().replace(char::is_whitespace, "-");
-                                                }
-                                                ed.addr = addr;
-                                            }
-                                        }
-                                    },
-                                );
-                            }
-                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut ed.addr)
+                                .hint_text("optional with a relay: 192.168.0.10 or host:port")
+                                .desired_width(330.0),
+                        );
                         ui.end_row();
                         ui.label("Login");
                         ui.horizontal(|ui| {
@@ -884,7 +739,7 @@ impl Computers {
                                         ui.spinner();
                                     }
                                     Some(Err(e)) => {
-                                        ui.colored_label(Status::IdentityChanged.color(), e);
+                                        ui.colored_label(ERROR, e);
                                     }
                                     Some(Ok(keys)) => {
                                         for (fp, label) in keys {
@@ -944,7 +799,7 @@ impl Computers {
                         );
                     }
                     if let Some(e) = &ed.error {
-                        ui.colored_label(Status::IdentityChanged.color(), e);
+                        ui.colored_label(ERROR, e);
                     }
                     ui.add_space(6.0);
                     let mut close = false;
@@ -965,9 +820,7 @@ impl Computers {
             Dialog::Remove(alias) => {
                 let m = egui::Modal::new(egui::Id::unique("remove-host")).show(ctx, |ui| {
                     ui.heading(format!("Remove {alias}?"));
-                    ui.label(
-                        "Its saved settings and trusted fingerprint are deleted. The computer itself is not touched.",
-                    );
+                    ui.label("Its saved settings are deleted. The computer itself is not touched.");
                     ui.add_space(6.0);
                     let mut done = None;
                     ui.horizontal(|ui| {
@@ -985,56 +838,6 @@ impl Computers {
                         let a = alias.clone();
                         self.remove(&a);
                         keep = false;
-                    }
-                    Some(false) => keep = false,
-                    None if m.should_close() => keep = false,
-                    None => {}
-                }
-            }
-            Dialog::Trust { target, fp, old, about, files } => {
-                let m = egui::Modal::new(egui::Id::unique("trust-host")).show(ctx, |ui| {
-                    ui.set_width(520.0);
-                    match old {
-                        None => {
-                            ui.heading(format!("First connection to {target}"));
-                            ui.label(format!("This computer says it is: {about}"));
-                            ui.label("Check that its fingerprint matches `rdesk host fingerprint` on that machine:");
-                        }
-                        Some(old) => {
-                            ui.heading(
-                                RichText::new(format!("{target}: IDENTITY CHANGED"))
-                                    .color(Status::IdentityChanged.color()),
-                            );
-                            ui.label(
-                                "The computer answering at this address has a different certificate than before. \
-                                 That is expected only if rdesk was reinstalled there (`rdesk host init --force`). \
-                                 Otherwise someone may be impersonating it.",
-                            );
-                            ui.label(
-                                RichText::new(format!("Trusted: {}", format_fingerprint(old))).monospace().small(),
-                            );
-                        }
-                    }
-                    ui.label(RichText::new(format_fingerprint(fp)).monospace().strong());
-                    ui.add_space(6.0);
-                    let mut done = None;
-                    ui.horizontal(|ui| {
-                        let label =
-                            if old.is_some() { "Trust the new identity and connect" } else { "Trust and connect" };
-                        if ui.button(label).clicked() {
-                            done = Some(true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            done = Some(false);
-                        }
-                    });
-                    done
-                });
-                match m.inner {
-                    Some(true) => {
-                        let (t, f, files) = (target.clone(), *fp, *files);
-                        keep = false;
-                        self.trust_and_connect(&t, f, files);
                     }
                     Some(false) => keep = false,
                     None if m.should_close() => keep = false,
@@ -1059,24 +862,12 @@ impl Computers {
         if self.loaded.elapsed() > REFRESH_EVERY && self.dialog.is_none() {
             self.reload();
         }
-        // A connect that was waiting for a probe result.
-        if let Some((target, since, files)) = self.pending_connect.clone() {
-            let addr = self.cfg.hosts.get(&target).map(|e| e.addr.clone()).unwrap_or_else(|| target.clone());
-            let ready = self.shared.lock().unwrap().probes.get(&addr).is_some_and(|(_, at)| *at >= since);
-            if ready {
-                self.open(&target, files);
-                self.pending_connect = None;
-            } else if since.elapsed() > PROBE_TIMEOUT * 4 {
-                self.pending_connect = None;
-                self.notify(format!("{target} did not answer."), true);
-            }
-        }
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.shared.lock().unwrap().clone();
-        let (saved, others) = self.cards(&snap);
+        let saved = self.cards(&snap);
 
         self.header(ui, &snap);
         ui.add_space(8.0);
@@ -1084,30 +875,17 @@ impl Computers {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(220.0));
                 if ui.button("＋ Add computer").clicked() {
-                    self.dialog = Some(Dialog::Edit(Editor::new(String::new(), String::new())));
+                    self.dialog = Some(Dialog::Edit(Box::new(Editor::new(String::new(), String::new()))));
                 }
             });
             ui.add_space(10.0);
             ui.label(RichText::new("My computers").strong().size(17.0));
             ui.add_space(4.0);
-            self.section(ui, &saved, "No saved computers yet. Add one, or save a device from your tailnet below.");
-
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Tailnet").strong().size(17.0));
-                ui.checkbox(&mut self.show_offline, "show offline");
-            });
-            ui.add_space(4.0);
-            let others: Vec<Card> = others
-                .into_iter()
-                .filter(|c| self.show_offline || c.device.as_ref().is_none_or(|d| d.online))
-                .collect();
-            let empty = match &snap.tailnet {
-                None => "Asking Tailscale…",
-                Some(Err(_)) => "Tailscale is not available.",
-                Some(Ok(_)) => "No other devices.",
-            };
-            self.section(ui, &others, empty);
+            self.section(
+                ui,
+                &saved,
+                "No computers yet. Add one with its host ID (shown on that computer's This computer page).",
+            );
         });
         self.dialogs(&ctx, &snap);
     }
@@ -1133,9 +911,8 @@ fn pretty_os(os: &str) -> &str {
 }
 
 fn os_icon(c: &Card) -> &'static str {
-    let os = match (&c.probe, &c.device) {
-        (Some(Probe::Ok(i)), _) => i.os.to_ascii_lowercase(),
-        (_, Some(d)) => d.os.to_ascii_lowercase(),
+    let os = match &c.probe {
+        Some(Probe::Ok(i)) => i.os.to_ascii_lowercase(),
         _ => String::new(),
     };
     match os.as_str() {
@@ -1143,23 +920,6 @@ fn os_icon(c: &Card) -> &'static str {
         "ios" | "android" => "📱",
         _ => "🖥",
     }
-}
-
-fn self_summary(snap: &Snapshot) -> String {
-    let Some(Ok(t)) = &snap.tailnet else { return String::new() };
-    let Some(me) = t.me() else { return String::new() };
-    let ip = me.ip().map(|i| i.to_string()).unwrap_or_default();
-    let host = match snap.probes.get(&ip) {
-        Some((Probe::Ok(i), _)) if i.in_session => "host: in use",
-        Some((Probe::Ok(_), _)) => "host: running",
-        Some((Probe::Err(_), _)) => "host: not running",
-        None => "",
-    };
-    format!("This computer: {} · {ip}  {host}", me.name)
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn session_log(target: &str) -> Result<PathBuf> {
@@ -1202,19 +962,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn targets_skip_offline_and_dedupe() {
-        let tailnet = directory::parse_status(
-            br#"{"BackendState":"Running",
-                "Self":{"HostName":"me","DNSName":"me.t.ts.net.","TailscaleIPs":["100.64.0.1"]},
-                "Peer":{"a":{"HostName":"casa","DNSName":"casa.t.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true},
-                        "b":{"HostName":"off","DNSName":"off.t.ts.net.","TailscaleIPs":["100.64.0.3"],"Online":false}}}"#,
-        )
-        .unwrap();
-        let mut cfg = ClientConfig::default();
-        cfg.hosts.insert("casa".into(), HostEntry { addr: "100.64.0.2".into(), ..Default::default() });
-        cfg.hosts.insert("off".into(), HostEntry { addr: "off.t.ts.net".into(), ..Default::default() });
-        cfg.hosts.insert("lab".into(), HostEntry { addr: "127.0.0.1:7421".into(), ..Default::default() });
-        let t = probe_targets(&cfg, Some(&tailnet));
-        assert_eq!(t, vec!["100.64.0.2", "127.0.0.1:7421", "100.64.0.1"]);
+    fn session_log_names_are_safe() {
+        let p = session_log("abc@10.0.0.1:7420").unwrap();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name, "session-abc_10.0.0.1_7420.log");
     }
 }

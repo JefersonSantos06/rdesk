@@ -11,10 +11,10 @@ use anyhow::{Result, anyhow};
 use rdesk_common::agent::Agent;
 use rdesk_common::auth::{self, AskPassword, AuthFailed, ClientAuth, KeySource, PasswordCancelled, PasswordSource};
 use rdesk_common::clipboard::ClipboardSync;
-use rdesk_common::config::{AuthPref, HostEntry, TransportTuning};
+use rdesk_common::config::{AuthPref, HostEntry, NetworkConfig, TransportTuning};
 use rdesk_common::files;
 use rdesk_common::tiles::{Frame, TileRect};
-use rdesk_common::transport::{self, close};
+use rdesk_common::transport::{self, Connection, ConnectionError, Endpoint, RecvStream, Role, SendStream, close};
 use rdesk_proto::{
     ClientMsg, DirEntry, FrameAck, FrameHeader, HostInfo, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_VIDEO_MSG,
     MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg, write_msg,
@@ -80,6 +80,8 @@ pub enum UiEvent {
         rtt_ms: u32,
         fps: f32,
         kbps: f32,
+        /// "direct" or "relay".
+        route: &'static str,
     },
     /// The connection will not be retried (auth failure, replaced by another client...).
     Fatal(String),
@@ -133,9 +135,11 @@ pub struct ConnectOpts {
     /// Ask for passwords with [`UiEvent::PasswordNeeded`] (the viewer) instead of the terminal.
     pub ask_password_in_ui: bool,
     pub entry: HostEntry,
-    pub pin: [u8; 32],
+    /// The host ID to dial (also what authenticates the host).
+    pub id: [u8; 32],
     pub monitor: Option<u32>,
     pub transport: TransportTuning,
+    pub net: NetworkConfig,
     pub clipboard: bool,
 }
 
@@ -170,15 +174,15 @@ enum End {
 
 pub type Notify = Arc<dyn Fn(UiEvent) + Send + Sync>;
 
-type ClientEndpoint = Option<(std::net::SocketAddr, quinn::Endpoint)>;
+type ClientEndpoint = Option<Endpoint>;
 
 async fn manager(opts: ConnectOpts, cmd_rx: mpsc::UnboundedReceiver<Cmd>, view: SharedView, notify: Notify) {
     let mut endpoint: ClientEndpoint = None;
     reconnect_loop(opts, cmd_rx, view, notify, &mut endpoint).await;
     // `close()` only queues CONNECTION_CLOSE; without this the runtime shuts down before it is
     // sent and the host only notices the client is gone after its idle timeout.
-    if let Some((_, ep)) = endpoint {
-        let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
+    if let Some(ep) = endpoint {
+        let _ = tokio::time::timeout(Duration::from_secs(3), ep.close()).await;
     }
 }
 
@@ -367,23 +371,22 @@ async fn once(
     view: &SharedView,
     notify: &Notify,
 ) -> End {
-    let addr = match transport::resolve(&opts.entry.addr, rdesk_proto::DEFAULT_PORT).await {
-        Ok(a) => a,
-        Err(e) => return End::Retry(format!("{e:#}")),
-    };
-    // Reuse the UDP socket across reconnects unless the address family changed.
-    if endpoint.as_ref().is_none_or(|(a, _)| a.is_ipv6() != addr.is_ipv6()) {
-        match transport::client_endpoint(&addr) {
-            Ok(ep) => *endpoint = Some((addr, ep)),
+    // One endpoint for all reconnects: it keeps its relay connection and path state.
+    if endpoint.is_none() {
+        match transport::bind(None, &opts.net, &opts.transport, Role::Client).await {
+            Ok(ep) => *endpoint = Some(ep),
             Err(e) => return End::Retry(format!("{e:#}")),
         }
     }
-    let ep = endpoint.as_ref().unwrap().1.clone();
-    let c = match transport::connect(&ep, addr, Some(opts.pin), &opts.transport, Duration::from_secs(5)).await {
+    let ep = endpoint.clone().unwrap();
+    let direct = Some(opts.entry.addr.as_str());
+    let c = match transport::connect(&ep, opts.id, direct, &opts.net, Duration::from_secs(8)).await {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("{e:#}");
-            return if msg.contains("IDENTITY CHANGED") { End::Fatal(msg) } else { End::Retry(msg) };
+            // Retrying cannot help without a way to reach it, or when someone else answers.
+            let fatal = msg.contains("no way to reach") || msg.starts_with(transport::WRONG_HOST_ID);
+            return if fatal { End::Fatal(msg) } else { End::Retry(msg) };
         }
     };
     let conn = c.conn.clone();
@@ -449,13 +452,13 @@ async fn once(
             End::Quit
         }
         Ok(false) | Err(_) => match conn.close_reason() {
-            Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::REPLACED => {
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::REPLACED => {
                 End::Fatal("Another rdesk client connected to this host; this session was closed.".into())
             }
-            Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::KICKED => {
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::KICKED => {
                 End::Fatal("The session was ended from the host computer.".into())
             }
-            Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::SHUTDOWN => {
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::SHUTDOWN => {
                 End::Retry("host restarting".into())
             }
             Some(e) => End::Retry(e.to_string()),
@@ -467,9 +470,9 @@ async fn once(
 /// Returns `Ok(true)` if the user quit, `Ok(false)` if the connection dropped.
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
-    conn: &quinn::Connection,
-    mut ctrl_w: quinn::SendStream,
-    mut ctrl_r: quinn::RecvStream,
+    conn: &Connection,
+    mut ctrl_w: SendStream,
+    mut ctrl_r: RecvStream,
     monitor: &mut Option<u32>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
@@ -530,8 +533,10 @@ async fn run_session(
                 let frames = view.lock().unwrap().frames;
                 let bytes = conn.stats().udp_rx.bytes;
                 let dt = last_t.elapsed().as_secs_f32().max(0.001);
+                let (rtt, route) = transport::path_info(&conn);
                 notify(UiEvent::Stats {
-                    rtt_ms: conn.rtt().as_millis() as u32,
+                    rtt_ms: rtt.as_millis() as u32,
+                    route: route.map_or("", transport::Route::label),
                     fps: (frames - last_frames) as f32 / dt,
                     kbps: (bytes - last_bytes) as f32 * 8.0 / dt / 1000.0,
                 });
@@ -661,7 +666,7 @@ async fn run_session(
     result
 }
 
-async fn read_frame(s: &mut quinn::RecvStream, view: &SharedView) -> Result<u64> {
+async fn read_frame(s: &mut RecvStream, view: &SharedView) -> Result<u64> {
     let h: FrameHeader = expect_msg(s, MAX_VIDEO_MSG).await?;
     {
         let mut v = view.lock().unwrap();
@@ -696,7 +701,7 @@ async fn read_frame(s: &mut quinn::RecvStream, view: &SharedView) -> Result<u64>
     Ok(h.frame_id)
 }
 
-fn spawn_push(conn: quinn::Connection, path: PathBuf, id: u64, notify: Notify) {
+fn spawn_push(conn: Connection, path: PathBuf, id: u64, notify: Notify) {
     tokio::spawn(async move {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut last = Instant::now();
@@ -713,7 +718,7 @@ fn spawn_push(conn: quinn::Connection, path: PathBuf, id: u64, notify: Notify) {
     });
 }
 
-fn spawn_pull(conn: quinn::Connection, remote: String, dir: PathBuf, id: u64, notify: Notify) {
+fn spawn_pull(conn: Connection, remote: String, dir: PathBuf, id: u64, notify: Notify) {
     tokio::spawn(async move {
         let name = remote.replace('\\', "/").rsplit('/').next().unwrap_or(&remote).to_string();
         let mut last = Instant::now();

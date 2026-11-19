@@ -1,4 +1,5 @@
-//! "Settings": app behaviour, start with the system, viewer options, your SSH keys.
+//! "Settings": network (relay), app behaviour, start with the system, viewer options,
+//! your SSH keys.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
@@ -6,7 +7,7 @@ use std::time::Instant;
 
 use egui::{Color32, RichText};
 use rdesk_common::agent::{self, Agent};
-use rdesk_common::config::{self, ClientConfig};
+use rdesk_common::config::{self, ClientConfig, NetworkConfig};
 
 use super::autostart::{self, Autostart};
 
@@ -15,6 +16,10 @@ type AgentKeys = Result<Vec<(String, String, String)>, String>;
 pub(super) struct SettingsPage {
     exe: PathBuf,
     cfg: ClientConfig,
+    /// The relay field as typed.
+    relay: String,
+    /// Set when network.toml changed, so the shell restarts the built-in host.
+    pub(super) network_changed: bool,
     autostart: Autostart,
     autostart_job: Option<Receiver<Result<Autostart, String>>>,
     keys: Option<AgentKeys>,
@@ -27,6 +32,8 @@ impl SettingsPage {
         Self {
             exe,
             cfg: config::load_toml(config::CLIENT_CONFIG).unwrap_or_default(),
+            relay: config::load_network().relay.unwrap_or_default(),
+            network_changed: false,
             autostart: autostart::current(),
             autostart_job: None,
             keys: None,
@@ -38,6 +45,7 @@ impl SettingsPage {
     /// Re-read what may have changed elsewhere (when the page is opened).
     pub(super) fn refresh(&mut self) {
         self.cfg = config::load_toml(config::CLIENT_CONFIG).unwrap_or_default();
+        self.relay = config::load_network().relay.unwrap_or_default();
         if self.autostart_job.is_none() {
             self.autostart = autostart::current();
         }
@@ -57,6 +65,23 @@ impl SettingsPage {
             self.toast = Some((format!("Saving settings: {e:#}"), true, Instant::now()));
         }
         self.cfg = on_disk;
+    }
+
+    fn save_relay(&mut self) {
+        let relay = self.relay.trim().to_string();
+        let mut net = config::load_network();
+        net.relay = if relay.is_empty() { None } else { Some(relay) };
+        if let Err(e) = rdesk_common::transport::relay_url(&net) {
+            self.toast = Some((format!("{e:#}"), true, Instant::now()));
+            return;
+        }
+        match config::ensure_config_dir().and_then(|_| config::save_toml(config::NETWORK_CONFIG, &net)) {
+            Ok(()) => {
+                self.network_changed = true;
+                self.toast = Some(("Network settings saved.".into(), false, Instant::now()));
+            }
+            Err(e) => self.toast = Some((format!("Saving network settings: {e:#}"), true, Instant::now())),
+        }
     }
 
     pub(super) fn tick(&mut self) {
@@ -85,6 +110,34 @@ impl SettingsPage {
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.label(RichText::new("Network").strong().size(16.0));
+            ui.label(
+                "Your private relay lets computers find each other anywhere (it runs on your own server). \
+                 Without one, computers are reached by address only: LAN or port forwarding.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Relay");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.relay)
+                        .hint_text("https://relay.example.com (empty: none)")
+                        .desired_width(300.0),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let saved = config::load_network().relay.unwrap_or_default();
+                let dirty = self.relay.trim() != saved.trim();
+                let clicked = ui.add_enabled(dirty, egui::Button::new("Save")).clicked();
+                if dirty && (clicked || enter) {
+                    self.save_relay();
+                }
+            });
+            if let Some(e) = (!self.relay.trim().is_empty())
+                .then(|| rdesk_common::transport::relay_url(&NetworkConfig { relay: Some(self.relay.clone()) }).err())
+                .flatten()
+            {
+                ui.colored_label(Color32::from_rgb(230, 70, 70), format!("{e:#}"));
+            }
+
+            ui.add_space(14.0);
             ui.label(RichText::new("Start with the system").strong().size(16.0));
             let mut mode = self.autostart;
             ui.add_enabled_ui(self.autostart_job.is_none(), |ui| {

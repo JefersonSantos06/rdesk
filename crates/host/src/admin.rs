@@ -15,7 +15,7 @@ pub fn ensure_initialized() -> Result<[u8; 32]> {
     let id = match HostIdentity::load() {
         Ok(id) => id,
         Err(_) => {
-            let id = HostIdentity::generate()?;
+            let id = HostIdentity::generate();
             id.save()?;
             id
         }
@@ -30,10 +30,10 @@ pub fn ensure_initialized() -> Result<[u8; 32]> {
     Ok(id.fingerprint())
 }
 
-/// New certificate: every client will see "identity changed" and must trust it again.
+/// New identity, so a new host ID: every client must be given the new ID.
 pub fn regenerate_identity() -> Result<[u8; 32]> {
     config::ensure_config_dir()?;
-    let id = HostIdentity::generate()?;
+    let id = HostIdentity::generate();
     id.save()?;
     Ok(id.fingerprint())
 }
@@ -157,16 +157,29 @@ pub async fn diagnose() -> Vec<CheckLine> {
         Err(e) => out.push(line("Config folder", format!("{e:#}"), false)),
     }
     match HostIdentity::load() {
-        Ok(id) => out.push(line("Identity", config::format_fingerprint(&id.fingerprint()), true)),
+        Ok(id) => out.push(line("Host ID", config::format_host_id(&id.fingerprint()), true)),
         Err(_) => out.push(line("Identity", "not created yet (starting the host creates it)", false)),
     }
     let keys = load_keys().map(|k| k.len()).unwrap_or(0);
     let pw = has_password();
     out.push(line("SSH keys", format!("{keys} authorized"), keys > 0 || pw));
     out.push(line("Password", if pw { "enabled" } else { "not set" }, keys > 0 || pw));
-    match transport::tailscale_ips().await {
-        Ok(ips) => out.push(line("Tailscale", ips.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "), true)),
-        Err(e) => out.push(line("Tailscale", format!("not available: {e:#}"), false)),
+    let net = config::load_network();
+    match transport::relay_url(&net) {
+        Ok(None) => out.push(line("Relay", "none: only direct connections (LAN, port forwarding)", true)),
+        Ok(Some(url)) => {
+            let reach = async {
+                let ep = transport::bind(None, &net, &Default::default(), transport::Role::Client).await?;
+                let ok = transport::wait_relay(&ep, &net, std::time::Duration::from_secs(5)).await;
+                ep.close().await;
+                ok
+            };
+            match reach.await {
+                Ok(_) => out.push(line("Relay", format!("{url} (reachable)"), true)),
+                Err(e) => out.push(line("Relay", format!("{url}: {e:#}"), false)),
+            }
+        }
+        Err(e) => out.push(line("Relay", format!("{e:#}"), false)),
     }
     let cap = crate::capture::Capturer::spawn(false);
     match cap.monitors().await {

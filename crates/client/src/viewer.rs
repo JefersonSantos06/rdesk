@@ -85,7 +85,7 @@ struct App {
     host: Option<HostInfo>,
     monitors: Vec<MonitorInfo>,
     active: u32,
-    stats: (u32, f32, f32),
+    stats: (u32, f32, f32, &'static str),
     menu_open: bool,
     /// Where the remote image is drawn, in egui points.
     image_rect: Option<egui::Rect>,
@@ -116,7 +116,7 @@ impl App {
             host: None,
             monitors: Vec::new(),
             active: 0,
-            stats: (0, 0.0, 0.0),
+            stats: (0, 0.0, 0.0, ""),
             menu_open: false,
             image_rect: None,
             pending_move: None,
@@ -332,8 +332,12 @@ impl App {
             ui.label(format!("{} ({})", h.hostname, h.os));
         }
         ui.label(format!(
-            "{} · RTT {} ms · {:.0} fps · {:.0} kbit/s",
-            self.status, self.stats.0, self.stats.1, self.stats.2
+            "{} · RTT {} ms{} · {:.0} fps · {:.0} kbit/s",
+            self.status,
+            self.stats.0,
+            if self.stats.3.is_empty() { String::new() } else { format!(" ({})", self.stats.3) },
+            self.stats.1,
+            self.stats.2
         ));
         ui.separator();
 
@@ -628,7 +632,7 @@ impl ApplicationHandler<UiEvent> for App {
                     t.total = total;
                 }
             }
-            UiEvent::Stats { rtt_ms, fps, kbps } => self.stats = (rtt_ms, fps, kbps),
+            UiEvent::Stats { rtt_ms, fps, kbps, route } => self.stats = (rtt_ms, fps, kbps, route),
             UiEvent::Fatal(msg) => {
                 self.status = "Disconnected".into();
                 self.fatal = Some(msg);

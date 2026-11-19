@@ -22,7 +22,7 @@ impl Tray {
         let open = MenuItem::with_id("open", "Open rdesk", true, None);
         let status = MenuItem::with_id("status", "Host: off", false, None);
         let toggle = MenuItem::with_id("toggle", "Turn host on", host_supported, None);
-        let fp = MenuItem::with_id("fingerprint", "Copy host fingerprint", host_supported, None);
+        let fp = MenuItem::with_id("fingerprint", "Copy host ID", host_supported, None);
         let quit = MenuItem::with_id("quit", "Quit rdesk", true, None);
         let menu = Menu::new();
         menu.append_items(&[

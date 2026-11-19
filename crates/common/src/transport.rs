@@ -1,339 +1,327 @@
-//! QUIC endpoints: host identity, certificate pinning and link tuning.
+//! Networking on iroh: QUIC with hole punching and an optional private relay, the host
+//! identity, and link tuning.
+//!
+//! A host is addressed by its **ID**, the Ed25519 public key of its endpoint. iroh's TLS
+//! authenticates every connection against that key, so there is nothing to pin or to
+//! trust on first use: dialing an ID only ever reaches the machine holding its secret key.
+//!
+//! How a client finds the host:
+//! * **Relay** (`network.toml`): both sides keep a connection to your relay; the first
+//!   packets go through it and iroh switches to a direct path once hole punching succeeds.
+//! * **Address** (the host entry's `addr`): tried directly — LAN, port forwarding, IPv6.
+//!
+//! Nothing is published anywhere else: no public DNS, no third-party relays.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
-use sha2::{Digest, Sha256};
+pub use iroh::Endpoint;
+use iroh::endpoint::{BindOpts, IdleTimeout, MtuDiscoveryConfig, QuicTransportConfig, presets};
+pub use iroh::endpoint::{Connection, ConnectionError, Incoming, IncomingAddr, RecvStream, SendStream, VarInt};
+use iroh::{EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 
-use crate::config::{self, Congestion, TransportTuning};
+use crate::config::{self, Congestion, NetworkConfig, TransportTuning};
 
 /// Label for the TLS exporter that binds authentication to this QUIC connection.
 pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-rdesk-auth-v1";
 
+/// Start of the error when the computer that answered holds another ID (callers treat it
+/// as final: retrying cannot help).
+pub const WRONG_HOST_ID: &str = "wrong host ID";
+
 /// Application close codes.
 pub mod close {
-    use quinn::VarInt;
+    use iroh::endpoint::VarInt;
     pub const NORMAL: VarInt = VarInt::from_u32(0);
     pub const AUTH_FAILED: VarInt = VarInt::from_u32(1);
     pub const REPLACED: VarInt = VarInt::from_u32(2);
     pub const PROTOCOL: VarInt = VarInt::from_u32(3);
-    pub const UNTRUSTED_HOST: VarInt = VarInt::from_u32(4);
     pub const SHUTDOWN: VarInt = VarInt::from_u32(5);
     /// Someone at the host ended the session; don't reconnect.
     pub const KICKED: VarInt = VarInt::from_u32(6);
 }
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
-}
-
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    Sha256::digest(data).into()
-}
-
-/// The host's long-lived TLS identity (self-signed Ed25519 certificate).
+/// The host's long-lived identity: the secret key of its endpoint. Its public half is the
+/// host ID that clients dial.
 pub struct HostIdentity {
-    pub cert: CertificateDer<'static>,
-    pub key: PrivatePkcs8KeyDer<'static>,
+    key: SecretKey,
 }
 
 impl HostIdentity {
-    pub fn generate() -> Result<Self> {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
-        let mut params = rcgen::CertificateParams::new(vec!["rdesk".to_string()])?;
-        params.distinguished_name.push(rcgen::DnType::CommonName, "rdesk host");
-        // Pinned by fingerprint, so a long validity is fine and avoids surprise expiry.
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
-        let cert = params.self_signed(&key)?;
-        Ok(Self { cert: cert.der().clone(), key: PrivatePkcs8KeyDer::from(key.serialize_der()) })
+    pub fn generate() -> Self {
+        Self { key: SecretKey::generate() }
     }
 
+    /// The host ID (public key) as raw bytes.
     pub fn fingerprint(&self) -> [u8; 32] {
-        sha256(&self.cert)
+        *self.key.public().as_bytes()
+    }
+
+    pub fn secret_key(&self) -> SecretKey {
+        self.key.clone()
     }
 
     pub fn load() -> Result<Self> {
-        let cert = std::fs::read(config::config_path(config::HOST_CERT)?)
-            .context("host certificate missing; run `rdesk host init` first")?;
-        let key = std::fs::read(config::config_path(config::HOST_KEY)?)
-            .context("host key missing; run `rdesk host init` first")?;
-        Ok(Self { cert: CertificateDer::from(cert), key: PrivatePkcs8KeyDer::from(key) })
+        let bytes = std::fs::read(config::config_path(config::HOST_KEY)?)
+            .context("host identity missing; run `rdesk host init` first")?;
+        let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("{} is not a 32-byte key", config::HOST_KEY))?;
+        Ok(Self { key: SecretKey::from_bytes(&bytes) })
     }
 
     pub fn save(&self) -> Result<()> {
-        config::write_private(&config::config_path(config::HOST_KEY)?, self.key.secret_pkcs8_der())?;
-        config::write_private(&config::config_path(config::HOST_CERT)?, &self.cert)?;
-        Ok(())
+        config::write_private(&config::config_path(config::HOST_KEY)?, &self.key.to_bytes())
     }
 }
 
-pub fn transport_config(t: &TransportTuning, is_host: bool) -> Result<TransportConfig> {
-    let mut tc = TransportConfig::default();
-    tc.keep_alive_interval(Some(Duration::from_millis(t.keep_alive_ms.max(100))));
-    tc.max_idle_timeout(Some(IdleTimeout::try_from(Duration::from_millis(t.idle_timeout_ms.max(1000)))?));
-    tc.initial_mtu(1200);
+/// QUIC settings shared by both sides (iroh's defaults otherwise).
+pub fn transport_config(t: &TransportTuning, is_host: bool) -> Result<QuicTransportConfig> {
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(t.max_udp_payload.max(1200));
-    tc.mtu_discovery_config(Some(mtu));
-    // Video frames are bursts of several hundred KB; give streams room so a
-    // frame never stalls on flow control.
-    tc.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024));
-    tc.receive_window(VarInt::from_u32(64 * 1024 * 1024));
-    tc.send_window(64 * 1024 * 1024);
-    if is_host {
+    let mut b = QuicTransportConfig::builder()
+        .keep_alive_interval(Duration::from_millis(t.keep_alive_ms.max(100)))
+        .max_idle_timeout(Some(IdleTimeout::try_from(Duration::from_millis(t.idle_timeout_ms.max(1000)))?))
+        .mtu_discovery_config(Some(mtu))
+        // Video frames are bursts of several hundred KB; give streams room so a
+        // frame never stalls on flow control.
+        .stream_receive_window(VarInt::from_u32(8 * 1024 * 1024))
+        .receive_window(VarInt::from_u32(64 * 1024 * 1024))
+        .send_window(64 * 1024 * 1024);
+    b = if is_host {
         // Before auth the client may only open the control stream; limits are
         // raised once it authenticates (see `raise_stream_limits`).
-        tc.max_concurrent_bidi_streams(VarInt::from_u32(1));
-        tc.max_concurrent_uni_streams(VarInt::from_u32(0));
+        b.max_concurrent_bidi_streams(VarInt::from_u32(1)).max_concurrent_uni_streams(VarInt::from_u32(0))
     } else {
         // Host opens one uni stream per video frame.
-        tc.max_concurrent_uni_streams(VarInt::from_u32(64));
-        tc.max_concurrent_bidi_streams(VarInt::from_u32(0));
-    }
-    match t.congestion {
-        Congestion::Cubic => {
-            tc.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
-        }
-        Congestion::Bbr => {
-            tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-        }
-        Congestion::NewReno => {
-            tc.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
-        }
-    }
-    Ok(tc)
+        b.max_concurrent_uni_streams(VarInt::from_u32(64)).max_concurrent_bidi_streams(VarInt::from_u32(0))
+    };
+    use noq_proto::congestion;
+    b = match t.congestion {
+        Congestion::Cubic => b.congestion_controller_factory(Arc::new(congestion::CubicConfig::default())),
+        Congestion::Bbr => b.congestion_controller_factory(Arc::new(congestion::Bbr3Config::default())),
+        Congestion::NewReno => b.congestion_controller_factory(Arc::new(congestion::NewRenoConfig::default())),
+    };
+    Ok(b.build())
 }
 
 /// Called by the host after successful authentication.
-pub fn raise_stream_limits(conn: &quinn::Connection) {
+pub fn raise_stream_limits(conn: &Connection) {
     conn.set_max_concurrent_bi_streams(VarInt::from_u32(32));
     conn.set_max_concurrent_uni_streams(VarInt::from_u32(8));
 }
 
-pub fn server_endpoint(addr: SocketAddr, id: &HostIdentity, t: &TransportTuning) -> Result<quinn::Endpoint> {
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_no_client_auth()
-        .with_single_cert(vec![id.cert.clone()], PrivateKeyDer::Pkcs8(id.key.clone_key()))?;
-    tls.alpn_protocols = vec![rdesk_proto::ALPN.to_vec()];
-    tls.max_early_data_size = 0;
-    let mut sc = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
-    sc.transport_config(Arc::new(transport_config(t, true)?));
-    // Address validation costs a round-trip and buys nothing on a tailnet.
-    sc.retry_token_lifetime(Duration::from_secs(15));
-    let ep = quinn::Endpoint::server(sc, addr).with_context(|| format!("binding UDP {addr}"))?;
-    Ok(ep)
-}
-
-/// Accepts any certificate whose SHA-256 matches `expected` (or any at all when
-/// `expected` is `None`, for trust-on-first-use), and records what it saw.
-/// The TLS 1.3 handshake signature is still verified, so the peer must hold
-/// the private key of the certificate it presented.
-#[derive(Debug)]
-struct PinnedVerifier {
-    expected: Option<[u8; 32]>,
-    seen: Arc<Mutex<Option<[u8; 32]>>>,
-    provider: Arc<rustls::crypto::CryptoProvider>,
-}
-
-impl ServerCertVerifier for PinnedVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp = sha256(end_entity);
-        *self.seen.lock().unwrap() = Some(fp);
-        match self.expected {
-            Some(exp) if exp != fp => Err(rustls::Error::General(format!(
-                "host certificate fingerprint mismatch: expected {}, got {}",
-                config::format_fingerprint(&exp),
-                config::format_fingerprint(&fp)
-            ))),
-            _ => Ok(ServerCertVerified::assertion()),
+/// The relay from `network.toml`, if one is set.
+pub fn relay_url(net: &NetworkConfig) -> Result<Option<RelayUrl>> {
+    match net.relay.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(u) => {
+            let with_scheme = if u.contains("://") { u.to_string() } else { format!("https://{u}") };
+            Ok(Some(with_scheme.parse().with_context(|| format!("invalid relay URL {u:?}"))?))
         }
     }
+}
 
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Err(rustls::Error::General("TLS 1.2 is not allowed".into()))
-    }
+fn relay_mode(net: &NetworkConfig) -> Result<RelayMode> {
+    Ok(match relay_url(net)? {
+        Some(url) => RelayMode::Custom(RelayMap::from_iter([url])),
+        None => RelayMode::Disabled,
+    })
+}
 
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-    }
+/// Which side of a connection an endpoint is for.
+#[derive(Debug, Clone, Copy)]
+pub enum Role {
+    /// Accepts sessions; also listens for direct connections on `port` (0 = any).
+    Host { port: u16 },
+    /// Dials hosts from a random port.
+    Client,
+}
 
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+/// Create an endpoint. `key` is the host identity (clients pass `None`: a fresh key
+/// per process, since only the host's ID matters to rdesk).
+pub async fn bind(key: Option<SecretKey>, net: &NetworkConfig, t: &TransportTuning, role: Role) -> Result<Endpoint> {
+    let is_host = matches!(role, Role::Host { .. });
+    let mut b = Endpoint::builder(presets::Minimal)
+        .relay_mode(relay_mode(net)?)
+        .transport_config(transport_config(t, is_host)?);
+    if let Some(k) = key {
+        b = b.secret_key(k);
     }
+    if let Role::Host { port } = role {
+        b = b
+            .alpns(vec![rdesk_proto::ALPN.to_vec()])
+            .clear_ip_transports()
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))?
+            .bind_addr_with_opts(
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0),
+                BindOpts::default().set_is_required(false),
+            )?;
+    }
+    b.bind().await.map_err(|e| {
+        let text = format!("{e:#} {:?}", std::error::Error::source(&e));
+        if text.contains("10048") || text.to_lowercase().contains("in use") {
+            anyhow!("UDP port {} is already in use (is another rdesk host running?)", host_port(role))
+        } else {
+            anyhow!(e).context("starting the network endpoint")
+        }
+    })
+}
+
+fn host_port(role: Role) -> u16 {
+    match role {
+        Role::Host { port } => port,
+        Role::Client => 0,
+    }
+}
+
+/// Wait (bounded) until the endpoint is registered with its relay. `Ok(false)` without one.
+pub async fn wait_relay(ep: &Endpoint, net: &NetworkConfig, timeout: Duration) -> Result<bool> {
+    if relay_url(net)?.is_none() {
+        return Ok(false);
+    }
+    tokio::time::timeout(timeout, ep.online()).await.map_err(|_| anyhow!("relay did not answer within {timeout:?}"))?;
+    Ok(true)
 }
 
 pub struct Connected {
-    pub conn: quinn::Connection,
-    /// SHA-256 of the host's certificate as presented in this handshake.
+    pub conn: Connection,
+    /// The host's ID, as authenticated by this handshake.
     pub host_fingerprint: [u8; 32],
     /// TLS exporter value for this connection (auth channel binding).
     pub ek: [u8; 32],
 }
 
-pub fn client_endpoint(remote: &SocketAddr) -> Result<quinn::Endpoint> {
-    let bind: SocketAddr = if remote.is_ipv6() { "[::]:0".parse()? } else { "0.0.0.0:0".parse()? };
-    Ok(quinn::Endpoint::client(bind)?)
-}
-
-/// Connect and complete the QUIC/TLS handshake. With `pin = None` any host
-/// certificate is accepted; the caller must then check `host_fingerprint`
-/// (trust-on-first-use) before sending anything secret.
+/// Connect to the host `id`, through the relay and/or `direct` (`host[:port]`).
 pub async fn connect(
-    endpoint: &quinn::Endpoint,
-    addr: SocketAddr,
-    pin: Option<[u8; 32]>,
-    t: &TransportTuning,
+    endpoint: &Endpoint,
+    id: [u8; 32],
+    direct: Option<&str>,
+    net: &NetworkConfig,
     timeout: Duration,
 ) -> Result<Connected> {
-    let seen = Arc::new(Mutex::new(None));
-    let provider = provider();
-    let verifier = PinnedVerifier { expected: pin, seen: seen.clone(), provider: provider.clone() };
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![rdesk_proto::ALPN.to_vec()];
-    tls.enable_early_data = false;
-    let mut cc = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls)?));
-    cc.transport_config(Arc::new(transport_config(t, false)?));
-
-    let connecting = endpoint.connect_with(cc, addr, "rdesk")?;
-    let conn = match tokio::time::timeout(timeout, connecting).await {
+    let host =
+        EndpointId::from_bytes(&id).map_err(|_| anyhow!("{} is not a valid host ID", config::format_host_id(&id)))?;
+    let mut addr = EndpointAddr::new(host);
+    let relay = relay_url(net)?;
+    if let Some(url) = relay.clone() {
+        addr = addr.with_relay_url(url);
+    }
+    if let Some(d) = direct.map(str::trim).filter(|d| !d.is_empty()) {
+        match resolve_all(d, rdesk_proto::DEFAULT_PORT).await {
+            Ok(list) => {
+                for sa in list {
+                    addr = addr.with_ip_addr(sa);
+                }
+            }
+            // With a relay the address is only a shortcut.
+            Err(e) if relay.is_some() => tracing::debug!("{e:#}"),
+            Err(e) => return Err(e),
+        }
+    }
+    if addr.is_empty() {
+        bail!("no way to reach this computer: give its address, or set a relay (rdesk net relay <url>)");
+    }
+    let conn = match tokio::time::timeout(timeout, endpoint.connect(addr, rdesk_proto::ALPN)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
-            let fp = *seen.lock().unwrap();
-            if let (Some(exp), Some(got)) = (pin, fp)
-                && exp != got
-            {
+            let e = anyhow!(e);
+            if format!("{e:#}").contains("invalid peer certificate") {
                 bail!(
-                    "HOST IDENTITY CHANGED for {addr}!\n  expected {}\n  got      {}\n\
-                     If you reinstalled the host, remove its line from known_hosts and reconnect.",
-                    config::format_fingerprint(&exp),
-                    config::format_fingerprint(&got)
+                    "{WRONG_HOST_ID}: the computer that answered is not {} (check the ID and the address)",
+                    host.fmt_short()
                 );
             }
-            return Err(anyhow!(e).context(format!("connecting to {addr}")));
+            return Err(e.context(format!("connecting to {}", host.fmt_short())));
         }
-        Err(_) => bail!("timed out connecting to {addr} after {timeout:?}"),
+        Err(_) => bail!(
+            "no answer from {} within {timeout:?} (is its host on? check the ID{})",
+            host.fmt_short(),
+            if relay.is_some() { " and the relay" } else { " and the address" }
+        ),
     };
-    let host_fingerprint = seen.lock().unwrap().ok_or_else(|| anyhow!("no host certificate seen"))?;
     let ek = exporter(&conn)?;
-    Ok(Connected { conn, host_fingerprint, ek })
+    Ok(Connected { host_fingerprint: *conn.remote_id().as_bytes(), conn, ek })
 }
 
-pub fn exporter(conn: &quinn::Connection) -> Result<[u8; 32]> {
+pub fn exporter(conn: &Connection) -> Result<[u8; 32]> {
     let mut ek = [0u8; 32];
     conn.export_keying_material(&mut ek, EXPORTER_LABEL, b"").map_err(|_| anyhow!("TLS exporter unavailable"))?;
     Ok(ek)
 }
 
-/// Is `ip` inside Tailscale's address ranges (100.64.0.0/10 or fd7a:115c:a1e0::/48)?
-pub fn is_tailnet(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            o[0] == 100 && (o[1] & 0xc0) == 64
-        }
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_tailnet(IpAddr::V4(v4));
-            }
-            let s = v6.segments();
-            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+/// How the traffic currently flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Direct,
+    Relay,
+}
+
+impl Route {
+    pub fn label(self) -> &'static str {
+        match self {
+            Route::Direct => "direct",
+            Route::Relay => "relay",
         }
     }
 }
 
-pub(crate) fn tailscale_cli_candidates() -> Vec<String> {
-    let mut v = vec!["tailscale".to_string()];
-    if cfg!(target_os = "macos") {
-        v.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale".into());
-    }
-    if cfg!(windows) {
-        v.push(r"C:\Program Files\Tailscale\tailscale.exe".into());
-    }
-    v
-}
-
-/// Ask the local Tailscale daemon for this machine's tailnet addresses.
-pub async fn tailscale_ips() -> Result<Vec<IpAddr>> {
-    let mut last_err = None;
-    for cli in tailscale_cli_candidates() {
-        match crate::command(&cli).arg("ip").output().await {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let ips: Vec<IpAddr> = text.lines().filter_map(|l| l.trim().parse().ok()).collect();
-                if ips.is_empty() {
-                    bail!("`tailscale ip` returned no addresses (is Tailscale logged in?)");
-                }
-                return Ok(ips);
-            }
-            Ok(out) => last_err = Some(anyhow!("`{cli} ip` failed: {}", String::from_utf8_lossy(&out.stderr).trim())),
-            Err(e) => last_err = Some(anyhow!("running `{cli}`: {e}")),
+/// RTT and route of the path carrying the traffic.
+pub fn path_info(conn: &Connection) -> (Duration, Option<Route>) {
+    let paths = conn.paths();
+    let mut chosen = None;
+    for p in paths.iter() {
+        if p.is_selected() || chosen.is_none() {
+            chosen = Some((p.rtt(), if p.is_relay() { Route::Relay } else { Route::Direct }));
+        }
+        if p.is_selected() {
+            break;
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("tailscale CLI not found")))
+    match chosen {
+        Some((rtt, route)) => (rtt, Some(route)),
+        None => (Duration::ZERO, None),
+    }
 }
 
-/// Resolve `host[:port]` (IPs, hostnames and MagicDNS names).
+pub fn rtt(conn: &Connection) -> Duration {
+    path_info(conn).0
+}
+
+/// A short description of who is on the other end, for logs.
+pub fn describe_peer(conn: &Connection) -> String {
+    let (_, route) = path_info(conn);
+    format!("{} ({})", conn.remote_id().fmt_short(), route.map_or("?", Route::label))
+}
+
+/// Resolve `host[:port]` (IPs and hostnames).
 pub async fn resolve(addr: &str, default_port: u16) -> Result<SocketAddr> {
+    resolve_all(addr, default_port).await?.into_iter().next().ok_or_else(|| anyhow!("{addr} did not resolve"))
+}
+
+async fn resolve_all(addr: &str, default_port: u16) -> Result<Vec<SocketAddr>> {
     if let Ok(sa) = addr.parse::<SocketAddr>() {
-        return Ok(sa);
+        return Ok(vec![sa]);
     }
-    if let Ok(ip) = addr.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, default_port));
+    if let Ok(ip) = addr.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, default_port)]);
     }
     let with_port = if addr.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) && !addr.contains("::") {
         addr.to_string()
     } else {
         format!("{addr}:{default_port}")
     };
-    let mut addrs = tokio::net::lookup_host(&with_port).await.with_context(|| format!("resolving {addr}"))?;
-    addrs.next().ok_or_else(|| anyhow!("{addr} did not resolve to any address"))
+    let list: Vec<SocketAddr> =
+        tokio::net::lookup_host(&with_port).await.with_context(|| format!("resolving {addr}"))?.collect();
+    if list.is_empty() {
+        bail!("{addr} did not resolve to any address");
+    }
+    Ok(list)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tailnet_ranges() {
-        assert!(is_tailnet("100.64.0.1".parse().unwrap()));
-        assert!(is_tailnet("100.127.255.254".parse().unwrap()));
-        assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
-        assert!(!is_tailnet("100.63.255.255".parse().unwrap()));
-        assert!(!is_tailnet("192.168.1.10".parse().unwrap()));
-        assert!(is_tailnet("fd7a:115c:a1e0::1234".parse().unwrap()));
-        assert!(!is_tailnet("fd7a:115c:a1e1::1".parse().unwrap()));
-        assert!(is_tailnet("::ffff:100.100.1.1".parse().unwrap()));
-    }
 
     #[tokio::test]
     async fn resolve_forms() {
@@ -341,5 +329,22 @@ mod tests {
         assert_eq!(resolve("127.0.0.1:9", 7420).await.unwrap(), "127.0.0.1:9".parse().unwrap());
         assert_eq!(resolve("::1", 7420).await.unwrap(), "[::1]:7420".parse().unwrap());
         assert_eq!(resolve("localhost:9", 7420).await.unwrap().port(), 9);
+    }
+
+    #[test]
+    fn relay_urls() {
+        let n = |r: &str| NetworkConfig { relay: Some(r.into()) };
+        assert!(relay_url(&NetworkConfig::default()).unwrap().is_none());
+        assert!(relay_url(&n("  ")).unwrap().is_none());
+        assert_eq!(relay_url(&n("relay.example.com")).unwrap().unwrap().as_str(), "https://relay.example.com/");
+        assert_eq!(relay_url(&n("http://10.0.0.2:3340")).unwrap().unwrap().as_str(), "http://10.0.0.2:3340/");
+    }
+
+    #[test]
+    fn identity_roundtrip() {
+        let id = HostIdentity::generate();
+        let again = HostIdentity { key: SecretKey::from_bytes(&id.key.to_bytes()) };
+        assert_eq!(id.fingerprint(), again.fingerprint());
+        assert!(config::parse_host_id(&config::format_host_id(&id.fingerprint())).is_ok());
     }
 }

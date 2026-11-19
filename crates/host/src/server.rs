@@ -1,15 +1,16 @@
-//! The listening host: accepts QUIC connections on the tailnet, authenticates
-//! them, and runs one session at a time (a new session replaces the old one).
+//! The listening host: accepts connections on its iroh endpoint (directly or through the
+//! relay), authenticates them, and runs one session at a time (a new session replaces the
+//! old one).
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use rdesk_common::auth::{self, AuthKind, FailureLimiter, HostAuthConfig, OpaqueServer, ResumeStore};
-use rdesk_common::config::{self, HostConfig, format_fingerprint};
-use rdesk_common::transport::{self, HostIdentity, close};
+use rdesk_common::config::{self, HostConfig, format_host_id};
+use rdesk_common::transport::{self, Connection, HostIdentity, Incoming, IncomingAddr, Role, close};
 use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, PROTOCOL_VERSION, expect_msg, write_msg};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex, Semaphore, mpsc};
@@ -21,16 +22,18 @@ use crate::session::{self, Shared};
 
 #[derive(Default, Clone)]
 pub struct RunOpts {
-    /// Overrides `listen` from host.toml.
-    pub listen: Vec<String>,
+    /// Overrides `port` from host.toml (0 = any free port).
     pub port: Option<u16>,
-    pub allow_non_tailnet: bool,
     pub fake_capture: bool,
     pub fake_input: bool,
 }
 
+/// Failed-login bookkeeping is per IP; connections through the relay share one bucket
+/// (their client keys are throwaway, so per-key limits would be useless).
+const RELAYED: IpAddr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+
 struct Current {
-    conn: quinn::Connection,
+    conn: Connection,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -58,39 +61,6 @@ pub fn load_auth_config(host_fp: [u8; 32]) -> Result<HostAuthConfig> {
         _ => None,
     };
     Ok(HostAuthConfig { authorized_keys, opaque, host_fp, host_name: rdesk_common::local_hostname() })
-}
-
-async fn listen_addrs(cfg: &HostConfig, reporter: &Reporter) -> Result<Vec<SocketAddr>> {
-    let mut out = Vec::new();
-    for l in &cfg.listen {
-        if l.eq_ignore_ascii_case("tailscale") {
-            let mut warned = false;
-            let ips = loop {
-                match transport::tailscale_ips().await {
-                    Ok(ips) => break ips,
-                    Err(e) => {
-                        if !warned {
-                            tracing::warn!("waiting for Tailscale: {e:#} (retrying every 2s)");
-                            reporter.state(HostState::WaitingForTailscale(format!("{e:#}")));
-                            warned = true;
-                        }
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                }
-            };
-            out.extend(ips.into_iter().map(|ip| SocketAddr::new(ip, cfg.port)));
-        } else if let Ok(sa) = l.parse::<SocketAddr>() {
-            out.push(sa);
-        } else if let Ok(ip) = l.parse::<IpAddr>() {
-            out.push(SocketAddr::new(ip, cfg.port));
-        } else {
-            bail!("invalid listen address {l:?} (use an IP, IP:port or \"tailscale\")");
-        }
-    }
-    if out.is_empty() {
-        bail!("no listen addresses configured");
-    }
-    Ok(out)
 }
 
 #[cfg(windows)]
@@ -122,13 +92,10 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
         tracing::warn!("{}", crate::elevation::NOT_ELEVATED_HINT);
     }
     let mut cfg: HostConfig = config::load_toml(config::HOST_CONFIG)?;
-    if !opts.listen.is_empty() {
-        cfg.listen = opts.listen.clone();
-    }
     if let Some(p) = opts.port {
         cfg.port = p;
     }
-    cfg.allow_non_tailnet |= opts.allow_non_tailnet;
+    let net = config::load_network();
     let identity = HostIdentity::load()?;
     let host_fp = identity.fingerprint();
     reporter.fingerprint(host_fp);
@@ -172,38 +139,37 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
         reporter: reporter.clone(),
     });
 
-    let addrs = tokio::select! {
-        a = listen_addrs(&cfg, &reporter) => a?,
-        // Nothing to disconnect yet; any command (or the UI going away) stops the wait.
-        _ = ctl.recv() => return Ok(()),
-    };
-    let mut endpoints = Vec::new();
-    for a in &addrs {
-        let ep = transport::server_endpoint(*a, &identity, &cfg.transport).map_err(|e| {
-            if format!("{e:#}").contains("10048") || format!("{e:#}").to_lowercase().contains("in use") {
-                anyhow::anyhow!("{a} is already in use (is another rdesk host running?)")
-            } else {
-                e.context(format!("listening on {a}"))
-            }
-        })?;
-        tracing::info!("listening on {}", ep.local_addr()?);
-        endpoints.push(ep);
-    }
-    let bound: Vec<SocketAddr> = endpoints.iter().filter_map(|e| e.local_addr().ok()).collect();
+    let ep = transport::bind(Some(identity.secret_key()), &net, &cfg.transport, Role::Host { port: cfg.port }).await?;
+    let bound = ep.bound_sockets();
+    tracing::info!("host {} listening on {:?}", format_host_id(&host_fp), bound);
     reporter.state(HostState::Listening(bound.clone()));
-    reporter
-        .event(format!("Host ready on {}", bound.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")), false);
-    println!("rdesk host ready. Fingerprint: {}", format_fingerprint(&host_fp));
-
-    for ep in &endpoints {
-        let ep = ep.clone();
-        let server = server.clone();
-        let allow = cfg.allow_non_tailnet;
+    let port = bound.first().map(|a| a.port()).unwrap_or_default();
+    reporter.event(format!("Host ready (direct connections on UDP {port})"), false);
+    println!("rdesk host ready. ID: {}", format_host_id(&host_fp));
+    {
+        let (ep, net, reporter) = (ep.clone(), net.clone(), reporter.clone());
+        tokio::spawn(async move {
+            let relay = net.relay.clone().unwrap_or_default();
+            match transport::wait_relay(&ep, &net, Duration::from_secs(10)).await {
+                Ok(true) => {
+                    reporter.relay(Some(Ok(relay.clone())));
+                    reporter.event(format!("Connected to the relay {relay}"), false);
+                }
+                Ok(false) => reporter.relay(None),
+                Err(e) => {
+                    reporter.relay(Some(Err(format!("{e:#}"))));
+                    reporter.event(format!("Relay {relay}: {e:#} (direct connections still work)"), true);
+                }
+            }
+        });
+    }
+    {
+        let (ep, server) = (ep.clone(), server.clone());
         tokio::spawn(async move {
             while let Some(incoming) = ep.accept().await {
                 let server = server.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = server.handle(incoming, allow).await {
+                    if let Err(e) = server.handle(incoming).await {
                         tracing::info!("connection ended: {e:#}");
                     }
                 });
@@ -221,24 +187,19 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     if let Some(cur) = server.current.lock().await.take() {
         cur.conn.close(close::SHUTDOWN, b"host shutting down");
     }
-    for ep in &endpoints {
-        ep.close(close::SHUTDOWN, b"host shutting down");
-    }
-    for ep in endpoints {
-        let _ = tokio::time::timeout(Duration::from_secs(2), ep.wait_idle()).await;
-    }
+    // Closes what is left gracefully and releases the sockets.
+    let _ = tokio::time::timeout(Duration::from_secs(3), ep.close()).await;
     reporter.event("Host stopped", false);
     Ok(())
 }
 
 impl Server {
-    async fn handle(self: Arc<Self>, incoming: quinn::Incoming, allow_non_tailnet: bool) -> Result<()> {
-        let peer = incoming.remote_address();
-        let ip = peer.ip().to_canonical();
-        if !allow_non_tailnet && !transport::is_tailnet(ip) {
-            incoming.refuse();
-            bail!("refused {peer}: not a Tailscale address (set allow_non_tailnet to permit)");
-        }
+    async fn handle(self: Arc<Self>, incoming: Incoming) -> Result<()> {
+        let (ip, peer) = match incoming.remote_addr() {
+            IncomingAddr::Ip(sa) => (sa.ip().to_canonical(), sa.ip().to_canonical().to_string()),
+            IncomingAddr::Relay { endpoint_id, .. } => (RELAYED, format!("relay ({})", endpoint_id.fmt_short())),
+            other => (RELAYED, format!("{other:?}")),
+        };
         if let Err(wait) = self.limiter.check(ip) {
             incoming.refuse();
             bail!("refused {peer}: too many failed logins, retry in {}s", wait.as_secs() + 1);
@@ -299,13 +260,13 @@ impl Server {
             Ok(Err(e)) => {
                 self.limiter.failure(ip);
                 conn.close(close::AUTH_FAILED, b"authentication failed");
-                self.reporter.event(format!("Failed login from {}: {e:#}", peer.ip()), true);
+                self.reporter.event(format!("Failed login from {peer}: {e:#}"), true);
                 bail!("{peer}: {e:#}");
             }
             Err(_) => {
                 self.limiter.failure(ip);
                 conn.close(close::AUTH_FAILED, b"authentication timed out");
-                self.reporter.event(format!("Login from {} timed out", peer.ip()), true);
+                self.reporter.event(format!("Login from {peer} timed out"), true);
                 bail!("{peer}: authentication timed out");
             }
         };
@@ -332,7 +293,7 @@ impl Server {
         };
         let info = SessionInfo { client: authed.client_name.clone(), peer, method, since: SystemTime::now() };
         if !matches!(authed.kind, AuthKind::Resume) {
-            self.reporter.event(format!("{} connected from {} ({})", info.client, peer.ip(), info.method), false);
+            self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
         }
         self.reporter.session(Some(info.clone()));
         let shared = self.shared.clone();
@@ -342,7 +303,7 @@ impl Server {
             if let Err(e) = session::run(c2, w, r, authed, shared, monitors).await {
                 tracing::warn!("session error: {e:#}");
             }
-            reporter.session_ended(info.peer, info.since);
+            reporter.session_ended(&info.peer, info.since);
         });
         *cur = Some(Current { conn, task });
         Ok(())

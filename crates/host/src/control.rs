@@ -15,8 +15,7 @@ pub enum HostState {
     #[default]
     Stopped,
     Starting,
-    /// Configured to listen on the tailnet, but Tailscale is not up yet.
-    WaitingForTailscale(String),
+    /// Running; the local UDP sockets for direct connections.
     Listening(Vec<SocketAddr>),
     Failed(String),
 }
@@ -24,7 +23,8 @@ pub enum HostState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionInfo {
     pub client: String,
-    pub peer: SocketAddr,
+    /// Where it came from: an IP for direct connections, "relay (…)" otherwise.
+    pub peer: String,
     /// "key SHA256:…", "password" or "resume".
     pub method: String,
     pub since: SystemTime,
@@ -40,7 +40,10 @@ pub struct HostEvent {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostStatus {
     pub state: HostState,
+    /// The host ID.
     pub fingerprint: Option<[u8; 32]>,
+    /// `None`: no relay configured (or not known yet); `Ok(url)`: registered; `Err`: unreachable.
+    pub relay: Option<Result<String, String>>,
     pub session: Option<SessionInfo>,
     /// Newest last; at most [`MAX_EVENTS`].
     pub events: VecDeque<HostEvent>,
@@ -82,12 +85,16 @@ impl Reporter {
         self.update(|st| st.fingerprint = Some(fp));
     }
 
+    pub fn relay(&self, r: Option<Result<String, String>>) {
+        self.update(|st| st.relay = r);
+    }
+
     pub fn session(&self, s: Option<SessionInfo>) {
         self.update(|st| st.session = s);
     }
 
     /// Clear the session only if it is still `peer`'s (a newer one may have replaced it).
-    pub fn session_ended(&self, peer: SocketAddr, since: SystemTime) {
+    pub fn session_ended(&self, peer: &str, since: SystemTime) {
         self.update(|st| {
             if st.session.as_ref().is_some_and(|s| s.peer == peer && s.since == since) {
                 st.session = None;
@@ -138,6 +145,7 @@ impl HostHandle {
                 }
             }
             r.session(None);
+            r.relay(None);
         });
         Self { reporter, ctl, task }
     }

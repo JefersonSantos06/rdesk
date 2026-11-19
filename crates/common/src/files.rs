@@ -262,7 +262,7 @@ pub async fn list_dir(path: &str) -> Result<(String, Vec<DirEntry>), String> {
 
 /// Upload `local` into the host's inbox. Returns the name it was saved as.
 pub async fn push(
-    conn: &quinn::Connection,
+    conn: &crate::transport::Connection,
     local: &Path,
     progress: &mut (dyn FnMut(u64, u64) + Send),
 ) -> Result<String> {
@@ -292,7 +292,7 @@ pub async fn push(
 
 /// Download `remote` from the host into `local_dir`. Returns the final path.
 pub async fn pull(
-    conn: &quinn::Connection,
+    conn: &crate::transport::Connection,
     remote: &str,
     local_dir: &Path,
     progress: &mut (dyn FnMut(u64, u64) + Send),

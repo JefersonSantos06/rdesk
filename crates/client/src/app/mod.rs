@@ -239,6 +239,10 @@ impl eframe::App for App {
         self.settings.tick();
         #[cfg(feature = "host")]
         {
+            if std::mem::take(&mut self.settings.network_changed) {
+                // The built-in host binds its endpoint with the relay at start.
+                self.host.restart();
+            }
             self.host.tick();
             if self.host.quit_requested {
                 self.host.quit_requested = false;

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use rdesk_client::conn::{self, PasswordAnswer, PasswordUse, UiEvent};
 use rdesk_common::auth::{self, AuthFailed, PasswordCancelled};
-use rdesk_common::config::{AuthPref, HostConfig, HostEntry, TransportTuning};
-use rdesk_common::transport;
+use rdesk_common::config::{AuthPref, HostConfig, HostEntry, NetworkConfig, TransportTuning};
+use rdesk_common::transport::{self, Role};
 use rdesk_host::{HostHandle, HostState, Reporter, RunOpts};
 
 /// A fake viewer: answers every password dialog with `answer` and counts them.
@@ -30,7 +30,7 @@ async fn password_from_the_dialog_logs_in() {
     rdesk_host::admin::set_password("correct horse battery staple").unwrap();
     assert!(rdesk_host::admin::has_password());
     let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let cfg = HostConfig { listen: vec![format!("127.0.0.1:{port}")], allow_non_tailnet: true, ..Default::default() };
+    let cfg = HostConfig { port, ..Default::default() };
     rdesk_host::admin::save_config(&cfg).unwrap();
     let h = HostHandle::start(
         RunOpts { fake_capture: true, fake_input: true, ..Default::default() },
@@ -44,23 +44,22 @@ async fn password_from_the_dialog_logs_in() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let ep = transport::client_endpoint(&addr).unwrap();
+    let addr = format!("127.0.0.1:{port}");
+    let net = NetworkConfig::default();
+    let ep = transport::bind(None, &net, &TransportTuning::default(), Role::Client).await.unwrap();
     // A target name nobody has a saved password for.
     let target = format!("pw-test-{}", std::process::id());
-    let entry = HostEntry { addr: addr.to_string(), auth: AuthPref::Password, ..Default::default() };
+    let entry = HostEntry { addr: addr.clone(), auth: AuthPref::Password, ..Default::default() };
 
     let attempt = |answer: Option<&'static str>| {
-        let (ep, entry, target) = (ep.clone(), entry.clone(), target.clone());
+        let (ep, entry, target, net, addr) = (ep.clone(), entry.clone(), target.clone(), net.clone(), addr.clone());
         async move {
             let asked = Arc::new(Mutex::new(Vec::new()));
             let used = Arc::new(Mutex::new(None));
             let asker =
                 conn::password_asker(&target, &entry, used.clone(), Some((dialog(answer, asked.clone()), None)));
             let mut creds = conn::credentials(&entry, None, asker).await;
-            let c = transport::connect(&ep, addr, Some(fp), &TransportTuning::default(), Duration::from_secs(5))
-                .await
-                .unwrap();
+            let c = transport::connect(&ep, fp, Some(&addr), &net, Duration::from_secs(5)).await.unwrap();
             let (mut w, mut r) = c.conn.open_bi().await.unwrap();
             let res = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await;
             let n = asked.lock().unwrap().len();

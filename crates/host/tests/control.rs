@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use rand::rngs::OsRng;
 use rdesk_common::auth::{self, ClientAuth, KeySource};
-use rdesk_common::config::{self, HostConfig, TransportTuning};
-use rdesk_common::transport::{self, close};
+use rdesk_common::config::{self, HostConfig, NetworkConfig, TransportTuning};
+use rdesk_common::transport::{self, ConnectionError, Role, close};
 use rdesk_host::{HostHandle, HostState, Reporter, RunOpts};
 use ssh_key::{Algorithm, PrivateKey};
 
@@ -27,7 +27,7 @@ async fn start_report_disconnect_stop() {
     unsafe { std::env::set_var("RDESK_CONFIG_DIR", dir.path()) };
     let fp = rdesk_host::admin::ensure_initialized().unwrap();
     let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let cfg = HostConfig { listen: vec![format!("127.0.0.1:{port}")], allow_non_tailnet: true, ..Default::default() };
+    let cfg = HostConfig { port, ..Default::default() };
     rdesk_host::admin::save_config(&cfg).unwrap();
 
     let opts = RunOpts { fake_capture: true, fake_input: true, ..Default::default() };
@@ -47,10 +47,10 @@ async fn start_report_disconnect_stop() {
     assert_eq!(h.status().fingerprint, Some(fp));
 
     // Log in: the status shows the session and an event.
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let t = TransportTuning::default();
-    let ep = transport::client_endpoint(&addr).unwrap();
-    let c = transport::connect(&ep, addr, Some(fp), &t, Duration::from_secs(5)).await.unwrap();
+    let addr = format!("127.0.0.1:{port}");
+    let net = NetworkConfig::default();
+    let ep = transport::bind(None, &net, &TransportTuning::default(), Role::Client).await.unwrap();
+    let c = transport::connect(&ep, fp, Some(&addr), &net, Duration::from_secs(5)).await.unwrap();
     let (mut w, mut r) = c.conn.open_bi().await.unwrap();
     let mut creds = ClientAuth {
         client_name: "laptop".into(),
@@ -69,7 +69,7 @@ async fn start_report_disconnect_stop() {
     h.disconnect();
     let reason = tokio::time::timeout(Duration::from_secs(5), c.conn.closed()).await.unwrap();
     match reason {
-        quinn::ConnectionError::ApplicationClosed(a) => assert_eq!(a.error_code, close::KICKED),
+        ConnectionError::ApplicationClosed(a) => assert_eq!(a.error_code, close::KICKED),
         other => panic!("unexpected close: {other:?}"),
     }
     wait_for("session cleared", || h.status().session.is_none()).await;

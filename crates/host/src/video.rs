@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rayon::prelude::*;
 use rdesk_common::tiles::{self, Frame, TileHash, TileRect};
+use rdesk_common::transport;
 use rdesk_proto::{FrameHeader, Tile, encode_into};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -166,7 +167,7 @@ enum WriteDone {
 
 /// Run the video loop until the connection closes or `settings` is dropped.
 pub async fn run(
-    conn: quinn::Connection,
+    conn: transport::Connection,
     capturer: Capturer,
     mut settings: watch::Receiver<VideoSettings>,
     mut acks: mpsc::UnboundedReceiver<u64>,
@@ -214,7 +215,7 @@ pub async fn run(
                 s.lost(id);
             }
         }
-        let rtt = conn.rtt();
+        let rtt = transport::rtt(&conn);
         let stale_after = Duration::from_millis(600).max(rtt * 4);
         let stale: Vec<u64> =
             inflight.iter().filter(|(_, f)| f.sent_at.elapsed() > stale_after).map(|(id, _)| *id).collect();
@@ -308,7 +309,7 @@ pub async fn run(
     }
 }
 
-async fn write_frame(conn: &quinn::Connection, buf: &[u8], mut cancel: oneshot::Receiver<()>) -> bool {
+async fn write_frame(conn: &transport::Connection, buf: &[u8], mut cancel: oneshot::Receiver<()>) -> bool {
     let Ok(mut s) = conn.open_uni().await else { return false };
     let _ = s.set_priority(10);
     let r = tokio::select! {
@@ -318,7 +319,7 @@ async fn write_frame(conn: &quinn::Connection, buf: &[u8], mut cancel: oneshot::
     if r {
         s.finish().is_ok()
     } else {
-        let _ = s.reset(quinn::VarInt::from_u32(0));
+        let _ = s.reset(transport::VarInt::from_u32(0));
         false
     }
 }

@@ -36,7 +36,9 @@ pub fn run(connect: ConnectOpts, opts: HeadlessOpts) -> Result<()> {
             Ok(UiEvent::Connected(h)) => {
                 eprintln!("connected to {} ({}), {} monitor(s)", h.hostname, h.os, h.monitors.len());
             }
-            Ok(UiEvent::Stats { rtt_ms, fps, kbps }) => eprintln!("rtt {rtt_ms} ms, {fps:.1} fps, {kbps:.0} kbit/s"),
+            Ok(UiEvent::Stats { rtt_ms, fps, kbps, route }) => {
+                eprintln!("rtt {rtt_ms} ms ({route}), {fps:.1} fps, {kbps:.0} kbit/s")
+            }
             Ok(UiEvent::Fatal(m)) => {
                 result = Err(anyhow::anyhow!(m));
                 break;
