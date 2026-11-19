@@ -625,7 +625,7 @@ impl HostPage {
                     }
                 }
                 if ui
-                    .add_enabled(!busy, egui::Button::new("Remove the service…"))
+                    .add_enabled(!busy, egui::Button::new("Uninstall…"))
                     .on_hover_text("This app runs the host again (only while it is open and you are signed in)")
                     .clicked()
                 {
@@ -646,7 +646,7 @@ impl HostPage {
         });
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!busy, egui::Button::new("Install the rdesk service (recommended)"))
+                .add_enabled(!busy, egui::Button::new("Install rdesk on this computer (recommended)"))
                 .on_hover_text("Windows asks for administrator permission once")
                 .clicked()
             {

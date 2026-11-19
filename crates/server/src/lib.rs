@@ -10,6 +10,7 @@ pub mod api;
 pub mod certfile;
 pub mod config;
 pub mod db;
+pub mod download;
 pub mod enroll;
 pub mod groups;
 pub mod login;
@@ -42,6 +43,9 @@ pub fn install_crypto() {
 pub fn router(st: Shared) -> Router {
     Router::new()
         .route("/", get(home))
+        .route("/download", get(download::page_handler))
+        .route("/download/windows", get(download::windows))
+        .route("/install.sh", get(download::install_sh))
         .route(paths::PATH_INFO, get(api::info))
         .route(paths::PATH_TOKEN, post(api::token))
         .route(paths::PATH_ME, get(api::me))
@@ -104,7 +108,11 @@ pub fn router(st: Shared) -> Router {
 }
 
 async fn home(axum::extract::State(st): axum::extract::State<Shared>) -> axum::response::Html<String> {
-    pages::page(&st.cfg.name, "rdesk", "<h1>rdesk server</h1><p>Sign in from the rdesk app.</p>")
+    pages::page(
+        &st.cfg.name,
+        "rdesk",
+        "<h1>rdesk server</h1><p>Sign in from the rdesk app. <a href=\"/download\">Download rdesk</a>.</p>",
+    )
 }
 
 /// A running server (for `run` and tests).

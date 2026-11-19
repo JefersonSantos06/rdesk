@@ -442,6 +442,12 @@ async fn wait_healthy(max: Duration) -> bool {
     false
 }
 
+/// Restart the service (after changing the host's settings as an administrator).
+pub fn restart() -> Result<()> {
+    start_stop(false)?;
+    start_stop(true)
+}
+
 fn start_stop(start: bool) -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service =

@@ -198,7 +198,15 @@ Planejado:
   - o servidor informa uma versão mínima, abaixo da qual o app pede para atualizar;
   - voltar de versão só por ordem explícita (impede que sirvam uma versão antiga assinada com falha conhecida).
 
-### Fase 9: instaladores
+### Fase 9: instaladores (feita, branch `main`)
+Como ficou (diferente do previsto: o próprio `rdesk.exe` instala, sem Inno Setup):
+- Windows: `rdesk install` / `rdesk uninstall` (pede administrador): o serviço, `Program Files`, o Menu Iniciar, *Configurações → Aplicativos*, iniciar com o Windows; `--only-share --key/--owner` para um computador só acessado. O app oferece *Install rdesk on this computer*.
+- O servidor no nome do programa: `rdesk@servidor.exe` já vem com o servidor na tela de login (e no `install`).
+- Servidor: `/download` (versão liberada para todos), `/download/windows` (o `.exe` do release, conferido e renomeado), `/install.sh` (Linux: o `.deb` certo, `rdesk-update.timer`, e `--host` com o serviço de usuário `rdesk-host`).
+- Releases trazem também o `rdesk-<v>-windows-x86_64.exe` solto; o `.deb` traz `rdesk-update` e `rdesk-host`.
+- `deploy/install-server.sh`: a VPS em um comando (ou atualizar à mão).
+
+Planejado:
 - Windows (Inno Setup):
   - modos **App completo** (cliente, host e bandeja) e **Só ser acessado** (só o serviço, com o e-mail do dono ou uma chave de cadastro da fase 5);
   - o endereço do servidor vem no nome do arquivo (`rdesk-setup@rdesk.seu-dominio.com.exe`);

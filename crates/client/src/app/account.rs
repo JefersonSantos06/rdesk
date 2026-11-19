@@ -54,6 +54,8 @@ impl Account {
             .as_ref()
             .map(|s| s.server.clone())
             .or_else(|| config::load_toml::<ClientConfig>(config::CLIENT_CONFIG).ok().and_then(|c| c.server))
+            // Downloaded from the server's page as rdesk@server.exe.
+            .or_else(config::server_from_exe_name)
             .unwrap_or_default();
         let mut a = Self {
             session,

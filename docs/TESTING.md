@@ -59,6 +59,13 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Sem administrador, mudar uma opção pede *Manage as administrator*; como administrador, salvar reinicia o host do serviço.
 - [ ] *Remove the service…*: os arquivos voltam para o perfil e o app volta a rodar o host.
 
+## Instalação
+- [ ] `https://seu-servidor/download` mostra a versão liberada; o Windows baixa `rdesk@seu-servidor.exe` e o app já vem com o servidor preenchido.
+- [ ] *Install rdesk on this computer*: aparece em *Configurações → Aplicativos*; o Menu Iniciar abre o rdesk de `Program Files`; *Desinstalar* por lá remove tudo e devolve as configurações do host.
+- [ ] `rdesk install --only-share --key rdk_…` num PC sem ninguém logado no app: ele entra no servidor sozinho.
+- [ ] Linux: `curl … /install.sh | sudo sh` instala e liga o `rdesk-update.timer`; com `--host --key`, o computador aparece no servidor.
+- [ ] `install-server.sh` numa VPS limpa: servidor no ar, com as unidades de atualização.
+
 ## Atualizações
 - [ ] Admin → *rdesk versions* lista as versões do GitHub; *Check now* encontra uma recém-publicada.
 - [ ] Marcar um PC como *Test computer* e *Release to test computers*: só ele baixa e instala (quando ninguém está conectado); o Admin mostra a versão nova nele.

@@ -13,7 +13,16 @@ Um binário só, na sua VPS:
 - Uma VPS Linux com IP público e um **domínio** apontando para ela (ex.: `rdesk.seu-dominio.com`). As passkeys exigem domínio, não funcionam com IP.
 - Portas abertas: **443/tcp** (site, API e relay) e **7842/udp** (descoberta de endereço do relay, ajuda o hole punching).
 
-## Instalação: binário + systemd
+## Instalação em um comando
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JefersonSantos06/rdesk/main/deploy/install-server.sh \
+  | sudo bash -s -- --domain rdesk.seu-dominio.com --admin voce@gmail.com
+```
+
+Baixa a última versão (conferindo o SHA-256 do `release.json`), instala o programa e as unidades do systemd (inclusive a de atualização), cria o usuário `rdesk`, roda o `init`, abre 443/tcp e 7842/udp no `ufw` (se ativo) e mostra as URLs para o Google/GitHub. Atrás de um proxy que já faz HTTPS, acrescente `--listen 127.0.0.1:8090` (veja abaixo). Rodar de novo atualiza.
+
+## Instalação: binário + systemd (à mão)
 
 ```sh
 cargo build --release -p rdesk-server

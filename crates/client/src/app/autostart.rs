@@ -306,13 +306,17 @@ mod imp {
     pub fn service_action(exe: &Path, install: bool) -> Result<String> {
         use rdesk_host::win::service;
         if elevated() {
-            let msg = if install { service::install()? } else { service::uninstall()? };
-            if install && current() == Autostart::LoginAdmin {
-                apply(Autostart::Login, exe)?;
+            let msg = if install {
+                rdesk_host::win::install::install(&Default::default())?
+            } else {
+                rdesk_host::win::install::uninstall()?
+            };
+            if install && current() != Autostart::Off {
+                apply(Autostart::Login, &service::program_exe())?;
             }
             return Ok(msg);
         }
-        let code = run_elevated(exe, if install { "service install" } else { "service uninstall" }, false, true)?;
+        let code = run_elevated(exe, if install { "install" } else { "uninstall" }, false, true)?;
         if code != 0 {
             bail!("the elevated helper failed (exit code {code}); `rdesk service status` in a terminal says more");
         }

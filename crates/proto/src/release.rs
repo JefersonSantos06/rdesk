@@ -55,6 +55,8 @@ pub enum FileKind {
     Deb,
     /// `rdesk-server` (`.tar.gz`).
     Server,
+    /// The Windows program on its own (`.exe`): what the server's download page hands out.
+    Exe,
 }
 
 impl FileKind {
@@ -63,6 +65,7 @@ impl FileKind {
             FileKind::App => "app",
             FileKind::Deb => "deb",
             FileKind::Server => "server",
+            FileKind::Exe => "exe",
         }
     }
 }
@@ -70,8 +73,8 @@ impl FileKind {
 pub const PLATFORMS: [&str; 4] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64"];
 
 /// What an asset is, from its name:
-/// `rdesk-<v>-<platform>.zip|.tar.gz`, `rdesk-server-<v>-<platform>.tar.gz`,
-/// `rdesk_<v>_amd64.deb|arm64.deb`.
+/// `rdesk-<v>-<platform>.zip|.tar.gz`, `rdesk-<v>-windows-x86_64.exe`,
+/// `rdesk-server-<v>-<platform>.tar.gz`, `rdesk_<v>_amd64.deb|arm64.deb`.
 pub fn classify(name: &str, version: &str) -> Option<(FileKind, &'static str)> {
     if let Some(rest) = name.strip_prefix(&format!("rdesk_{version}_")) {
         let platform = match rest {
@@ -80,6 +83,9 @@ pub fn classify(name: &str, version: &str) -> Option<(FileKind, &'static str)> {
             _ => return None,
         };
         return Some((FileKind::Deb, platform));
+    }
+    if name == format!("rdesk-{version}-windows-x86_64.exe") {
+        return Some((FileKind::Exe, "windows-x86_64"));
     }
     let (kind, rest) = match name.strip_prefix(&format!("rdesk-server-{version}-")) {
         Some(rest) => (FileKind::Server, rest),
@@ -120,6 +126,8 @@ mod tests {
         assert_eq!(classify("rdesk-0.1.0-linux-x86_64.tar.gz", v), None, "other version");
         assert_eq!(classify("rdesk-0.2.0-windows-x86_64.tar.gz", v), None);
         assert_eq!(classify("rdesk-0.2.0-macos-aarch64.tar.gz", v), Some((FileKind::App, "macos-aarch64")));
+        assert_eq!(classify("rdesk-0.2.0-windows-x86_64.exe", v), Some((FileKind::Exe, "windows-x86_64")));
+        assert_eq!(classify("rdesk-0.2.0-linux-x86_64.exe", v), None);
         assert_eq!(classify("rdesk-0.2.0-linux-x86_64.zip", v), None);
         assert_eq!(classify("notes.txt", v), None);
     }

@@ -4,6 +4,7 @@
 
 pub mod desktop;
 pub mod files;
+pub mod install;
 pub mod notice;
 pub mod proc;
 pub mod service;

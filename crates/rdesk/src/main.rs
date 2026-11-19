@@ -42,6 +42,29 @@ enum Command {
     #[cfg(feature = "host")]
     #[command(subcommand)]
     Host(HostCmd),
+    /// Install rdesk on this Windows computer: the program, the service, Settings → Apps.
+    /// Asks for administrator permission.
+    #[cfg(all(windows, feature = "host"))]
+    Install {
+        /// Only accessed, never used to reach others: it asks the server to add it.
+        #[arg(long)]
+        only_share: bool,
+        /// The rdesk server (default: from the program's name, rdesk@server.exe).
+        #[arg(long)]
+        server: Option<String>,
+        /// With --only-share: who will own it (they approve it in their app).
+        #[arg(long)]
+        owner: Option<String>,
+        /// With --only-share: an enrollment key (added at once).
+        #[arg(long)]
+        key: Option<String>,
+        /// With --only-share: its name on the server.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Remove rdesk from this Windows computer (the host's settings come back to you).
+    #[cfg(all(windows, feature = "host"))]
+    Uninstall,
     /// The Windows service: this computer reachable before sign-in, on the lock screen and
     /// through UAC (install, uninstall, status).
     #[cfg(all(windows, feature = "host"))]
@@ -524,6 +547,71 @@ fn file_helper(cmd: FileHelperCmd) -> Result<()> {
     }
 }
 
+/// Not elevated: run this same command again as administrator (Windows asks).
+#[cfg(all(windows, feature = "host"))]
+fn elevate_self() -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let exe = std::env::current_exe()?;
+    let args: Vec<String> =
+        std::env::args().skip(1).map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a }).collect();
+    let (verb, file, params) = (wide("runas".as_ref()), wide(exe.as_os_str()), wide(args.join(" ").as_ref()));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = 1;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        bail!("administrator permission was not given");
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        GetExitCodeProcess(info.hProcess, &mut code);
+    }
+    if code != 0 {
+        bail!("the installer (as administrator) failed with code {code}");
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, feature = "host"))]
+fn install_cmd(opts: rdesk_host::win::install::InstallOpts) -> Result<()> {
+    if !rdesk_host::elevation::is_elevated() {
+        return elevate_self();
+    }
+    println!("{}", rdesk_host::win::install::install(&opts)?);
+    let exe = rdesk_host::win::service::program_exe();
+    #[cfg(feature = "client")]
+    if !opts.only_share {
+        // The app starts with Windows (in the tray), from the program the service keeps updated.
+        rdesk_client::app::apply_autostart(rdesk_client::app::Autostart::Login, &exe)?;
+        if let Some(server) = opts.server.clone().or_else(config::server_from_exe_name) {
+            let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG).unwrap_or_default();
+            cfg.server.get_or_insert(server);
+            config::ensure_config_dir()?;
+            config::save_toml(config::CLIENT_CONFIG, &cfg)?;
+        }
+        println!("Open rdesk from the Start menu ({}).", exe.display());
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, feature = "host"))]
+fn uninstall_cmd() -> Result<()> {
+    if !rdesk_host::elevation::is_elevated() {
+        return elevate_self();
+    }
+    #[cfg(feature = "client")]
+    let _ = rdesk_client::app::apply_autostart(rdesk_client::app::Autostart::Off, &std::env::current_exe()?);
+    println!("{}", rdesk_host::win::install::uninstall()?);
+    Ok(())
+}
+
 #[cfg(all(windows, feature = "host"))]
 fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     use rdesk_host::win::service::{self, State};
@@ -675,6 +763,12 @@ fn main() -> Result<()> {
         Command::Host(h) => host_cmd(h),
         #[cfg(all(windows, feature = "host"))]
         Command::Service(s) => service_cmd(s),
+        #[cfg(all(windows, feature = "host"))]
+        Command::Install { only_share, server, owner, key, name } => {
+            install_cmd(rdesk_host::win::install::InstallOpts { only_share, server, owner, key, name })
+        }
+        #[cfg(all(windows, feature = "host"))]
+        Command::Uninstall => uninstall_cmd(),
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
         Command::Machines(m) => runtime()?.block_on(machines_cmd(m)),

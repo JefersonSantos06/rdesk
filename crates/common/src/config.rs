@@ -40,6 +40,20 @@ pub fn config_dir() -> Result<PathBuf> {
 pub const HOST_FILES: [&str; 6] =
     [HOST_CONFIG, AUTHORIZED_KEYS, HOST_KEY, OPAQUE_SETUP, OPAQUE_PASSWORD, "machine.json"];
 
+/// The server in the program's own name, as the server's download page names it:
+/// `rdesk@rdesk.example.com.exe` (also `… (1).exe`, a second download) → `rdesk.example.com`.
+pub fn server_from_exe_name() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    server_in_name(exe.file_name()?.to_str()?)
+}
+
+fn server_in_name(name: &str) -> Option<String> {
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    let (_, server) = name.split_once('@')?;
+    let server = server.split(' ').next()?.trim();
+    (server.contains('.') && !server.contains(['/', '\\'])).then(|| server.to_string())
+}
+
 /// Where the Windows service keeps the host's files: `%ProgramData%\rdesk`.
 pub fn service_dir() -> Option<PathBuf> {
     if cfg!(windows) { std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join("rdesk")) } else { None }
@@ -389,6 +403,15 @@ pub fn parse_host_id(s: &str) -> Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn server_from_the_program_name() {
+        assert_eq!(server_in_name("rdesk@rdesk.example.com.exe").as_deref(), Some("rdesk.example.com"));
+        assert_eq!(server_in_name("rdesk@rdesk.example.com (1).exe").as_deref(), Some("rdesk.example.com"));
+        assert_eq!(server_in_name("rdesk@rdesk.example.com").as_deref(), Some("rdesk.example.com"));
+        assert_eq!(server_in_name("rdesk.exe"), None);
+        assert_eq!(server_in_name("rdesk@local.exe"), None);
+    }
 
     #[test]
     fn direct_sources() {

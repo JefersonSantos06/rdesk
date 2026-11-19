@@ -16,6 +16,11 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 
 ## Baixar
 
+Do seu servidor: **`https://seu-servidor/download`**. Ele lista a versão liberada para todos:
+- **Windows**: `rdesk@seu-servidor.exe`, que já sabe qual servidor usar. Abra, entre e, em *This computer*, **Install rdesk on this computer** (instala em `Program Files`, o serviço, o Menu Iniciar e *Configurações → Aplicativos*; atualiza sozinho). Pela linha de comando: `rdesk install` (ou `rdesk install --only-share --key rdk_…` para um computador só acessado), `rdesk uninstall`.
+- **Linux**: `curl -fsSL https://seu-servidor/install.sh | sudo sh` (instala o `.deb` e liga as atualizações; `… | sudo sh -s -- --host --key rdk_…` para um computador só acessado).
+- **Mac**: o `rdesk.app`.
+
 As versões publicadas ficam nos [Releases](../../releases): app para Windows, Linux (x64 e arm64, também em `.deb`) e Mac com Apple Silicon (`rdesk.app`; na primeira vez, botão direito → *Abrir*), e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Compilar

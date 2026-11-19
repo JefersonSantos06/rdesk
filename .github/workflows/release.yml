@@ -76,6 +76,8 @@ jobs:
         run: |
           mkdir dist
           7z a "dist/rdesk-$VERSION-${{ matrix.platform }}.zip" ./target/release/rdesk.exe
+          # Also on its own: the server's download page hands it out as rdesk@server.exe.
+          cp target/release/rdesk.exe "dist/rdesk-$VERSION-${{ matrix.platform }}.exe"
       - uses: taiki-e/install-action@v2
         if: matrix.part == 'app' && runner.os == 'Linux'
         with:
