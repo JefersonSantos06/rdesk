@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod config;
 pub mod directory;
 pub mod files;
+pub mod ticket;
 pub mod tiles;
 pub mod transport;
 

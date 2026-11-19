@@ -39,7 +39,11 @@ struct SessionAccess {
 impl AccessControl for SessionAccess {
     async fn on_connect(&self, req: &ClientRequest) -> Access {
         let ok = match req.auth_token() {
-            Some(t) => matches!(self.db.session(&t), Ok(Some(_))),
+            // A signed-in user's app, or a registered computer (its token only works for its own ID).
+            Some(t) => {
+                matches!(self.db.session(&t), Ok(Some(_)))
+                    || matches!(self.db.machine_by_token(&t), Ok(Some(m)) if m.endpoint_id == hex::encode(req.endpoint_id().as_bytes()))
+            }
             None => false,
         };
         if !ok {

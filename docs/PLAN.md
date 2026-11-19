@@ -72,7 +72,15 @@ Planejado:
 - App: tela de login que bloqueia o resto; `rdesk login <servidor>` e `rdesk logout`. O endereço do relay vem do servidor, e `rdesk net relay` sai.
 - Gestão dos e-mails pelo app (página *Admin*, só para admins do sistema).
 
-### Fase 3: máquinas, grupos e acesso
+### Fase 3: máquinas, grupos e acesso (feita, branch `iroh-transport`)
+Como ficou:
+- Tíquetes assinados com a chave do servidor, presos à máquina e ao endpoint do cliente (até 12 h); protocolo v2 (`ClientMsg::Ticket`, `HostMsg::TicketOkNeedLocal`).
+- Revogação: o servidor registra quem perdeu acesso e acorda o long-poll do host (`/api/agent/sync`), que derruba a sessão na hora.
+- Cadastro com prova de posse (assinatura com a chave do host).
+- O status *em uso* e os endereços de LAN vêm do sync do host; *online* vem do relay.
+- A lista local de computadores saiu; `client.toml` guarda só as *Login options* (cadeado extra) por host ID.
+
+Planejado:
 - API e app:
   - cadastrar e descadastrar a máquina;
   - nível de acesso (privada / específicos / todos);

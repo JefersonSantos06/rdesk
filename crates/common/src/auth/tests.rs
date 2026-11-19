@@ -4,6 +4,8 @@ use ssh_key::Algorithm;
 use tokio::io::AsyncWriteExt;
 
 const HOST_FP: [u8; 32] = [7; 32];
+/// The client's endpoint ID as the host sees it.
+const PEER: [u8; 32] = [5; 32];
 
 fn host_info() -> HostInfo {
     HostInfo { hostname: "test".into(), os: "test".into(), monitors: vec![], active_monitor: 0 }
@@ -24,6 +26,8 @@ fn host_cfg(keys: &[&PrivateKey], password: Option<&str>) -> HostAuthConfig {
         opaque,
         host_fp: HOST_FP,
         host_name: "host".into(),
+        ticket: None,
+        require_local: false,
     }
 }
 
@@ -31,6 +35,7 @@ fn client(keys: Vec<PrivateKey>, password: Option<&str>) -> ClientAuth {
     ClientAuth {
         client_name: "client".into(),
         resume: None,
+        ticket: None,
         keys: if keys.is_empty() { None } else { Some(KeySource::Local(keys)) },
         key_filter: None,
         password: password.map(|p| PasswordSource::Fixed(Zeroizing::new(p.to_string()))),
@@ -49,7 +54,7 @@ async fn run(
     let (mut ar, mut aw) = tokio::io::split(a);
     let (mut br, mut bw) = tokio::io::split(b);
     let host = async {
-        let r = host_handshake(cfg, store, &mut ar, &mut aw, host_ek, host_info).await;
+        let r = host_handshake(cfg, store, &mut ar, &mut aw, host_ek, PEER, host_info).await;
         let _ = aw.shutdown().await; // EOF so a waiting client stops
         r
     };
@@ -243,4 +248,104 @@ fn limiter_backs_off() {
     assert!(l.check(ip).is_err());
     l.success(ip);
     assert!(l.check(ip).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Tickets (computers registered with an rdesk server)
+// ---------------------------------------------------------------------------
+
+fn ticket_for(server: &iroh::SecretKey, client: [u8; 32], user_id: i64, issued: i64) -> Vec<u8> {
+    use rdesk_proto::ticket::{SignedTicket, TicketClaims};
+    let claims = TicketClaims {
+        ticket_id: [0; 16],
+        machine: HOST_FP,
+        client,
+        user_id,
+        user_email: "ana@example.com".into(),
+        user_name: "Ana".into(),
+        role: "control".into(),
+        issued_at: issued,
+        expires_at: issued + 3600,
+    }
+    .to_bytes();
+    let sig = server.sign(&SignedTicket::signed_message(&claims));
+    SignedTicket { claims, signature: sig.to_bytes() }.to_bytes()
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+fn registered(server: &iroh::SecretKey, keys: &[&PrivateKey], password: Option<&str>, local: bool) -> HostAuthConfig {
+    let mut cfg = host_cfg(keys, password);
+    cfg.ticket =
+        Some(TicketPolicy { server_key: *server.public().as_bytes(), machine: HOST_FP, revoked: Default::default() });
+    cfg.require_local = local;
+    cfg
+}
+
+#[tokio::test]
+async fn ticket_alone_logs_in_and_keeps_the_user() {
+    let server = iroh::SecretKey::generate();
+    let cfg = registered(&server, &[], None, false);
+    let store = ResumeStore::default();
+    let mut auth = client(vec![], None);
+    auth.ticket = Some(ticket_for(&server, PEER, 7, unix_now()));
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    let h = h.unwrap();
+    assert_eq!(h.kind, AuthKind::Ticket { local: None });
+    assert_eq!(h.user.as_ref().unwrap().user_id, 7);
+
+    // Resuming keeps the user, until their access is revoked.
+    let c = c.unwrap();
+    let mut again = client(vec![], None);
+    again.resume = Some((c.session_id, c.resume_token));
+    let (h2, _) = run(&cfg, &store, [2; 32], [2; 32], HOST_FP, &mut again).await;
+    let h2 = h2.unwrap();
+    assert_eq!(h2.kind, AuthKind::Resume);
+    assert_eq!(h2.user.unwrap().user_id, 7);
+}
+
+#[tokio::test]
+async fn registered_hosts_need_a_ticket() {
+    let server = iroh::SecretKey::generate();
+    let key = ed25519();
+    // Even an authorized key does not get in without a ticket.
+    let cfg = registered(&server, &[&key], Some("pw"), true);
+    let store = ResumeStore::default();
+    let mut auth = client(vec![key.clone()], Some("pw"));
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(h.is_err() && c.is_err());
+
+    // A ticket for another connection is refused.
+    let mut auth = client(vec![], None);
+    auth.ticket = Some(ticket_for(&server, [6; 32], 7, unix_now()));
+    let (h, _) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(format!("{:#}", h.unwrap_err()).contains("another connection"));
+
+    // A revoked user is refused.
+    let cfg2 = registered(&server, &[], None, false);
+    cfg2.ticket.as_ref().unwrap().revoked.write().unwrap().insert(7, unix_now());
+    let mut auth = client(vec![], None);
+    auth.ticket = Some(ticket_for(&server, PEER, 7, unix_now() - 5));
+    let (h, _) = run(&cfg2, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(format!("{:#}", h.unwrap_err()).contains("removed"));
+}
+
+#[tokio::test]
+async fn ticket_plus_local_password() {
+    let server = iroh::SecretKey::generate();
+    let cfg = registered(&server, &[], Some("correct horse"), true);
+    let store = ResumeStore::default();
+
+    let mut auth = client(vec![], Some("correct horse"));
+    auth.ticket = Some(ticket_for(&server, PEER, 7, unix_now()));
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert_eq!(h.unwrap().kind, AuthKind::Ticket { local: Some("password".into()) });
+    assert!(c.is_ok());
+
+    let mut auth = client(vec![], Some("wrong"));
+    auth.ticket = Some(ticket_for(&server, PEER, 7, unix_now()));
+    let (h, _) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(h.is_err(), "the ticket alone is not enough when the host wants its password");
 }

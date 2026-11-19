@@ -22,6 +22,8 @@ pub enum AuthMethod {
     Resume,
     PublicKey,
     Password,
+    /// An access ticket from the rdesk server ([`crate::ticket`]).
+    Ticket,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +115,10 @@ pub enum ClientMsg {
     /// Instead of `Hello`: ask whether rdesk is running and whether it is busy, without
     /// logging in. The host answers with [`HostMsg::ProbeInfo`] and closes the connection.
     Probe,
+    /// An access ticket (postcard of [`crate::ticket::SignedTicket`]).
+    Ticket {
+        ticket: Vec<u8>,
+    },
 }
 
 /// Messages the host sends on the control stream.
@@ -158,7 +164,7 @@ pub enum HostMsg {
         text: String,
     },
     /// Answer to [`ClientMsg::Probe`]. Sent before authentication, so it only carries what
-    /// any tailnet member could learn anyway.
+    /// anyone who can reach the host could learn anyway.
     ProbeInfo {
         proto: u16,
         host_name: String,
@@ -167,6 +173,8 @@ pub enum HostMsg {
         /// Another client is currently connected.
         in_session: bool,
     },
+    /// The ticket is valid, but this machine also wants its own password or SSH key.
+    TicketOkNeedLocal,
 }
 
 /// First message on every client-opened stream other than the control stream.

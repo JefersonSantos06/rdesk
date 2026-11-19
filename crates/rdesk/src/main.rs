@@ -17,6 +17,7 @@ use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfi
 use rdesk_common::transport;
 #[cfg(feature = "host")]
 use rdesk_common::transport::HostIdentity;
+use rdesk_proto::api::{GroupRole, Machine, UpdateMachine, Visibility};
 #[cfg(feature = "host")]
 use ssh_key::PublicKey;
 #[cfg(feature = "host")]
@@ -55,12 +56,16 @@ enum Command {
         #[arg(value_parser = ["off", "login", "login-admin"])]
         mode: String,
     },
-    /// Open a viewer window to a host: a saved name, a host ID, or ID@address.
+    /// Open a viewer window to a computer: its name on the server, its host ID, or
+    /// ID@address for an unregistered computer on the LAN.
     #[cfg(feature = "client")]
     Connect(ConnectArgs),
-    /// Manage saved hosts (client.toml).
+    /// Computers on your server: list, register this one, rename, who may access them.
     #[command(subcommand)]
-    Hosts(HostsCmd),
+    Machines(MachinesCmd),
+    /// Groups of users (to share computers with).
+    #[command(subcommand)]
+    Groups(GroupsCmd),
     /// Sign in to your rdesk server (opens the browser: Google/GitHub + second factor).
     Login {
         /// Server address, e.g. rdesk.example.com (default: the last one used).
@@ -160,28 +165,97 @@ enum HostCmd {
     Check,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum VisArg {
+    /// Only you.
+    Private,
+    /// You and the users/groups you share it with.
+    Shared,
+    /// Everyone on the server.
+    Everyone,
+}
+
+impl From<VisArg> for Visibility {
+    fn from(v: VisArg) -> Self {
+        match v {
+            VisArg::Private => Visibility::Private,
+            VisArg::Shared => Visibility::Shared,
+            VisArg::Everyone => Visibility::Everyone,
+        }
+    }
+}
+
 #[derive(Subcommand)]
-enum HostsCmd {
-    /// Save a host: `rdesk hosts add casa <host ID> [--addr 192.168.0.10]`
-    Add {
-        alias: String,
-        /// The host's ID (`rdesk host id` on that machine).
-        id: String,
-        /// Direct address (LAN, port forwarding); optional with a relay.
-        #[arg(long)]
-        addr: Option<String>,
-        #[arg(long, value_enum, default_value = "auto")]
-        auth: AuthArg,
-        /// Agent key fingerprint to use (SHA256:...).
-        #[arg(long)]
-        key: Option<String>,
-        /// 1Password reference for the password, e.g. op://Private/rdesk/password
-        #[arg(long)]
-        password_ref: Option<String>,
-    },
+enum MachinesCmd {
+    /// The computers you can reach (and yours).
     List,
+    /// Register this computer with your server (so others with access can reach it).
+    #[cfg(feature = "host")]
+    Register {
+        /// Name on the server (default: this computer's name).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: VisArg,
+    },
+    /// Remove this computer from the server.
+    #[cfg(feature = "host")]
+    Unregister,
+    /// Rename a computer you registered.
+    Rename { machine: String, name: String },
+    /// Who may see and reach a computer you registered.
+    Visibility {
+        machine: String,
+        #[arg(value_enum)]
+        visibility: VisArg,
+    },
+    /// Show whom a computer is shared with.
+    Shares { machine: String },
+    /// Set whom a computer is shared with (replaces the list; also sets it to "shared").
+    Share {
+        machine: String,
+        /// E-mail of a user (repeat for several).
+        #[arg(long = "user")]
+        users: Vec<String>,
+        /// Name of a group (repeat for several).
+        #[arg(long = "group")]
+        groups: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupsCmd {
+    List,
+    Create {
+        name: String,
+    },
+    Rename {
+        group: String,
+        name: String,
+    },
+    Delete {
+        group: String,
+    },
+    /// Add a member (or change their role with `role`).
+    Add {
+        group: String,
+        email: String,
+        /// Make them an admin of the group.
+        #[arg(long)]
+        admin: bool,
+    },
+    Role {
+        group: String,
+        email: String,
+        #[arg(value_parser = ["admin", "member"])]
+        role: String,
+    },
     Remove {
-        alias: String,
+        group: String,
+        email: String,
+    },
+    Leave {
+        group: String,
     },
 }
 
@@ -243,9 +317,6 @@ struct AuthArgs {
     /// Unencrypted OpenSSH private key file to use instead of the agent.
     #[arg(long)]
     identity: Option<PathBuf>,
-    /// Host ID, when the target is an address (`--id <ID> 192.168.0.10`).
-    #[arg(long)]
-    id: Option<String>,
 }
 
 #[cfg(feature = "client")]
@@ -351,7 +422,8 @@ fn main() -> Result<()> {
         Command::Host(h) => host_cmd(h),
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
-        Command::Hosts(h) => hosts_cmd(h),
+        Command::Machines(m) => runtime()?.block_on(machines_cmd(m)),
+        Command::Groups(g) => runtime()?.block_on(groups_cmd(g)),
         Command::Login { server } => runtime()?.block_on(login(server)),
         Command::Logout => runtime()?.block_on(logout()),
         Command::Whoami => runtime()?.block_on(whoami()),
@@ -542,39 +614,186 @@ async fn host_check() -> Result<()> {
 // Client commands
 // ---------------------------------------------------------------------------
 
-fn hosts_cmd(cmd: HostsCmd) -> Result<()> {
+/// Find a computer by name, host ID (or its first characters) or server id.
+fn find_machine<'a>(list: &'a [Machine], what: &str) -> Result<&'a Machine> {
+    let w = what.trim().to_lowercase();
+    let hits: Vec<&Machine> = list
+        .iter()
+        .filter(|m| {
+            m.name.to_lowercase() == w || m.id.to_string() == w || (w.len() >= 8 && m.endpoint_id.starts_with(&w))
+        })
+        .collect();
+    match hits.as_slice() {
+        [m] => Ok(m),
+        [] => bail!("no computer {what:?} that you can reach (see `rdesk machines list`)"),
+        _ => bail!("{what:?} matches several computers: use its host ID"),
+    }
+}
+
+fn vis_label(v: Visibility) -> &'static str {
+    match v {
+        Visibility::Private => "private",
+        Visibility::Shared => "shared",
+        Visibility::Everyone => "everyone",
+    }
+}
+
+async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
+    let s = session()?;
+    let api = s.api()?;
     match cmd {
-        HostsCmd::Add { alias, id, addr, auth, key, password_ref } => {
-            let id = format_host_id(&parse_host_id(&id)?);
-            config::ensure_config_dir()?;
-            let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-            let addr = addr.unwrap_or_default();
-            if addr.is_empty() && config::load_network().relay.is_none() {
-                eprintln!("note: not signed in to a server, so {alias} is reachable only with --addr (`rdesk login`)");
+        MachinesCmd::List => {
+            let list = api.machines().await?;
+            if list.is_empty() {
+                println!("No computers yet. Register one with `rdesk machines register` on it.");
             }
-            cfg.hosts.insert(
-                alias.clone(),
-                HostEntry { id, addr, auth: auth.into(), key, password_ref, ..Default::default() },
-            );
-            config::save_toml(config::CLIENT_CONFIG, &cfg)?;
-            println!("Saved {alias}. Connect with: rdesk connect {alias}");
-            Ok(())
-        }
-        HostsCmd::List => {
-            let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-            for (alias, e) in &cfg.hosts {
-                let addr = if e.addr.is_empty() { "-" } else { e.addr.as_str() };
-                let id = if e.id.is_empty() { "(no ID)" } else { e.id.as_str() };
-                println!("{alias}\t{id}\t{addr}\t{:?}", e.auth);
+            for m in list {
+                let state = if m.in_session {
+                    "in use"
+                } else if m.online {
+                    "online"
+                } else {
+                    "offline"
+                };
+                let owner = if m.is_owner { "yours".to_string() } else { format!("by {}", m.owner.email) };
+                println!(
+                    "{}\t{state}\t{}\t{owner}\t{}{}",
+                    m.name,
+                    vis_label(m.visibility),
+                    &m.endpoint_id[..16],
+                    if m.can_access { "" } else { "\t(no access)" }
+                );
             }
-            Ok(())
         }
-        HostsCmd::Remove { alias } => {
-            let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-            cfg.hosts.remove(&alias);
-            config::save_toml(config::CLIENT_CONFIG, &cfg)
+        #[cfg(feature = "host")]
+        MachinesCmd::Register { name, visibility } => {
+            let name = name.unwrap_or_else(rdesk_common::local_hostname);
+            let r = rdesk_host::admin::register(&s, &name, visibility.into()).await?;
+            println!("Registered as {} on {} ({}).", r.name, r.server_name, vis_label(visibility.into()));
+            println!("Restart the host (or turn it off and on in the app) to use the server's relay.");
+        }
+        #[cfg(feature = "host")]
+        MachinesCmd::Unregister => {
+            rdesk_host::admin::unregister(&s).await?;
+            println!("Unregistered. Restart the host.");
+        }
+        MachinesCmd::Rename { machine, name } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let change = UpdateMachine { name: Some(name), visibility: None };
+            println!("Renamed to {}.", api.update_machine(m.id, &change).await?.name);
+        }
+        MachinesCmd::Visibility { machine, visibility } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let change = UpdateMachine { name: None, visibility: Some(visibility.into()) };
+            let m = api.update_machine(m.id, &change).await?;
+            println!("{}: {}.", m.name, vis_label(m.visibility));
+        }
+        MachinesCmd::Shares { machine } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let sh = api.shares(m.id).await?;
+            println!("{} ({}):", m.name, vis_label(m.visibility));
+            for u in sh.users {
+                println!("  user  {}", u.email);
+            }
+            for g in sh.groups {
+                println!("  group {}", g.name);
+            }
+        }
+        MachinesCmd::Share { machine, users, groups } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let dir = api.directory().await?;
+            let all_groups = api.all_groups().await?;
+            let mut uids = Vec::new();
+            for e in &users {
+                let e = e.trim().to_lowercase();
+                uids.push(dir.iter().find(|u| u.email == e).ok_or_else(|| anyhow!("no user {e}"))?.id);
+            }
+            let mut gids = Vec::new();
+            for g in &groups {
+                let found = all_groups.iter().find(|x| x.name.eq_ignore_ascii_case(g.trim()));
+                gids.push(found.ok_or_else(|| anyhow!("no group {g}"))?.id);
+            }
+            api.set_shares(m.id, uids, gids).await?;
+            if m.visibility != Visibility::Shared {
+                let change = UpdateMachine { name: None, visibility: Some(Visibility::Shared) };
+                api.update_machine(m.id, &change).await?;
+            }
+            println!("{} is shared with {} user(s) and {} group(s).", m.name, users.len(), groups.len());
         }
     }
+    Ok(())
+}
+
+async fn groups_cmd(cmd: GroupsCmd) -> Result<()> {
+    let api = session()?.api()?;
+    let find = async |name: &str| -> Result<rdesk_proto::api::Group> {
+        api.groups()
+            .await?
+            .into_iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name.trim()))
+            .ok_or_else(|| anyhow!("you are not in a group called {name:?}"))
+    };
+    let member = |g: &rdesk_proto::api::Group, email: &str| -> Result<i64> {
+        let e = email.trim().to_lowercase();
+        g.members
+            .iter()
+            .find(|m| m.user.email == e)
+            .map(|m| m.user.id)
+            .ok_or_else(|| anyhow!("{e} is not in {}", g.name))
+    };
+    match cmd {
+        GroupsCmd::List => {
+            for g in api.groups().await? {
+                let mine = match g.my_role {
+                    Some(GroupRole::Admin) => " (you: admin)",
+                    Some(GroupRole::Member) => " (you: member)",
+                    None => "",
+                };
+                println!("{}{mine}", g.name);
+                for m in g.members {
+                    println!("  {}{}", m.user.email, if m.role == GroupRole::Admin { " (admin)" } else { "" });
+                }
+            }
+        }
+        GroupsCmd::Create { name } => println!("Created {}.", api.create_group(&name).await?.name),
+        GroupsCmd::Rename { group, name } => {
+            let g = find(&group).await?;
+            println!("Renamed to {}.", api.rename_group(g.id, &name).await?.name);
+        }
+        GroupsCmd::Delete { group } => {
+            let g = find(&group).await?;
+            api.delete_group(g.id).await?;
+            println!("Deleted {}.", g.name);
+        }
+        GroupsCmd::Add { group, email, admin } => {
+            let g = find(&group).await?;
+            let role = if admin { GroupRole::Admin } else { GroupRole::Member };
+            api.add_member(g.id, &email, role).await?;
+            println!("{} is in {}.", email.trim(), g.name);
+        }
+        GroupsCmd::Role { group, email, role } => {
+            let g = find(&group).await?;
+            let role = if role == "admin" { GroupRole::Admin } else { GroupRole::Member };
+            api.set_member_role(g.id, member(&g, &email)?, role).await?;
+            println!("Done.");
+        }
+        GroupsCmd::Remove { group, email } => {
+            let g = find(&group).await?;
+            api.remove_member(g.id, member(&g, &email)?).await?;
+            println!("Removed {} from {}.", email.trim(), g.name);
+        }
+        GroupsCmd::Leave { group } => {
+            let g = find(&group).await?;
+            let me = session()?.user.id;
+            api.remove_member(g.id, me).await?;
+            println!("You left {}.", g.name);
+        }
+    }
+    Ok(())
 }
 
 /// The saved session, or an error telling how to get one.
@@ -713,34 +932,40 @@ struct Target {
     name: String,
     entry: HostEntry,
     id: [u8; 32],
+    machine: Option<rdesk_client::conn::MachineTarget>,
     cfg: ClientConfig,
     net: NetworkConfig,
 }
 
-/// `target` is a saved name, a host ID, `ID@address`, or an address with `--id`.
+/// `target` is a computer's name on the server, its host ID (or the start of it), or
+/// `ID@address` for an unregistered computer on the LAN.
 #[cfg(feature = "client")]
-fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
+async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     // Using rdesk needs an account on your server.
-    session()?;
+    let s = session()?;
     let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
-    let mut entry = match cfg.hosts.get(target) {
-        Some(e) => e.clone(),
+    let (name, id_hex, addr, machine) = match target.split_once('@') {
+        Some((id, addr)) => {
+            parse_host_id(id).with_context(|| format!("{target}: expected ID@address"))?;
+            (id.chars().take(12).collect::<String>(), id.to_string(), addr.to_string(), None)
+        }
         None => {
-            let (id, addr) = match (target.split_once('@'), &a.id) {
-                (Some((id, addr)), _) => (id.to_string(), addr.to_string()),
-                (None, Some(id)) => (id.clone(), target.to_string()),
-                (None, None) => (target.to_string(), String::new()),
-            };
-            if parse_host_id(&id).is_err() {
-                bail!("{target}: not a saved computer (rdesk hosts list) nor a host ID; use ID, ID@address or --id");
+            let list = s.api()?.machines().await?;
+            let m = find_machine(&list, target)?;
+            if !m.can_access {
+                bail!("{} is not shared with you", m.name);
             }
-            HostEntry { id, addr, ..Default::default() }
+            let target = rdesk_client::conn::MachineTarget { id: m.id, addrs: m.addrs.clone() };
+            (m.name.clone(), m.endpoint_id.clone(), String::new(), Some(target))
         }
     };
-    if let Some(id) = &a.id {
-        entry.id = id.clone();
+    let id = parse_host_id(&id_hex)?;
+    // Login options for this computer's extra lock (password / SSH key), by host ID.
+    let mut entry = cfg.hosts.get(&format_host_id(&id)).cloned().unwrap_or_default();
+    entry.id = format_host_id(&id);
+    if !addr.is_empty() {
+        entry.addr = addr;
     }
-    let id = parse_host_id(&entry.id).with_context(|| format!("{target} has no valid host ID"))?;
     if let Some(x) = a.auth {
         entry.auth = x.into();
     }
@@ -756,19 +981,20 @@ fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     if a.identity.is_some() {
         entry.identity = a.identity.clone();
     }
-    Ok(Target { name: target.to_string(), entry, id, cfg, net: config::load_network() })
+    Ok(Target { name, entry, id, machine, cfg, net: config::load_network() })
 }
 
 #[cfg(feature = "client")]
 fn connect(a: ConnectArgs) -> Result<()> {
     use rdesk_client::conn::ConnectOpts;
-    let t = resolve_target(&a.target, &a.auth)?;
+    let t = runtime()?.block_on(resolve_target(&a.target, &a.auth))?;
     let opts = ConnectOpts {
         name: t.name.clone(),
         // The window asks in a dialog; --headless asks on the terminal.
         ask_password_in_ui: !a.headless,
         entry: t.entry.clone(),
         id: t.id,
+        machine: t.machine.clone(),
         monitor: a.monitor,
         transport: t.cfg.transport.clone(),
         net: t.net.clone(),
@@ -830,11 +1056,22 @@ async fn cli_login(
     t: &Target,
     ep: &transport::Endpoint,
 ) -> Result<(transport::Connection, transport::SendStream, transport::RecvStream)> {
-    let c = transport::connect(ep, t.id, Some(&t.entry.addr), &t.net, Duration::from_secs(10)).await?;
+    let ticket = match &t.machine {
+        Some(m) => Some(
+            rdesk_client::conn::get_ticket(m.id, ep.id().as_bytes(), &mut None).await.map_err(|(_, e)| anyhow!(e))?,
+        ),
+        None => None,
+    };
+    let mut direct: Vec<String> = t.machine.as_ref().map(|m| m.addrs.clone()).unwrap_or_default();
+    if !t.entry.addr.is_empty() {
+        direct.insert(0, t.entry.addr.clone());
+    }
+    let c = transport::connect_with(ep, t.id, &direct, &t.net, Duration::from_secs(10)).await?;
     let (mut w, mut r) = c.conn.open_bi().await?;
     let used = std::sync::Arc::new(std::sync::Mutex::new(None));
     let asker = rdesk_client::conn::password_asker(&t.name, &t.entry, used.clone(), None);
     let mut creds = rdesk_client::conn::credentials(&t.entry, None, asker).await;
+    creds.ticket = ticket;
     auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await?;
     // We don't watch the screen: ask for the minimum.
     rdesk_proto::write_msg(&mut w, &rdesk_proto::ClientMsg::SetQuality { max_fps: 1, jpeg_quality: 10 }).await?;
@@ -855,7 +1092,7 @@ fn progress_printer(name: String) -> impl FnMut(u64, u64) + Send {
 
 #[cfg(feature = "client")]
 async fn cli_send(target: String, files: Vec<PathBuf>, a: AuthArgs) -> Result<()> {
-    let t = resolve_target(&target, &a)?;
+    let t = resolve_target(&target, &a).await?;
     let s = cli_session(&t).await?;
     for f in files {
         let mut p = progress_printer(f.display().to_string());
@@ -869,7 +1106,7 @@ async fn cli_send(target: String, files: Vec<PathBuf>, a: AuthArgs) -> Result<()
 
 #[cfg(feature = "client")]
 async fn cli_get(target: String, remote: String, out: PathBuf, a: AuthArgs) -> Result<()> {
-    let t = resolve_target(&target, &a)?;
+    let t = resolve_target(&target, &a).await?;
     let s = cli_session(&t).await?;
     let mut p = progress_printer(remote.clone());
     let path = rdesk_common::files::pull(&s.conn, &remote, &out, &mut p).await?;
@@ -882,7 +1119,7 @@ async fn cli_get(target: String, remote: String, out: PathBuf, a: AuthArgs) -> R
 #[cfg(feature = "client")]
 async fn cli_ls(target: String, path: String, a: AuthArgs) -> Result<()> {
     use rdesk_proto::{ClientMsg, HostMsg};
-    let t = resolve_target(&target, &a)?;
+    let t = resolve_target(&target, &a).await?;
     let mut s = cli_session(&t).await?;
     rdesk_proto::write_msg(&mut s.w, &ClientMsg::ListDir { req: 1, path }).await?;
     loop {

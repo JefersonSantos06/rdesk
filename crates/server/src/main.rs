@@ -211,6 +211,7 @@ fn users(data: &std::path::Path, cmd: UsersCmd) -> Result<()> {
         UsersCmd::Remove { email } => {
             let u = find(&email)?;
             db.ensure_not_last_admin(u.id)?;
+            db.revoke_user(u.id)?;
             db.remove_user(u.id)?;
             db.audit(None, "user-removed", &format!("{} (cli)", u.email));
             println!("Removed {}.", u.email);
@@ -226,6 +227,9 @@ fn users(data: &std::path::Path, cmd: UsersCmd) -> Result<()> {
                 db.ensure_not_last_admin(u.id)?;
             }
             db.set_disabled(u.id, state == "on")?;
+            if state == "on" {
+                db.revoke_user(u.id)?;
+            }
             println!("{}: disabled {state}.", u.email);
         }
     }

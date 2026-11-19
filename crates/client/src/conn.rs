@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use rdesk_common::account::{NotSignedIn, Session};
 use rdesk_common::agent::Agent;
 use rdesk_common::auth::{self, AskPassword, AuthFailed, ClientAuth, KeySource, PasswordCancelled, PasswordSource};
 use rdesk_common::clipboard::ClipboardSync;
@@ -137,10 +138,53 @@ pub struct ConnectOpts {
     pub entry: HostEntry,
     /// The host ID to dial (also what authenticates the host).
     pub id: [u8; 32],
+    /// The computer as the server knows it: tickets are asked for it, and its reported
+    /// addresses are tried directly. `None` for an unregistered computer on the LAN.
+    pub machine: Option<MachineTarget>,
     pub monitor: Option<u32>,
     pub transport: TransportTuning,
     pub net: NetworkConfig,
     pub clipboard: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MachineTarget {
+    pub id: i64,
+    pub addrs: Vec<String>,
+}
+
+/// A ticket and when it expires (Unix seconds).
+pub type CachedTicket = Option<(Vec<u8>, i64)>;
+
+/// A still-valid ticket for `machine` and this endpoint, from the cache or the server.
+/// `Err((fatal, message))`.
+pub async fn get_ticket(machine: i64, client: &[u8; 32], cache: &mut CachedTicket) -> Result<Vec<u8>, (bool, String)> {
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    if let Some((t, exp)) = cache
+        && *exp > now + 600
+    {
+        return Ok(t.clone());
+    }
+    let Some(session) = Session::load() else {
+        return Err((true, "Not signed in to rdesk: sign in in the app (or `rdesk login`).".into()));
+    };
+    let api = session.api().map_err(|e| (true, format!("{e:#}")))?;
+    match api.ticket(machine, client).await {
+        Ok((bytes, r)) => {
+            *cache = Some((bytes.clone(), r.expires_at));
+            Ok(bytes)
+        }
+        Err(e) if e.downcast_ref::<NotSignedIn>().is_some() => {
+            Err((true, format!("The server ended your sign-in ({e:#}): sign in again in the app.")))
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            // No access (any more) or the computer is gone: retrying will not help.
+            let fatal = msg.contains("do not have access") || msg.contains("no such computer");
+            Err((fatal, msg))
+        }
+    }
 }
 
 pub struct Handle {
@@ -194,14 +238,25 @@ async fn reconnect_loop(
     endpoint: &mut ClientEndpoint,
 ) {
     let mut resume: Option<(SessionId, [u8; 32])> = None;
+    let mut ticket: CachedTicket = None;
     let mut monitor = opts.monitor;
     let mut failures = 0u32;
     let mut password_hint: Option<String> = None;
     loop {
         notify(UiEvent::Status(if failures == 0 { "Connecting…".into() } else { "Reconnecting…".into() }));
         let started = Instant::now();
-        let end =
-            once(&opts, endpoint, &mut resume, &mut monitor, &mut password_hint, &mut cmd_rx, &view, &notify).await;
+        let end = once(
+            &opts,
+            endpoint,
+            &mut resume,
+            &mut ticket,
+            &mut monitor,
+            &mut password_hint,
+            &mut cmd_rx,
+            &view,
+            &notify,
+        )
+        .await;
         match end {
             End::Quit => return,
             End::Fatal(msg) => {
@@ -336,7 +391,14 @@ pub async fn credentials(e: &HostEntry, resume: Option<(SessionId, [u8; 32])>, p
         None
     };
     let password = matches!(e.auth, AuthPref::Auto | AuthPref::Password).then_some(PasswordSource::Ask(password));
-    ClientAuth { client_name: rdesk_common::local_hostname(), resume, keys, key_filter: e.key.clone(), password }
+    ClientAuth {
+        client_name: rdesk_common::local_hostname(),
+        resume,
+        ticket: None,
+        keys,
+        key_filter: e.key.clone(),
+        password,
+    }
 }
 
 /// After a login attempt: remember a typed password, or drop a stored one that failed.
@@ -365,6 +427,7 @@ async fn once(
     opts: &ConnectOpts,
     endpoint: &mut ClientEndpoint,
     resume: &mut Option<(SessionId, [u8; 32])>,
+    ticket: &mut CachedTicket,
     monitor: &mut Option<u32>,
     password_hint: &mut Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
@@ -379,8 +442,20 @@ async fn once(
         }
     }
     let ep = endpoint.clone().unwrap();
-    let direct = Some(opts.entry.addr.as_str());
-    let c = match transport::connect(&ep, opts.id, direct, &opts.net, Duration::from_secs(8)).await {
+    // Registered computers need a ticket from the server for this endpoint.
+    let ticket_bytes = match &opts.machine {
+        Some(m) => match get_ticket(m.id, ep.id().as_bytes(), ticket).await {
+            Ok(t) => Some(t),
+            Err((true, msg)) => return End::Fatal(msg),
+            Err((false, msg)) => return End::Retry(msg),
+        },
+        None => None,
+    };
+    let mut direct: Vec<String> = opts.machine.as_ref().map(|m| m.addrs.clone()).unwrap_or_default();
+    if !opts.entry.addr.trim().is_empty() {
+        direct.insert(0, opts.entry.addr.clone());
+    }
+    let c = match transport::connect_with(&ep, opts.id, &direct, &opts.net, Duration::from_secs(8)).await {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -399,6 +474,7 @@ async fn once(
     let ui = opts.ask_password_in_ui.then(|| (notify.clone(), password_hint.take()));
     let asker = password_asker(&opts.name, &opts.entry, used.clone(), ui);
     let mut creds = credentials(&opts.entry, resume.take(), asker).await;
+    creds.ticket = ticket_bytes;
     // Generous: the user may be typing a password or approving 1Password.
     let result = tokio::time::timeout(
         Duration::from_secs(300),

@@ -7,6 +7,7 @@ mod account;
 mod admin;
 mod autostart;
 mod computers;
+mod groups;
 #[cfg(feature = "host")]
 mod host_page;
 mod icon;
@@ -45,6 +46,7 @@ enum Page {
     Computers,
     #[cfg(feature = "host")]
     ThisComputer,
+    Groups,
     Settings,
     Admin,
 }
@@ -111,6 +113,7 @@ struct App {
     page: Page,
     account: account::Account,
     admin: admin::AdminPage,
+    groups: groups::GroupsPage,
     computers: computers::Computers,
     #[cfg(feature = "host")]
     host: host_page::HostPage,
@@ -138,7 +141,9 @@ impl App {
         #[cfg(feature = "host")]
         let host = {
             let mut h = host_page::HostPage::new(exe.clone(), ctx.clone());
-            if account.signed_in() && host_page::remembered_enabled() {
+            // A registered computer has its own credential: it stays reachable with nobody signed in.
+            let registered = rdesk_common::account::Registration::load().is_some();
+            if (account.signed_in() || registered) && host_page::remembered_enabled() {
                 h.start();
             }
             h
@@ -147,6 +152,7 @@ impl App {
             page: Page::Computers,
             account,
             admin: admin::AdminPage::new(),
+            groups: groups::GroupsPage::new(),
             computers: computers::Computers::new(exe.clone(), shared, wtx),
             #[cfg(feature = "host")]
             host,
@@ -180,7 +186,7 @@ impl App {
             AppCmd::ToggleHost =>
             {
                 #[cfg(feature = "host")]
-                if self.account.signed_in() {
+                if self.account.signed_in() || rdesk_common::account::Registration::load().is_some() {
                     self.host.toggle();
                 } else {
                     self.show_window(ctx);
@@ -207,6 +213,7 @@ impl App {
         all.extend(self.settings.toast.as_ref());
         all.extend(self.account.toast.as_ref());
         all.extend(self.admin.toast.as_ref());
+        all.extend(self.groups.toast.as_ref());
         all.into_iter().filter(|t| t.2.elapsed() < Duration::from_secs(12)).max_by_key(|t| t.2)
     }
 
@@ -224,6 +231,7 @@ impl App {
             tab(ui, Page::Computers, "🖥  Computers");
             #[cfg(feature = "host")]
             tab(ui, Page::ThisComputer, "🏠  This computer");
+            tab(ui, Page::Groups, "👥  Groups");
             tab(ui, Page::Settings, "⚙  Settings");
             if self.account.is_admin() {
                 tab(ui, Page::Admin, "🛡  Admin");
@@ -233,6 +241,7 @@ impl App {
                 match page {
                     Page::Settings => self.settings.refresh(),
                     Page::Admin => self.admin.reload(&ctx, self.account.session()),
+                    Page::Groups => self.groups.reload(&ctx),
                     _ => {}
                 }
             }
@@ -265,19 +274,24 @@ impl eframe::App for App {
         self.computers.tick();
         self.settings.tick();
         self.admin.tick(ctx, self.account.session());
+        self.groups.tick(ctx);
         if std::mem::take(&mut self.account.changed) {
+            // A different user (or none): their list, not the previous one's.
+            self.computers.refresh();
             if !self.account.is_admin() && self.page == Page::Admin {
                 self.page = Page::Computers;
             }
-            // Signing in or out changes the relay (and its token): start or stop the host.
+            // An unregistered host depends on someone being signed in; a registered one does not.
             #[cfg(feature = "host")]
-            if self.account.signed_in() {
-                if host_page::remembered_enabled() {
+            {
+                let registered = rdesk_common::account::Registration::load().is_some();
+                if self.account.signed_in() {
+                    if host_page::remembered_enabled() && !self.host.running() {
+                        self.host.start();
+                    }
+                } else if !registered {
                     self.host.suspend();
-                    self.host.start();
                 }
-            } else {
-                self.host.suspend();
             }
         }
         #[cfg(feature = "host")]
@@ -333,6 +347,7 @@ impl eframe::App for App {
                             Page::ThisComputer => "Others can connect to this computer while the host is on",
                             Page::Settings => "Changes are saved immediately",
                             Page::Admin => "Only these e-mails can sign in to your server",
+                            Page::Groups => "Share computers with a group from the Computers page",
                         });
                     }
                 }
@@ -352,6 +367,7 @@ impl eframe::App for App {
                 self.settings.show(ui);
             }
             Page::Admin => self.admin.show(ui, self.account.session()),
+            Page::Groups => self.groups.show(ui),
         });
     }
 

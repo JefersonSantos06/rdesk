@@ -5,10 +5,13 @@
 //! * The iroh relay, only for signed-in endpoints, proxied under `/relay` on the same port.
 //! * HTTPS with Let's Encrypt (or plain HTTP for local tests).
 
+pub mod access;
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod groups;
 pub mod login;
+pub mod machines;
 pub mod oauth;
 pub mod pages;
 pub mod relay;
@@ -43,6 +46,24 @@ pub fn router(st: Shared) -> Router {
         .route(
             &format!("{}/{{id}}", paths::PATH_ADMIN_USERS),
             axum::routing::patch(api::admin_update_user).delete(api::admin_remove_user),
+        )
+        .route(paths::PATH_MACHINES, get(machines::list).post(machines::register))
+        .route(
+            &format!("{}/{{id}}", paths::PATH_MACHINES),
+            axum::routing::patch(machines::update).delete(machines::remove),
+        )
+        .route(&format!("{}/{{id}}/shares", paths::PATH_MACHINES), get(machines::get_shares).put(machines::set_shares))
+        .route(&format!("{}/{{id}}/ticket", paths::PATH_MACHINES), post(machines::ticket))
+        .route(paths::PATH_ADMIN_MACHINES, get(machines::admin_list))
+        .route(paths::PATH_AGENT_SYNC, post(machines::agent_sync))
+        .route(paths::PATH_USERS, get(machines::users))
+        .route(paths::PATH_GROUPS, get(groups::list).post(groups::create))
+        .route(&format!("{}/all", paths::PATH_GROUPS), get(groups::all))
+        .route(&format!("{}/{{id}}", paths::PATH_GROUPS), axum::routing::patch(groups::rename).delete(groups::delete))
+        .route(&format!("{}/{{id}}/members", paths::PATH_GROUPS), post(groups::add_member))
+        .route(
+            &format!("{}/{{id}}/members/{{user}}", paths::PATH_GROUPS),
+            axum::routing::patch(groups::set_role).delete(groups::remove_member),
         )
         .route(paths::PATH_LOGIN, get(login::start))
         .route("/login/oauth/{provider}", get(login::oauth_go))

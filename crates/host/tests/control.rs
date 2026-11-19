@@ -55,6 +55,7 @@ async fn start_report_disconnect_stop() {
     let mut creds = ClientAuth {
         client_name: "laptop".into(),
         resume: None,
+        ticket: None,
         keys: Some(KeySource::Local(vec![key])),
         key_filter: None,
         password: None,

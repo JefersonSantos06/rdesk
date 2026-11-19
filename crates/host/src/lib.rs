@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod power;
 pub mod server;
 pub mod session;
+pub mod sync;
 pub mod video;
 
 pub use control::{HostHandle, HostState, HostStatus, Reporter};

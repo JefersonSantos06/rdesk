@@ -40,6 +40,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use zeroize::Zeroizing;
 
 use crate::agent::{Agent, canonical, key_fingerprint};
+pub use crate::ticket::{TicketPolicy, TicketUser};
 
 pub const SSHSIG_NAMESPACE: &str = "rdesk-auth-v1@rdesk";
 pub const OPAQUE_CREDENTIAL_ID: &[u8] = b"rdesk-user";
@@ -162,7 +163,7 @@ fn resume_mac(token: &[u8; 32], sid: &SessionId, ek: &[u8; 32], nonce: &[u8; 32]
     mac.finalize().into_bytes().into()
 }
 
-type ResumeEntry = (Zeroizing<[u8; 32]>, Instant);
+type ResumeEntry = (Zeroizing<[u8; 32]>, Instant, Option<TicketUser>);
 
 /// Host-side store of resumable sessions (memory only: a host restart forces a full login).
 #[derive(Default)]
@@ -171,27 +172,26 @@ pub struct ResumeStore {
 }
 
 impl ResumeStore {
-    fn issue(&self, sid: SessionId) -> [u8; 32] {
+    fn issue(&self, sid: SessionId, user: Option<TicketUser>) -> [u8; 32] {
         let mut token = [0u8; 32];
         OsRng.fill_bytes(&mut token);
         let mut map = self.inner.lock().unwrap();
         let now = Instant::now();
-        map.retain(|_, (_, exp)| *exp > now);
-        map.insert(sid, (Zeroizing::new(token), now + RESUME_TTL));
+        map.retain(|_, (_, exp, _)| *exp > now);
+        map.insert(sid, (Zeroizing::new(token), now + RESUME_TTL, user));
         token
     }
 
-    /// Check a resume MAC. The token is consumed either way (single use).
-    fn redeem(&self, sid: &SessionId, mac: &[u8; 32], ek: &[u8; 32], nonce: &[u8; 32]) -> bool {
+    /// Check a resume MAC. The token is consumed either way (single use). `Some(user)`
+    /// on success (the ticket user of the session, if any).
+    fn redeem(&self, sid: &SessionId, mac: &[u8; 32], ek: &[u8; 32], nonce: &[u8; 32]) -> Option<Option<TicketUser>> {
         let mut map = self.inner.lock().unwrap();
-        let Some((token, exp)) = map.remove(sid) else {
-            return false;
-        };
+        let (token, exp, user) = map.remove(sid)?;
         if exp < Instant::now() {
-            return false;
+            return None;
         }
         let expected = resume_mac(&token, sid, ek, nonce);
-        expected.ct_eq(mac).into()
+        bool::from(expected.ct_eq(mac)).then_some(user)
     }
 
     pub fn clear(&self) {
@@ -249,6 +249,10 @@ pub struct HostAuthConfig {
     pub opaque: Option<OpaqueServer>,
     pub host_fp: [u8; 32],
     pub host_name: String,
+    /// Registered with an rdesk server: a ticket from it is required.
+    pub ticket: Option<TicketPolicy>,
+    /// With a ticket, also ask for this computer's own password or SSH key.
+    pub require_local: bool,
 }
 
 /// Parse an OpenSSH `authorized_keys` file (options are not supported and rejected).
@@ -267,9 +271,15 @@ pub fn parse_authorized_keys(text: &str) -> Result<Vec<PublicKey>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthKind {
-    PublicKey { fingerprint: String },
+    PublicKey {
+        fingerprint: String,
+    },
     Password,
     Resume,
+    /// A ticket from the rdesk server; `local` is the extra factor ("password" or the key).
+    Ticket {
+        local: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +287,8 @@ pub struct Authenticated {
     pub session_id: SessionId,
     pub kind: AuthKind,
     pub client_name: String,
+    /// Who the server's ticket let in (also kept across resumes).
+    pub user: Option<TicketUser>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -296,6 +308,7 @@ pub async fn host_handshake<R, W>(
     r: &mut R,
     w: &mut W,
     ek: [u8; 32],
+    peer: [u8; 32],
     host_info: impl FnOnce() -> HostInfo,
 ) -> Result<Authenticated>
 where
@@ -312,9 +325,15 @@ where
 
     let mut nonce = [0u8; 32];
     OsRng.fill_bytes(&mut nonce);
-    let mut methods = vec![AuthMethod::Resume, AuthMethod::PublicKey];
-    if cfg.opaque.is_some() {
-        methods.push(AuthMethod::Password);
+    let mut methods = vec![AuthMethod::Resume];
+    if cfg.ticket.is_some() {
+        methods.push(AuthMethod::Ticket);
+    }
+    if cfg.ticket.is_none() || cfg.require_local {
+        methods.push(AuthMethod::PublicKey);
+        if cfg.opaque.is_some() {
+            methods.push(AuthMethod::Password);
+        }
     }
     write_msg(
         w,
@@ -323,22 +342,47 @@ where
     .await?;
 
     let authorized = |k: &KeyData| cfg.authorized_keys.iter().any(|a| a == k);
+    // A registered computer needs a ticket before its own password/key counts.
+    let mut ticket_user: Option<TicketUser> = None;
+    let local_allowed = |t: &Option<TicketUser>| cfg.ticket.is_none() || (cfg.require_local && t.is_some());
+    const NEED_TICKET: &str =
+        "this computer is reached through its rdesk server: sign in there and connect from the app";
 
     for _ in 0..MAX_AUTH_MESSAGES {
         let msg: ClientMsg = expect_msg(r, MAX_CONTROL_MSG).await?;
         let (session_id, kind) = match msg {
-            ClientMsg::Resume { session_id, mac } => {
-                if store.redeem(&session_id, &mac, &ek, &nonce) {
+            ClientMsg::Resume { session_id, mac } => match store.redeem(&session_id, &mac, &ek, &nonce) {
+                // A resumed session keeps its ticket user, unless their access was removed since.
+                Some(user) if user.as_ref().is_none_or(|u| cfg.ticket.as_ref().is_none_or(|p| !p.is_revoked(u))) => {
+                    ticket_user = user;
                     (session_id, AuthKind::Resume)
-                } else {
+                }
+                _ => {
                     write_msg(w, &HostMsg::ResumeRejected).await?;
                     continue;
                 }
+            },
+            ClientMsg::Ticket { ticket } => {
+                let Some(policy) = &cfg.ticket else {
+                    return Err(fail(w, "this computer is not registered with an rdesk server").await);
+                };
+                match policy.verify(&ticket, &peer) {
+                    Ok(u) => ticket_user = Some(u),
+                    Err(e) => return Err(fail(w, &format!("{e:#}")).await),
+                }
+                if cfg.require_local {
+                    write_msg(w, &HostMsg::TicketOkNeedLocal).await?;
+                    continue;
+                }
+                (new_session_id(), AuthKind::Ticket { local: None })
             }
             ClientMsg::PubkeyQuery { public_key } => {
                 let ok = PublicKey::from_openssh(&public_key).is_ok_and(|k| authorized(k.key_data()));
                 write_msg(w, if ok { &HostMsg::PubkeyOk } else { &HostMsg::PubkeyRejected }).await?;
                 continue;
+            }
+            ClientMsg::PubkeyAuth { .. } | ClientMsg::PasswordStart { .. } if !local_allowed(&ticket_user) => {
+                return Err(fail(w, NEED_TICKET).await);
             }
             ClientMsg::PubkeyAuth { public_key, sshsig } => {
                 let Ok(key) = PublicKey::from_openssh(&public_key) else {
@@ -355,7 +399,11 @@ where
                 if sig.public_key() != key.key_data() || key.verify(SSHSIG_NAMESPACE, &payload, &sig).is_err() {
                     return Err(fail(w, "bad signature").await);
                 }
-                (new_session_id(), AuthKind::PublicKey { fingerprint: key_fingerprint(key.key_data()) })
+                let fingerprint = key_fingerprint(key.key_data());
+                match ticket_user {
+                    Some(_) => (new_session_id(), AuthKind::Ticket { local: Some(format!("key {fingerprint}")) }),
+                    None => (new_session_id(), AuthKind::PublicKey { fingerprint }),
+                }
             }
             ClientMsg::PasswordStart { ke1 } => {
                 let Some(op) = &cfg.opaque else {
@@ -385,12 +433,15 @@ where
                 if start.state.finish(fin, params).is_err() {
                     return Err(fail(w, "wrong password").await);
                 }
-                (new_session_id(), AuthKind::Password)
+                match ticket_user {
+                    Some(_) => (new_session_id(), AuthKind::Ticket { local: Some("password".into()) }),
+                    None => (new_session_id(), AuthKind::Password),
+                }
             }
             _ => return Err(fail(w, "unexpected message during authentication").await),
         };
 
-        let resume_token = store.issue(session_id);
+        let resume_token = store.issue(session_id, ticket_user.clone());
         write_msg(
             w,
             &HostMsg::AuthOk(AuthOk {
@@ -401,7 +452,7 @@ where
             }),
         )
         .await?;
-        return Ok(Authenticated { session_id, kind, client_name });
+        return Ok(Authenticated { session_id, kind, client_name, user: ticket_user });
     }
     Err(fail(w, "too many authentication attempts").await)
 }
@@ -496,13 +547,15 @@ impl PasswordSource {
 pub struct ClientAuth {
     pub client_name: String,
     pub resume: Option<(SessionId, [u8; 32])>,
+    /// An access ticket from the rdesk server, for registered computers.
+    pub ticket: Option<Vec<u8>>,
     pub keys: Option<KeySource>,
     /// Only use the agent key with this fingerprint (`SHA256:...`).
     pub key_filter: Option<String>,
     pub password: Option<PasswordSource>,
 }
 
-/// Run the client side of the handshake, trying resume → public key → password.
+/// Run the client side of the handshake, trying resume → ticket → public key → password.
 pub async fn client_handshake<R, W>(
     r: &mut R,
     w: &mut W,
@@ -519,7 +572,7 @@ where
         &ClientMsg::Hello {
             proto: PROTOCOL_VERSION,
             client_name: auth.client_name.clone(),
-            methods: vec![AuthMethod::Resume, AuthMethod::PublicKey, AuthMethod::Password],
+            methods: vec![AuthMethod::Resume, AuthMethod::Ticket, AuthMethod::PublicKey, AuthMethod::Password],
         },
     )
     .await?;
@@ -548,7 +601,21 @@ where
         }
     }
 
-    // 2. Public key
+    // 2. Ticket (registered computers). Done unless the computer also wants its own factor.
+    if methods.contains(&AuthMethod::Ticket) {
+        let Some(ticket) = auth.ticket.take() else {
+            bail!(AuthFailed("this computer is reached through its rdesk server: connect from the app".into()));
+        };
+        write_msg(w, &ClientMsg::Ticket { ticket }).await?;
+        match expect_msg(r, MAX_CONTROL_MSG).await? {
+            HostMsg::AuthOk(ok) => return Ok(ok),
+            HostMsg::TicketOkNeedLocal => tracing::debug!("ticket accepted; the host also wants its password or key"),
+            HostMsg::AuthFail { reason } => bail!(AuthFailed(reason)),
+            other => bail!("unexpected host message {other:?}"),
+        }
+    }
+
+    // 3. Public key
     let mut key_errors = Vec::new();
     if let Some(keys) = auth.keys.as_mut()
         && methods.contains(&AuthMethod::PublicKey)
@@ -589,7 +656,7 @@ where
         }
     }
 
-    // 3. Password
+    // 4. Password
     if let Some(src) = auth.password.as_ref()
         && methods.contains(&AuthMethod::Password)
     {

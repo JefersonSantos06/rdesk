@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use egui::{Color32, RichText};
 use rdesk_common::account::Session;
-use rdesk_proto::api::{AdminUser, UpdateUser};
+use rdesk_proto::api::{AdminUser, Machine, UpdateUser, Visibility};
 
 use super::account::spawn;
 
@@ -18,9 +18,12 @@ enum Op {
     Remove { id: i64, email: String },
 }
 
+type Loaded = Result<(Vec<AdminUser>, Vec<Machine>), String>;
+
 pub(super) struct AdminPage {
     users: Option<Result<Vec<AdminUser>, String>>,
-    load_job: Option<Receiver<Result<Vec<AdminUser>, String>>>,
+    machines: Vec<Machine>,
+    load_job: Option<Receiver<Loaded>>,
     op_job: Option<Receiver<Result<String, String>>>,
     new_email: String,
     new_admin: bool,
@@ -32,6 +35,7 @@ impl AdminPage {
     pub(super) fn new() -> Self {
         Self {
             users: None,
+            machines: Vec::new(),
             load_job: None,
             op_job: None,
             new_email: String::new(),
@@ -44,10 +48,9 @@ impl AdminPage {
     pub(super) fn reload(&mut self, ctx: &egui::Context, session: Option<&Session>) {
         let Some(s) = session.cloned() else { return };
         self.load_job = Some(spawn(ctx, move || async move {
-            match s.api() {
-                Ok(api) => api.users().await.map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("{e:#}")),
-            }
+            let api = s.api().map_err(|e| format!("{e:#}"))?;
+            let f = async { anyhow::Ok((api.users().await?, api.admin_machines().await?)) };
+            f.await.map_err(|e| format!("{e:#}"))
         }));
     }
 
@@ -73,7 +76,13 @@ impl AdminPage {
             && let Ok(r) = rx.try_recv()
         {
             self.load_job = None;
-            self.users = Some(r);
+            match r {
+                Ok((users, machines)) => {
+                    self.users = Some(Ok(users));
+                    self.machines = machines;
+                }
+                Err(e) => self.users = Some(Err(e)),
+            }
         }
         if let Some(rx) = &self.op_job
             && let Ok(r) = rx.try_recv()
@@ -195,6 +204,36 @@ impl AdminPage {
                 });
             }
         }
+        ui.add_space(16.0);
+        ui.label(RichText::new("All computers").strong().size(16.0));
+        ui.label("Admins see every computer, but connect only to those shared with them.");
+        egui::Grid::new("admin-machines").num_columns(4).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+            ui.strong("Computer");
+            ui.strong("Registered by");
+            ui.strong("Visible to");
+            ui.strong("Status");
+            ui.end_row();
+            for m in &self.machines {
+                ui.label(&m.name);
+                ui.label(&m.owner.email);
+                ui.label(match m.visibility {
+                    Visibility::Private => "only the owner",
+                    Visibility::Shared => "shared",
+                    Visibility::Everyone => "everyone",
+                });
+                ui.label(if m.in_session {
+                    "in use".to_string()
+                } else if m.online {
+                    "online".to_string()
+                } else {
+                    match m.last_seen {
+                        Some(t) => format!("offline · {}", rdesk_common::directory::ago(t, now())),
+                        None => "never connected".to_string(),
+                    }
+                });
+                ui.end_row();
+            }
+        });
         if let Some(u) = self.confirm_remove.clone() {
             let m = egui::Modal::new(egui::Id::unique("admin-remove")).show(&ctx, |ui| {
                 ui.heading(format!("Remove {}?", u.email));

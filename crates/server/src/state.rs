@@ -66,6 +66,8 @@ pub struct State {
     pub online: crate::relay::Online,
     pub flows: Mutex<HashMap<String, Flow>>,
     pub codes: Mutex<HashMap<String, PendingCode>>,
+    /// Wakes a machine's long poll when something concerns it.
+    pub machine_events: Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>,
 }
 
 pub type Shared = Arc<State>;
@@ -95,6 +97,7 @@ impl State {
             online: Default::default(),
             flows: Mutex::new(HashMap::new()),
             codes: Mutex::new(HashMap::new()),
+            machine_events: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -106,6 +109,20 @@ impl State {
     /// The relay URL clients use (served by us under `/relay`).
     pub fn relay_url(&self) -> String {
         self.url("/")
+    }
+
+    pub fn machine_notify(&self, id: i64) -> Arc<tokio::sync::Notify> {
+        self.machine_events.lock().unwrap().entry(id).or_default().clone()
+    }
+
+    /// Tell these machines' hosts to sync now.
+    pub fn wake(&self, ids: &[i64]) {
+        let ev = self.machine_events.lock().unwrap();
+        for id in ids {
+            if let Some(n) = ev.get(id) {
+                n.notify_waiters();
+            }
+        }
     }
 
     /// Forget sign-ins and codes that ran out of time.

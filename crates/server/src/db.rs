@@ -58,6 +58,47 @@ const SCHEMA: &[&str] = &[
         detail TEXT NOT NULL DEFAULT ''
     );
     "#,
+    // v2: machines, groups, sharing, ticket revocations.
+    r#"
+    CREATE TABLE groups (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE group_members (
+        group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+    );
+    CREATE TABLE machines (
+        id INTEGER PRIMARY KEY,
+        endpoint_id TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        os TEXT NOT NULL DEFAULT '',
+        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        token_hash BLOB NOT NULL UNIQUE,
+        addrs TEXT NOT NULL DEFAULT '',
+        in_session INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        last_seen INTEGER
+    );
+    CREATE TABLE machine_shares (
+        machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+        role TEXT NOT NULL DEFAULT 'control'
+    );
+    CREATE UNIQUE INDEX machine_shares_user ON machine_shares(machine_id, user_id) WHERE user_id IS NOT NULL;
+    CREATE UNIQUE INDEX machine_shares_group ON machine_shares(machine_id, group_id) WHERE group_id IS NOT NULL;
+    CREATE TABLE revocations (
+        id INTEGER PRIMARY KEY,
+        machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL,
+        before INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn now() -> i64 {
@@ -133,7 +174,7 @@ pub struct Session {
 }
 
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db(pub(crate) Arc<Mutex<Connection>>);
 
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -161,7 +202,7 @@ impl Db {
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let conn = self.0.lock().unwrap();
         Ok(f(&conn)?)
     }

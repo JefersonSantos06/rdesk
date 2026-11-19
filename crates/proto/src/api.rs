@@ -93,3 +93,199 @@ pub struct UpdateUser {
 pub struct ApiError {
     pub error: String,
 }
+
+// ---------------------------------------------------------------------------
+// Machines, sharing, groups, tickets (phase 3)
+// ---------------------------------------------------------------------------
+
+pub const PATH_MACHINES: &str = "/api/machines";
+pub const PATH_GROUPS: &str = "/api/groups";
+/// Everyone on the server (to pick whom to share with).
+pub const PATH_USERS: &str = "/api/users";
+pub const PATH_ADMIN_MACHINES: &str = "/api/admin/machines";
+/// The machine's own long poll (authenticated with the machine token).
+pub const PATH_AGENT_SYNC: &str = "/api/agent/sync";
+
+/// Signed by the host key when registering, proving the app runs on that machine.
+pub const REGISTER_DOMAIN: &[u8] = b"rdesk-register-v1";
+
+/// What the registration signature covers.
+pub fn register_message(user_id: i64, endpoint: &[u8; 32], timestamp: i64) -> Vec<u8> {
+    let mut m = REGISTER_DOMAIN.to_vec();
+    m.extend_from_slice(&user_id.to_le_bytes());
+    m.extend_from_slice(endpoint);
+    m.extend_from_slice(&timestamp.to_le_bytes());
+    m
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// Only whoever registered it.
+    #[default]
+    Private,
+    /// Also the users and groups it is shared with.
+    Shared,
+    /// Everyone on the server.
+    Everyone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserRef {
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRef {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Machine {
+    pub id: i64,
+    /// Host ID (hex).
+    pub endpoint_id: String,
+    pub name: String,
+    pub os: String,
+    pub owner: UserRef,
+    pub visibility: Visibility,
+    /// Connected to the server's relay right now.
+    pub online: bool,
+    /// Someone is controlling it.
+    pub in_session: bool,
+    pub last_seen: Option<i64>,
+    /// Addresses it reported (LAN, public): tried directly before the relay.
+    pub addrs: Vec<String>,
+    /// The requesting user may connect.
+    pub can_access: bool,
+    /// The requesting user registered it (may rename, share, unregister).
+    pub is_owner: bool,
+}
+
+/// `POST /api/machines`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterMachine {
+    pub endpoint_id: String,
+    pub name: String,
+    pub os: String,
+    pub visibility: Visibility,
+    pub timestamp: i64,
+    /// Hex Ed25519 signature of [`register_message`] by the host key.
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Registered {
+    pub machine: Machine,
+    /// The machine's own credential (relay + sync); keep it secret.
+    pub token: String,
+    /// Hex public key that signs tickets.
+    pub server_key: String,
+    pub relay_url: String,
+    pub server_name: String,
+}
+
+/// `PATCH /api/machines/{id}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateMachine {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<Visibility>,
+}
+
+/// `GET`/`PUT /api/machines/{id}/shares`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Shares {
+    pub users: Vec<UserRef>,
+    pub groups: Vec<GroupRef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetShares {
+    pub users: Vec<i64>,
+    pub groups: Vec<i64>,
+}
+
+/// `POST /api/machines/{id}/ticket`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketRequest {
+    /// The endpoint ID (hex) the client will connect from.
+    pub client: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketResponse {
+    /// Base64url of the signed ticket.
+    pub ticket: String,
+    pub expires_at: i64,
+    pub machine: Machine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupRole {
+    /// Manages the group (members, roles, name).
+    Admin,
+    Member,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupMember {
+    pub user: UserRef,
+    pub role: GroupRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    pub id: i64,
+    pub name: String,
+    /// The requesting user's role (`None` for a system admin looking from outside).
+    pub my_role: Option<GroupRole>,
+    pub members: Vec<GroupMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewGroup {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddMember {
+    pub email: String,
+    pub role: GroupRole,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetRole {
+    pub role: GroupRole,
+}
+
+/// `POST /api/agent/sync`: the machine reports itself and waits (up to ~25 s) for news.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSync {
+    /// Last [`AgentSyncReply::cursor`] seen (0 at start).
+    pub cursor: i64,
+    pub addrs: Vec<String>,
+    pub os: String,
+    pub version: String,
+    pub in_session: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSyncReply {
+    pub cursor: i64,
+    /// Every revocation of the last 12 h (tickets can not be older).
+    pub revocations: Vec<Revocation>,
+    pub machine: Machine,
+}
+
+/// Tickets of `user_id` issued at or before `before` are void on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revocation {
+    pub user_id: i64,
+    pub before: i64,
+}

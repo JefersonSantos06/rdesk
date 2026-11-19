@@ -13,7 +13,7 @@ use crate::db::Session;
 use crate::oauth::pkce_challenge;
 use crate::state::{CODE_TTL, Shared};
 
-pub struct Error(StatusCode, String);
+pub struct Error(pub StatusCode, pub String);
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -148,6 +148,11 @@ pub async fn admin_update_user(
             st.db.ensure_not_last_admin(id)?;
         }
         st.db.set_disabled(id, d)?;
+        if d {
+            // Their tickets stop working on every computer right away.
+            let touched = st.db.revoke_user(id)?;
+            st.wake(&touched);
+        }
     }
     st.db.audit(Some(me.user.id), "user-updated", &format!("{} {:?}", u.email, (req.is_admin, req.disabled)));
     let u = st.db.user(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such user"))?;
@@ -161,7 +166,9 @@ pub async fn admin_remove_user(
 ) -> Result<StatusCode, Error> {
     let u = st.db.user(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such user"))?;
     st.db.ensure_not_last_admin(id)?;
+    let touched = st.db.revoke_user(id)?;
     st.db.remove_user(id)?;
+    st.wake(&touched);
     st.db.audit(Some(me.user.id), "user-removed", &u.email);
     Ok(StatusCode::NO_CONTENT)
 }

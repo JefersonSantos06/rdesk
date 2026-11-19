@@ -44,6 +44,8 @@ pub struct HostStatus {
     pub fingerprint: Option<[u8; 32]>,
     /// `None`: no relay configured (or not known yet); `Ok(url)`: registered; `Err`: unreachable.
     pub relay: Option<Result<String, String>>,
+    /// Registered with a server: `Ok("name on server")`, `Err` when the server refused it.
+    pub registration: Option<Result<String, String>>,
     pub session: Option<SessionInfo>,
     /// Newest last; at most [`MAX_EVENTS`].
     pub events: VecDeque<HostEvent>,
@@ -87,6 +89,10 @@ impl Reporter {
 
     pub fn relay(&self, r: Option<Result<String, String>>) {
         self.update(|st| st.relay = r);
+    }
+
+    pub fn registration(&self, r: Option<Result<String, String>>) {
+        self.update(|st| st.registration = r);
     }
 
     pub fn session(&self, s: Option<SessionInfo>) {

@@ -16,6 +16,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] *Admin*: adicionar e-mail, tornar admin, desativar (a pessoa é deslogada), remover.
 - [ ] Sessão revogada/desativada no servidor: o app volta para a tela de login ao abrir.
 
+## Computadores, grupos e acesso
+- [ ] *This computer* → *Register this computer*: aparece em *My computers* de quem cadastrou; continua *Online* depois de fazer logout no app.
+- [ ] Privado: outra pessoa não vê o computador. Compartilhado com ela (ou com um grupo dela): aparece em *Shared with me* e conecta.
+- [ ] Descompartilhar (ou tirar do grupo, ou desativar o usuário) com a sessão aberta: a sessão cai em segundos e não reconecta.
+- [ ] Cadeado extra ligado: depois do tíquete, pede a senha/chave do computador.
+- [ ] Admin do sistema vê todos os computadores na aba *Admin*, mas não conecta nos não compartilhados.
+- [ ] *Unregister*: some da lista; o host passa a aceitar só pela LAN (senha/chave).
+
 ## Autenticação
 - [ ] Chave do 1Password: aparece a aprovação/Touch ID uma vez; conecta.
 - [ ] Chave não autorizada + sem senha → mensagem clara, sem retry infinito.

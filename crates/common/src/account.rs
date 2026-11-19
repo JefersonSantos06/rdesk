@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use rdesk_proto::api::{
-    self, API_VERSION, AddUser, AdminUser, ApiError, ServerInfo, TokenRequest, TokenResponse, UpdateUser, UserInfo,
+    self, API_VERSION, AddMember, AddUser, AdminUser, AgentSync, AgentSyncReply, ApiError, Group, GroupRef, GroupRole,
+    Machine, NewGroup, RegisterMachine, Registered, ServerInfo, SetRole, SetShares, Shares, TicketRequest,
+    TicketResponse, TokenRequest, TokenResponse, UpdateMachine, UpdateUser, UserInfo, UserRef, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,6 +20,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::config;
 
 pub const SESSION_FILE: &str = "session.json";
+/// This computer's registration with the server (its own credential).
+pub const MACHINE_FILE: &str = "machine.json";
 /// How long the browser part may take.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -72,6 +76,54 @@ impl Session {
     /// Whole days left, for "signed in for N more days".
     pub fn days_left(&self) -> i64 {
         ((self.expires_at - now()).max(0) + 86_399) / 86_400
+    }
+
+    pub fn api(&self) -> Result<Api> {
+        Api::new(&self.server, Some(self.token.clone()))
+    }
+}
+
+/// This computer, registered with an rdesk server: the host uses its own token (not a
+/// user's session) for the relay and to sync, so it stays reachable when nobody is signed in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Registration {
+    pub server: String,
+    pub server_name: String,
+    pub machine_id: i64,
+    pub name: String,
+    /// The machine token (secret).
+    pub token: String,
+    /// Hex public key that signs tickets.
+    pub server_key: String,
+    pub relay_url: String,
+    /// The host ID this registration is for.
+    pub endpoint_id: String,
+}
+
+impl Registration {
+    pub fn load() -> Option<Self> {
+        let path = config::config_path(MACHINE_FILE).ok()?;
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    }
+
+    pub fn save(&self) -> Result<()> {
+        config::ensure_config_dir()?;
+        config::write_private(&config::config_path(MACHINE_FILE)?, serde_json::to_string_pretty(self)?.as_bytes())
+    }
+
+    pub fn clear() -> Result<()> {
+        match std::fs::remove_file(config::config_path(MACHINE_FILE)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn server_key(&self) -> Result<[u8; 32]> {
+        hex::decode(&self.server_key)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| anyhow!("{MACHINE_FILE}: bad server key"))
     }
 
     pub fn api(&self) -> Result<Api> {
@@ -191,6 +243,131 @@ impl Api {
 
     pub async fn remove_user(&self, id: i64) -> Result<()> {
         let r = self.auth(self.http.delete(self.url(&format!("{}/{id}", api::PATH_ADMIN_USERS)))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    // ---- machines -------------------------------------------------------------------
+
+    pub async fn machines(&self) -> Result<Vec<Machine>> {
+        self.get(api::PATH_MACHINES).await
+    }
+
+    pub async fn admin_machines(&self) -> Result<Vec<Machine>> {
+        self.get(api::PATH_ADMIN_MACHINES).await
+    }
+
+    /// Register this computer; `host_key` proves the app runs on it.
+    pub async fn register_machine(
+        &self,
+        user_id: i64,
+        host_key: &iroh::SecretKey,
+        name: &str,
+        visibility: Visibility,
+    ) -> Result<Registered> {
+        let endpoint = *host_key.public().as_bytes();
+        let timestamp = now();
+        let sig = host_key.sign(&api::register_message(user_id, &endpoint, timestamp));
+        let req = RegisterMachine {
+            endpoint_id: hex::encode(endpoint),
+            name: name.to_string(),
+            os: std::env::consts::OS.to_string(),
+            visibility,
+            timestamp,
+            signature: hex::encode(sig.to_bytes()),
+        };
+        self.send(reqwest::Method::POST, api::PATH_MACHINES, &req).await
+    }
+
+    pub async fn update_machine(&self, id: i64, change: &UpdateMachine) -> Result<Machine> {
+        self.send(reqwest::Method::PATCH, &format!("{}/{id}", api::PATH_MACHINES), change).await
+    }
+
+    pub async fn remove_machine(&self, id: i64) -> Result<()> {
+        let r = self.auth(self.http.delete(self.url(&format!("{}/{id}", api::PATH_MACHINES)))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    pub async fn shares(&self, id: i64) -> Result<Shares> {
+        self.get(&format!("{}/{id}/shares", api::PATH_MACHINES)).await
+    }
+
+    pub async fn set_shares(&self, id: i64, users: Vec<i64>, groups: Vec<i64>) -> Result<Shares> {
+        self.send(reqwest::Method::PUT, &format!("{}/{id}/shares", api::PATH_MACHINES), &SetShares { users, groups })
+            .await
+    }
+
+    /// A ticket to connect to machine `id` from the endpoint `client`.
+    pub async fn ticket(&self, id: i64, client: &[u8; 32]) -> Result<(Vec<u8>, TicketResponse)> {
+        let r: TicketResponse = self
+            .send(
+                reqwest::Method::POST,
+                &format!("{}/{id}/ticket", api::PATH_MACHINES),
+                &TicketRequest { client: hex::encode(client) },
+            )
+            .await?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&r.ticket)
+            .map_err(|_| anyhow!("the server sent a malformed ticket"))?;
+        Ok((bytes, r))
+    }
+
+    pub async fn directory(&self) -> Result<Vec<UserRef>> {
+        self.get(api::PATH_USERS).await
+    }
+
+    /// The machine's long poll (with the machine token).
+    pub async fn agent_sync(&self, req: &AgentSync) -> Result<AgentSyncReply> {
+        let r = self
+            .auth(self.http.post(self.url(api::PATH_AGENT_SYNC)).json(req))
+            .timeout(Duration::from_secs(40))
+            .send()
+            .await
+            .with_context(|| format!("contacting {}", self.base))?;
+        Ok(Self::check(r).await?.json().await?)
+    }
+
+    // ---- groups ---------------------------------------------------------------------
+
+    pub async fn groups(&self) -> Result<Vec<Group>> {
+        self.get(api::PATH_GROUPS).await
+    }
+
+    pub async fn all_groups(&self) -> Result<Vec<GroupRef>> {
+        self.get(&format!("{}/all", api::PATH_GROUPS)).await
+    }
+
+    pub async fn create_group(&self, name: &str) -> Result<Group> {
+        self.send(reqwest::Method::POST, api::PATH_GROUPS, &NewGroup { name: name.into() }).await
+    }
+
+    pub async fn rename_group(&self, id: i64, name: &str) -> Result<Group> {
+        self.send(reqwest::Method::PATCH, &format!("{}/{id}", api::PATH_GROUPS), &NewGroup { name: name.into() }).await
+    }
+
+    pub async fn delete_group(&self, id: i64) -> Result<()> {
+        let r = self.auth(self.http.delete(self.url(&format!("{}/{id}", api::PATH_GROUPS)))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    pub async fn add_member(&self, group: i64, email: &str, role: GroupRole) -> Result<Group> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("{}/{group}/members", api::PATH_GROUPS),
+            &AddMember { email: email.into(), role },
+        )
+        .await
+    }
+
+    pub async fn set_member_role(&self, group: i64, user: i64, role: GroupRole) -> Result<Group> {
+        self.send(reqwest::Method::PATCH, &format!("{}/{group}/members/{user}", api::PATH_GROUPS), &SetRole { role })
+            .await
+    }
+
+    pub async fn remove_member(&self, group: i64, user: i64) -> Result<()> {
+        let r = self
+            .auth(self.http.delete(self.url(&format!("{}/{group}/members/{user}", api::PATH_GROUPS))))
+            .send()
+            .await?;
         Self::check(r).await.map(|_| ())
     }
 

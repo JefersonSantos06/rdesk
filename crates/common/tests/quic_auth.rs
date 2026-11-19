@@ -33,6 +33,8 @@ async fn start_host(
         opaque: None,
         host_fp: id.fingerprint(),
         host_name: "h".into(),
+        ticket: None,
+        require_local: false,
     };
     let ep2 = ep.clone();
     let task = tokio::spawn(async move {
@@ -40,7 +42,8 @@ async fn start_host(
         let ek = transport::exporter(&conn)?;
         let (mut w, mut r) = conn.accept_bi().await?;
         let store = ResumeStore::default();
-        let a = auth::host_handshake(&cfg, &store, &mut r, &mut w, ek, info).await?;
+        let peer = *conn.remote_id().as_bytes();
+        let a = auth::host_handshake(&cfg, &store, &mut r, &mut w, ek, peer, info).await?;
         transport::raise_stream_limits(&conn);
         // Keep the connection open until the client hangs up.
         let _ = conn.closed().await;
@@ -59,6 +62,7 @@ async fn login(c: &transport::Connected, key: PrivateKey) -> rdesk_proto::Sessio
     let mut a = ClientAuth {
         client_name: "c".into(),
         resume: None,
+        ticket: None,
         keys: Some(KeySource::Local(vec![key])),
         key_filter: None,
         password: None,

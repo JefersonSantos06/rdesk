@@ -93,7 +93,9 @@ rdesk login http://127.0.0.1:8080
 
 O `dev_login` só vale com `tls = "none"` e endereço local; em produção ele é ignorado.
 
-## Limitações desta fase
+## Computadores e acesso
 
-- O host embutido no app usa a sessão do usuário para entrar no relay. Se a sessão expirar (10 dias) ou a pessoa sair, o host fica alcançável só pela LAN até um novo login. A fase 3 dá à máquina uma credencial própria.
-- O controle de quem acessa cada máquina (privada, compartilhada, grupos) também é da fase 3. Por enquanto, qualquer usuário logado que conheça o ID de uma máquina chega até ela, e ainda precisa da senha ou da chave SSH dela.
+- Cada computador é cadastrado por um usuário (no app, aba *This computer*, ou `rdesk machines register`), com prova de posse da chave do host. Ele ganha uma credencial própria: usa o relay e sincroniza com o servidor mesmo sem ninguém logado.
+- Níveis: **só eu**, **compartilhado** (com pessoas e/ou grupos) ou **todos do servidor**.
+- Para conectar, o app pede um **tíquete** (válido por até 12 h); o host confere sozinho. Tirar o acesso revoga na hora e derruba a sessão em andamento.
+- Admins do sistema veem todos os computadores (aba *Admin*), mas só acessam os compartilhados com eles.

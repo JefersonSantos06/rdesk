@@ -1,7 +1,8 @@
 //! Host administration shared by the command line and the desktop app: identity,
 //! authorized keys, the password, settings and a diagnostic report.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use rdesk_common::account::{Registration, Session};
 use rdesk_common::agent;
 use rdesk_common::auth;
 use rdesk_common::config::{self, HostConfig};
@@ -12,6 +13,7 @@ use ssh_key::PublicKey;
 /// Safe to call every time the host starts.
 pub fn ensure_initialized() -> Result<[u8; 32]> {
     config::ensure_config_dir()?;
+    remove_legacy_files();
     let id = match HostIdentity::load() {
         Ok(id) => id,
         Err(_) => {
@@ -30,6 +32,20 @@ pub fn ensure_initialized() -> Result<[u8; 32]> {
     Ok(id.fingerprint())
 }
 
+/// Files of the Tailscale-era versions (TLS certificate, pinned fingerprints): unused now.
+fn remove_legacy_files() {
+    for name in ["host_key.der", "host_cert.der", "known_hosts", "network.toml"] {
+        if let Ok(p) = config::config_path(name)
+            && p.exists()
+        {
+            match std::fs::remove_file(&p) {
+                Ok(()) => tracing::info!("removed the old {}", p.display()),
+                Err(e) => tracing::debug!("{}: {e}", p.display()),
+            }
+        }
+    }
+}
+
 /// New identity, so a new host ID: every client must be given the new ID.
 pub fn regenerate_identity() -> Result<[u8; 32]> {
     config::ensure_config_dir()?;
@@ -40,6 +56,44 @@ pub fn regenerate_identity() -> Result<[u8; 32]> {
 
 pub fn fingerprint() -> Result<[u8; 32]> {
     Ok(HostIdentity::load()?.fingerprint())
+}
+
+// ---- registration with the server ---------------------------------------------
+
+/// Register this computer with the signed-in user's server (or refresh its token).
+/// The host must be restarted to use it.
+pub async fn register(session: &Session, name: &str, visibility: rdesk_proto::api::Visibility) -> Result<Registration> {
+    ensure_initialized()?;
+    let id = HostIdentity::load()?;
+    let api = session.api()?;
+    let r = api.register_machine(session.user.id, &id.secret_key(), name, visibility).await?;
+    let reg = Registration {
+        server: session.server.clone(),
+        server_name: r.server_name,
+        machine_id: r.machine.id,
+        name: r.machine.name,
+        token: r.token,
+        server_key: r.server_key,
+        relay_url: r.relay_url,
+        endpoint_id: config::format_host_id(&id.fingerprint()),
+    };
+    reg.save()?;
+    Ok(reg)
+}
+
+/// Remove this computer from the server (only who registered it can) and forget it here.
+pub async fn unregister(session: &Session) -> Result<()> {
+    let Some(reg) = Registration::load() else { bail!("this computer is not registered") };
+    if reg.server != session.server {
+        bail!("this computer is registered with {}, not with the server you are signed in to", reg.server);
+    }
+    match session.api()?.remove_machine(reg.machine_id).await {
+        Ok(()) => {}
+        // Already gone on the server: just forget it here.
+        Err(e) if format!("{e:#}").contains("no such computer") => {}
+        Err(e) => return Err(e),
+    }
+    Registration::clear()
 }
 
 // ---- keys -------------------------------------------------------------------
@@ -164,9 +218,15 @@ pub async fn diagnose() -> Vec<CheckLine> {
     let pw = has_password();
     out.push(line("SSH keys", format!("{keys} authorized"), keys > 0 || pw));
     out.push(line("Password", if pw { "enabled" } else { "not set" }, keys > 0 || pw));
-    let net = config::load_network();
+    match Registration::load() {
+        Some(r) => {
+            out.push(line("Server", format!("registered as {} on {} ({})", r.name, r.server_name, r.server), true))
+        }
+        None => out.push(line("Server", "not registered: only direct connections on the LAN", false)),
+    }
+    let net = config::host_network();
     match transport::relay_url(&net) {
-        Ok(None) => out.push(line("Relay", "none: only direct connections (LAN, port forwarding)", true)),
+        Ok(None) => {}
         Ok(Some(url)) => {
             let reach = async {
                 let ep = transport::bind(None, &net, &Default::default(), transport::Role::Client).await?;

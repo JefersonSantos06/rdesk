@@ -7,11 +7,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{Color32, RichText};
+use rdesk_common::account::{Registration, Session};
 use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, HostConfig, format_host_id};
 use rdesk_common::directory;
 use rdesk_host::admin::{self, CheckLine};
 use rdesk_host::{HostHandle, HostState, HostStatus, Reporter, RunOpts};
+use rdesk_proto::api::Visibility;
 use ssh_key::PublicKey;
 use zeroize::Zeroizing;
 
@@ -48,6 +50,11 @@ enum Dialog {
 
 pub(super) struct HostPage {
     exe: PathBuf,
+    /// Registration with the server: the name and visibility typed for it, and the job.
+    reg_name: String,
+    reg_visibility: Visibility,
+    reg_job: Option<Receiver<Result<String, String>>>,
+    confirm_unregister: bool,
     rt: Arc<tokio::runtime::Runtime>,
     reporter: Reporter,
     handle: Option<HostHandle>,
@@ -77,6 +84,10 @@ impl HostPage {
         let reporter = Reporter::new(move || ctx.request_repaint());
         let mut p = Self {
             exe,
+            reg_name: rdesk_common::local_hostname(),
+            reg_visibility: Visibility::Private,
+            reg_job: None,
+            confirm_unregister: false,
             rt,
             reporter,
             handle: None,
@@ -179,7 +190,44 @@ impl HostPage {
         }
     }
 
+    fn register(&mut self, ctx: &egui::Context) {
+        let Some(s) = Session::load() else {
+            self.notify("Sign in first.", true);
+            return;
+        };
+        let (name, vis) = (self.reg_name.trim().to_string(), self.reg_visibility);
+        self.reg_job = Some(super::account::spawn(ctx, move || async move {
+            admin::register(&s, &name, vis)
+                .await
+                .map(|r| format!("Registered as {} on {}.", r.name, r.server_name))
+                .map_err(|e| format!("{e:#}"))
+        }));
+    }
+
+    fn unregister(&mut self, ctx: &egui::Context) {
+        let Some(s) = Session::load() else {
+            self.notify("Sign in first.", true);
+            return;
+        };
+        self.reg_job = Some(super::account::spawn(ctx, move || async move {
+            admin::unregister(&s).await.map(|_| "Unregistered.".to_string()).map_err(|e| format!("{e:#}"))
+        }));
+    }
+
     pub(super) fn tick(&mut self) {
+        if let Some(rx) = &self.reg_job
+            && let Ok(r) = rx.try_recv()
+        {
+            self.reg_job = None;
+            match r {
+                Ok(msg) => {
+                    self.notify(msg, false);
+                    // The host picks the registration (relay, tickets) up when it starts.
+                    self.restart();
+                }
+                Err(e) => self.notify(e, true),
+            }
+        }
         while let Ok(job) = self.jobs.1.try_recv() {
             self.busy = None;
             match job {
@@ -227,6 +275,8 @@ impl HostPage {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             self.status_section(ui, &st);
             ui.add_space(14.0);
+            self.server_section(ui, &st);
+            ui.add_space(14.0);
             self.session_section(ui, &st);
             ui.add_space(14.0);
             self.login_section(ui);
@@ -238,6 +288,71 @@ impl HostPage {
             self.diagnostics_section(ui);
         });
         self.dialogs(ui.ctx());
+    }
+
+    fn server_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
+        let ctx = ui.ctx().clone();
+        ui.label(RichText::new("On your rdesk server").strong().size(16.0));
+        let busy = self.reg_job.is_some();
+        match Registration::load() {
+            Some(r) => {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Registered as {} on {}.", r.name, r.server_name));
+                    match &st.registration {
+                        Some(Ok(_)) if self.running() => {
+                            ui.colored_label(GREEN, "✔ in touch with the server");
+                        }
+                        Some(Err(e)) if self.running() => {
+                            ui.colored_label(ORANGE, e);
+                        }
+                        _ => {}
+                    }
+                });
+                ui.weak("Who may reach it (only you, shared, everyone) is set on the Computers page.");
+                ui.horizontal(|ui| {
+                    if self.confirm_unregister {
+                        ui.label("Unregister? Nobody will reach it through the server any more.");
+                        if ui.add_enabled(!busy, egui::Button::new("Unregister")).clicked() {
+                            self.confirm_unregister = false;
+                            self.unregister(&ctx);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_unregister = false;
+                        }
+                    } else if ui.add_enabled(!busy, egui::Button::new("Unregister…")).clicked() {
+                        self.confirm_unregister = true;
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                });
+            }
+            None => {
+                ui.label(
+                    "Not registered: others reach it only on the LAN by address. Register it to reach it \
+                     from anywhere, with access controlled by the server.",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.add(egui::TextEdit::singleline(&mut self.reg_name).desired_width(200.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Who can reach it");
+                    ui.radio_value(&mut self.reg_visibility, Visibility::Private, "only me");
+                    ui.radio_value(&mut self.reg_visibility, Visibility::Shared, "shared (choose later)");
+                    ui.radio_value(&mut self.reg_visibility, Visibility::Everyone, "everyone on the server");
+                });
+                ui.horizontal(|ui| {
+                    let ok = !busy && !self.reg_name.trim().is_empty();
+                    if ui.add_enabled(ok, egui::Button::new("Register this computer")).clicked() {
+                        self.register(&ctx);
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                });
+            }
+        }
     }
 
     fn status_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
@@ -338,9 +453,10 @@ impl HostPage {
     }
 
     fn login_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Who can log in").strong().size(16.0));
-        if !self.has_password && self.keys.is_empty() {
-            ui.colored_label(ORANGE, "Nobody yet: set a password or add an SSH key, or the host will not start.");
+        ui.label(RichText::new("This computer's own password and keys").strong().size(16.0));
+        ui.weak("Used on the LAN without the server, or as the extra lock (Options) after the server's permission.");
+        if !self.has_password && self.keys.is_empty() && Registration::load().is_none() {
+            ui.colored_label(ORANGE, "Not registered and no password or key: the host cannot start.");
         }
         ui.horizontal(|ui| {
             ui.label("Password:");
@@ -412,6 +528,10 @@ impl HostPage {
                 ui.end_row();
                 ui.label("Clipboard");
                 ui.checkbox(&mut self.cfg.clipboard, "share text in both directions");
+                ui.end_row();
+                ui.label("Extra lock");
+                ui.checkbox(&mut self.cfg.require_local, "also ask for this computer's password or SSH key")
+                    .on_hover_text("Besides the permission from the server (needs a password or key set above)");
                 ui.end_row();
             });
             ui.horizontal(|ui| {

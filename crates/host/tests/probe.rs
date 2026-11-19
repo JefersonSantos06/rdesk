@@ -56,6 +56,7 @@ async fn probe_reports_status_and_is_not_a_login() {
     let mut creds = ClientAuth {
         client_name: "test".into(),
         resume: None,
+        ticket: None,
         keys: Some(KeySource::Local(vec![key])),
         key_filter: None,
         password: None,

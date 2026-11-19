@@ -102,6 +102,9 @@ pub struct HostConfig {
     pub jpeg_quality: u8,
     /// Share the clipboard (text) in both directions.
     pub clipboard: bool,
+    /// Registered with a server: besides the server's ticket, also ask for this computer's
+    /// own password or SSH key (an extra lock).
+    pub require_local: bool,
     pub transport: TransportTuning,
 }
 
@@ -113,6 +116,7 @@ impl Default for HostConfig {
             max_fps: 30,
             jpeg_quality: 70,
             clipboard: true,
+            require_local: false,
             transport: TransportTuning::default(),
         }
     }
@@ -200,9 +204,18 @@ pub struct NetworkConfig {
     pub token: Option<String>,
 }
 
+/// For connecting to others: the signed-in user's session.
 pub fn load_network() -> NetworkConfig {
     match crate::account::Session::load() {
         Some(s) => NetworkConfig { relay: Some(s.relay_url), token: Some(s.token) },
+        None => NetworkConfig::default(),
+    }
+}
+
+/// For the host: this computer's own registration (works with nobody signed in).
+pub fn host_network() -> NetworkConfig {
+    match crate::account::Registration::load() {
+        Some(r) => NetworkConfig { relay: Some(r.relay_url), token: Some(r.token) },
         None => NetworkConfig::default(),
     }
 }

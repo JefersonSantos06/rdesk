@@ -207,6 +207,18 @@ pub async fn connect(
     net: &NetworkConfig,
     timeout: Duration,
 ) -> Result<Connected> {
+    let direct: Vec<String> = direct.into_iter().map(str::to_string).collect();
+    connect_with(endpoint, id, &direct, net, timeout).await
+}
+
+/// Like [`connect`], trying several direct addresses (what a machine reported).
+pub async fn connect_with(
+    endpoint: &Endpoint,
+    id: [u8; 32],
+    direct: &[String],
+    net: &NetworkConfig,
+    timeout: Duration,
+) -> Result<Connected> {
     let host =
         EndpointId::from_bytes(&id).map_err(|_| anyhow!("{} is not a valid host ID", config::format_host_id(&id)))?;
     let mut addr = EndpointAddr::new(host);
@@ -214,15 +226,15 @@ pub async fn connect(
     if let Some(url) = relay.clone() {
         addr = addr.with_relay_url(url);
     }
-    if let Some(d) = direct.map(str::trim).filter(|d| !d.is_empty()) {
+    for d in direct.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
         match resolve_all(d, rdesk_proto::DEFAULT_PORT).await {
             Ok(list) => {
                 for sa in list {
                     addr = addr.with_ip_addr(sa);
                 }
             }
-            // With a relay the address is only a shortcut.
-            Err(e) if relay.is_some() => tracing::debug!("{e:#}"),
+            // With a relay (or other addresses) an address is only a shortcut.
+            Err(e) if relay.is_some() || direct.len() > 1 => tracing::debug!("{e:#}"),
             Err(e) => return Err(e),
         }
     }

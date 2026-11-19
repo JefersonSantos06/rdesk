@@ -8,8 +8,10 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
+use rdesk_common::account::Registration;
 use rdesk_common::auth::{self, AuthKind, FailureLimiter, HostAuthConfig, OpaqueServer, ResumeStore};
 use rdesk_common::config::{self, HostConfig, format_host_id};
+use rdesk_common::ticket::{TicketPolicy, TicketUser};
 use rdesk_common::transport::{self, Connection, HostIdentity, Incoming, IncomingAddr, Role, close};
 use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, PROTOCOL_VERSION, expect_msg, write_msg};
 use tokio::io::AsyncReadExt as _;
@@ -35,19 +37,59 @@ const RELAYED: IpAddr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
 struct Current {
     conn: Connection,
     task: tokio::task::JoinHandle<()>,
+    /// Who the server's ticket let in.
+    user: Option<TicketUser>,
 }
 
-struct Server {
+pub(crate) struct Server {
     reporter: Reporter,
     shared: Arc<Shared>,
     host_fp: [u8; 32],
+    /// Registered with a server: tickets are required (and checked against revocations).
+    pub(crate) ticket: Option<TicketPolicy>,
+    require_local: bool,
+    /// Ask the sync loop to report now (a session started or ended).
+    pub(crate) sync_now: tokio::sync::Notify,
     limiter: FailureLimiter,
     resume: ResumeStore,
     handshakes: Semaphore,
     current: Mutex<Option<Current>>,
 }
 
-pub fn load_auth_config(host_fp: [u8; 32]) -> Result<HostAuthConfig> {
+impl Server {
+    pub(crate) async fn in_session(&self) -> bool {
+        self.current.lock().await.as_ref().is_some_and(|c| c.conn.close_reason().is_none())
+    }
+
+    /// End the session if its user lost access (after a sync brought revocations).
+    pub(crate) async fn enforce_revocations(&self) {
+        let Some(policy) = &self.ticket else { return };
+        let mut cur = self.current.lock().await;
+        if let Some(c) = cur.as_ref()
+            && let Some(u) = &c.user
+            && policy.is_revoked(u)
+        {
+            self.reporter.event(format!("{}: access removed on the server, session ended", u.email), true);
+            c.conn.close(close::KICKED, b"your access to this computer was removed");
+            *cur = None;
+        }
+    }
+}
+
+/// The registration, if it is for this host identity.
+pub fn registration_for(host_fp: &[u8; 32]) -> Option<Registration> {
+    Registration::load().filter(|r| r.endpoint_id == hex_id(host_fp))
+}
+
+fn hex_id(id: &[u8; 32]) -> String {
+    format_host_id(id)
+}
+
+pub fn load_auth_config(
+    host_fp: [u8; 32],
+    ticket: Option<TicketPolicy>,
+    require_local: bool,
+) -> Result<HostAuthConfig> {
     let keys_path = config::config_path(config::AUTHORIZED_KEYS)?;
     let authorized_keys = match std::fs::read_to_string(&keys_path) {
         Ok(t) => auth::parse_authorized_keys(&t)?.into_iter().map(|k| k.key_data().clone()).collect(),
@@ -60,7 +102,14 @@ pub fn load_auth_config(host_fp: [u8; 32]) -> Result<HostAuthConfig> {
         (Some(s), Some(r)) => Some(OpaqueServer::from_bytes(&s, &r)?),
         _ => None,
     };
-    Ok(HostAuthConfig { authorized_keys, opaque, host_fp, host_name: rdesk_common::local_hostname() })
+    Ok(HostAuthConfig {
+        authorized_keys,
+        opaque,
+        host_fp,
+        host_name: rdesk_common::local_hostname(),
+        ticket,
+        require_local,
+    })
 }
 
 #[cfg(windows)]
@@ -95,14 +144,25 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     if let Some(p) = opts.port {
         cfg.port = p;
     }
-    let net = config::load_network();
     let identity = HostIdentity::load()?;
     let host_fp = identity.fingerprint();
     reporter.fingerprint(host_fp);
+    // Registered: the server's relay with this computer's own token, and tickets required.
+    let registration = registration_for(&host_fp);
+    let net = if registration.is_some() { config::host_network() } else { config::NetworkConfig::default() };
+    let ticket = match &registration {
+        Some(r) => Some(TicketPolicy { server_key: r.server_key()?, machine: host_fp, revoked: Default::default() }),
+        None => None,
+    };
+    reporter.registration(registration.as_ref().map(|r| Ok(format!("{} on {}", r.name, r.server_name))));
 
-    let auth_cfg = load_auth_config(host_fp)?;
-    if auth_cfg.authorized_keys.is_empty() && auth_cfg.opaque.is_none() {
-        bail!("no way to log in yet: set a password or authorize an SSH key");
+    let auth_cfg = load_auth_config(host_fp, ticket.clone(), cfg.require_local)?;
+    let local = !auth_cfg.authorized_keys.is_empty() || auth_cfg.opaque.is_some();
+    if ticket.is_none() && !local {
+        bail!("no way to log in yet: register this computer with your rdesk server, or set a password");
+    }
+    if ticket.is_some() && cfg.require_local && !local {
+        bail!("the extra lock is on but this computer has no password or SSH key: set one, or turn it off");
     }
 
     let shared = Arc::new(Shared {
@@ -132,6 +192,9 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     let server = Arc::new(Server {
         shared,
         host_fp,
+        ticket,
+        require_local: cfg.require_local,
+        sync_now: tokio::sync::Notify::new(),
         limiter: FailureLimiter::default(),
         resume: ResumeStore::default(),
         handshakes: Semaphore::new(4),
@@ -157,7 +220,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
                 }
                 Ok(false) => {
                     reporter.relay(None);
-                    reporter.event("Not signed in to an rdesk server: reachable only by address (LAN)", true);
+                    reporter.event("Not registered with an rdesk server: reachable only by address (LAN)", true);
                 }
                 Err(e) => {
                     reporter.relay(Some(Err(format!("{e:#}"))));
@@ -165,6 +228,9 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
                 }
             }
         });
+    }
+    if let Some(reg) = registration {
+        tokio::spawn(crate::sync::run(reg, ep.clone(), server.clone(), reporter.clone()));
     }
     {
         let (ep, server) = (ep.clone(), server.clone());
@@ -240,7 +306,8 @@ impl Server {
         // Not a probe: hand the message back to the handshake as if it had not been read.
         let replay = rdesk_proto::encode(&first)?;
 
-        let auth_cfg = load_auth_config(self.host_fp)?;
+        let auth_cfg = load_auth_config(self.host_fp, self.ticket.clone(), self.require_local)?;
+        let peer_id = *conn.remote_id().as_bytes();
         let monitors = self.shared.capturer.monitors().await.unwrap_or_default();
         let initial = session::pick_initial(&monitors).map(|m| m.info.id).unwrap_or(0);
         let info = HostInfo {
@@ -254,7 +321,7 @@ impl Server {
             let mut r = std::io::Cursor::new(replay).chain(&mut r);
             tokio::time::timeout(
                 Duration::from_secs(60),
-                auth::host_handshake(&auth_cfg, &self.resume, &mut r, &mut w, ek, || info),
+                auth::host_handshake(&auth_cfg, &self.resume, &mut r, &mut w, ek, peer_id, || info),
             )
             .await
         };
@@ -262,6 +329,10 @@ impl Server {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => {
                 self.limiter.failure(ip);
+                // Let the reason (already sent) reach the client before closing; it hangs up
+                // as soon as it reads it.
+                let _ = w.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
                 conn.close(close::AUTH_FAILED, b"authentication failed");
                 self.reporter.event(format!("Failed login from {peer}: {e:#}"), true);
                 bail!("{peer}: {e:#}");
@@ -293,8 +364,15 @@ impl Server {
             AuthKind::PublicKey { fingerprint } => format!("key {fingerprint}"),
             AuthKind::Password => "password".to_string(),
             AuthKind::Resume => "reconnect".to_string(),
+            AuthKind::Ticket { local: None } => "server ticket".to_string(),
+            AuthKind::Ticket { local: Some(l) } => format!("server ticket + {l}"),
         };
-        let info = SessionInfo { client: authed.client_name.clone(), peer, method, since: SystemTime::now() };
+        let user = authed.user.clone();
+        let client = match &user {
+            Some(u) => format!("{} ({})", u.label(), authed.client_name),
+            None => authed.client_name.clone(),
+        };
+        let info = SessionInfo { client, peer, method, since: SystemTime::now() };
         if !matches!(authed.kind, AuthKind::Resume) {
             self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
         }
@@ -302,13 +380,16 @@ impl Server {
         let shared = self.shared.clone();
         let reporter = self.reporter.clone();
         let c2 = conn.clone();
+        let me = self.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = session::run(c2, w, r, authed, shared, monitors).await {
                 tracing::warn!("session error: {e:#}");
             }
             reporter.session_ended(&info.peer, info.since);
+            me.sync_now.notify_one();
         });
-        *cur = Some(Current { conn, task });
+        *cur = Some(Current { conn, task, user });
+        self.sync_now.notify_one();
         Ok(())
     }
 }
