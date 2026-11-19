@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use rdesk_proto::api::{
-    self, API_VERSION, AddMember, AddUser, AdminUser, AgentSync, AgentSyncReply, ApiError, Group, GroupRef, GroupRole,
-    HistoryEntry, Machine, Managers, NewGroup, RegisterMachine, Registered, ServerInfo, SetManagers, SetRole,
+    self, API_VERSION, AddMember, AddUser, AdminUser, AgentSync, AgentSyncReply, ApiError, ApproveMachine,
+    CreatedEnrollKey, EnrollKey, EnrollReply, EnrollRequest, Group, GroupRef, GroupRole, HistoryEntry, Machine,
+    MachineRequest, Managers, NewEnrollKey, NewGroup, RegisterMachine, Registered, ServerInfo, SetManagers, SetRole,
     SetShares, ShareRole, Shares, TicketRequest, TicketResponse, TokenRequest, TokenResponse, UpdateMachine,
     UpdateUser, UserInfo, UserRef, Visibility,
 };
@@ -351,6 +352,74 @@ impl Api {
             .await
             .with_context(|| format!("contacting {}", self.base))?;
         Ok(Self::check(r).await?.json().await?)
+    }
+
+    // ---- adding computers without signing in on them ---------------------------------
+
+    /// Ask to be added (no session): `owner` approves it in the app, or `key` adds it at
+    /// once. The server may hold the answer up to `wait_secs` for the approval.
+    pub async fn enroll(
+        &self,
+        host_key: &iroh::SecretKey,
+        name: &str,
+        owner: Option<&str>,
+        key: Option<&str>,
+        wait_secs: u32,
+    ) -> Result<EnrollReply> {
+        let endpoint = *host_key.public().as_bytes();
+        let timestamp = now();
+        let sig = host_key.sign(&api::enroll_message(&endpoint, timestamp));
+        let req = EnrollRequest {
+            endpoint_id: hex::encode(endpoint),
+            name: name.to_string(),
+            os: std::env::consts::OS.to_string(),
+            timestamp,
+            signature: hex::encode(sig.to_bytes()),
+            owner: owner.map(str::to_string),
+            key: key.map(str::to_string),
+            wait_secs,
+        };
+        let r = self
+            .http
+            .post(self.url(api::PATH_ENROLL))
+            .json(&req)
+            .timeout(Duration::from_secs(u64::from(wait_secs) + 20))
+            .send()
+            .await
+            .with_context(|| format!("contacting {}", self.base))?;
+        Ok(Self::check(r).await?.json().await?)
+    }
+
+    pub async fn machine_requests(&self) -> Result<Vec<MachineRequest>> {
+        self.get(api::PATH_MACHINE_REQUESTS).await
+    }
+
+    pub async fn approve_machine(&self, id: i64, name: Option<String>, visibility: Visibility) -> Result<Machine> {
+        self.send(
+            reqwest::Method::POST,
+            &format!("{}/{id}/approve", api::PATH_MACHINE_REQUESTS),
+            &ApproveMachine { name, visibility },
+        )
+        .await
+    }
+
+    pub async fn reject_machine(&self, id: i64) -> Result<()> {
+        let path = format!("{}/{id}/reject", api::PATH_MACHINE_REQUESTS);
+        let r = self.auth(self.http.post(self.url(&path))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    pub async fn enroll_keys(&self) -> Result<Vec<EnrollKey>> {
+        self.get(api::PATH_ENROLL_KEYS).await
+    }
+
+    pub async fn create_enroll_key(&self, req: &NewEnrollKey) -> Result<CreatedEnrollKey> {
+        self.send(reqwest::Method::POST, api::PATH_ENROLL_KEYS, req).await
+    }
+
+    pub async fn revoke_enroll_key(&self, id: i64) -> Result<()> {
+        let r = self.auth(self.http.delete(self.url(&format!("{}/{id}", api::PATH_ENROLL_KEYS)))).send().await?;
+        Self::check(r).await.map(|_| ())
     }
 
     // ---- groups ---------------------------------------------------------------------

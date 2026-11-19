@@ -55,6 +55,10 @@ pub(super) struct HostPage {
     reg_visibility: Visibility,
     reg_job: Option<Receiver<Result<String, String>>>,
     confirm_unregister: bool,
+    /// "Only share this computer" on the sign-in screen: owner e-mail or enrollment key.
+    join_use_key: bool,
+    join_owner: String,
+    join_key: String,
     rt: Arc<tokio::runtime::Runtime>,
     reporter: Reporter,
     handle: Option<HostHandle>,
@@ -88,6 +92,9 @@ impl HostPage {
             reg_visibility: Visibility::Private,
             reg_job: None,
             confirm_unregister: false,
+            join_use_key: false,
+            join_owner: String::new(),
+            join_key: String::new(),
             rt,
             reporter,
             handle: None,
@@ -130,6 +137,7 @@ impl HostPage {
         let st = self.status();
         match (&st.state, &st.session) {
             (_, Some(s)) if self.running() => format!("in use by {}", s.client),
+            (HostState::Starting, _) if st.enrollment.is_some() => "waiting for approval".into(),
             (HostState::Listening(_), _) => "on".into(),
             (HostState::Starting, _) => "starting".into(),
             (HostState::Failed(_), _) => "error".into(),
@@ -328,6 +336,14 @@ impl HostPage {
                 });
             }
             None => {
+                if let Some(msg) = st.enrollment.as_ref().filter(|_| self.running()) {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(msg);
+                    });
+                    ui.weak("Or register it yourself below (it becomes yours at once).");
+                    ui.add_space(4.0);
+                }
                 ui.label(
                     "Not registered: others reach it only on the LAN by address. Register it to reach it \
                      from anywhere, with access controlled by the server.",
@@ -353,6 +369,85 @@ impl HostPage {
                 });
             }
         }
+    }
+
+    /// On the sign-in screen: make this computer reachable without signing in (it asks the
+    /// server to add it; its owner approves it, or an enrollment key adds it at once).
+    pub(super) fn join_section(&mut self, ui: &mut egui::Ui, server: &str) {
+        ui.add_space(26.0);
+        ui.separator();
+        ui.add_space(8.0);
+        let st = self.status();
+        if let Some(r) = Registration::load() {
+            ui.label(RichText::new("This computer").strong());
+            ui.label(format!("Reachable as {} on {} · host {}.", r.name, r.server_name, self.summary()));
+            let label = if self.running() { "Turn the host off" } else { "Turn the host on" };
+            if ui.button(label).clicked() {
+                self.toggle();
+            }
+            return;
+        }
+        if let Some(msg) = st.enrollment.as_ref().filter(|_| self.running()) {
+            ui.label(RichText::new("This computer").strong());
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 380.0).max(0.0) / 2.0);
+                ui.spinner();
+                ui.label(msg);
+            });
+            ui.weak("Keep rdesk running (it can stay in the tray) until it is approved.");
+            if ui.button("Cancel").clicked() {
+                self.stop();
+                if let Err(e) = rdesk_host::enroll::save(Default::default()) {
+                    self.notify(format!("{e:#}"), true);
+                }
+            }
+            return;
+        }
+        if let HostState::Failed(e) = &st.state {
+            ui.colored_label(ORANGE, e);
+        }
+        egui::CollapsingHeader::new("Only share this computer (no sign-in)").show(ui, |ui| {
+            ui.label(
+                "For a computer that is only accessed, never used to reach others: it joins the server \
+                 above, and its owner approves it in their rdesk app.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.join_use_key, false, "Owner's e-mail");
+                ui.radio_value(&mut self.join_use_key, true, "Enrollment key");
+            });
+            let (value, hint) = if self.join_use_key {
+                (&mut self.join_key, "rdk_… (from Computers → Add a computer)")
+            } else {
+                (&mut self.join_owner, "who will own it, e.g. ana@gmail.com")
+            };
+            ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(360.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.reg_name).hint_text("Name of this computer").desired_width(360.0),
+            );
+            let ready = !server.trim().is_empty() && !value.trim().is_empty();
+            if ui.add_enabled(ready, egui::Button::new("Ask to join")).clicked() {
+                let value = value.trim().to_string();
+                let cfg = rdesk_common::config::EnrollConfig {
+                    server: Some(server.trim().to_string()),
+                    owner: (!self.join_use_key).then(|| value.clone()),
+                    key: self.join_use_key.then_some(value),
+                    name: Some(self.reg_name.trim().to_string()).filter(|n| !n.is_empty()),
+                };
+                match rdesk_host::enroll::save(cfg) {
+                    Ok(()) => {
+                        if let Some(h) = self.handle.take() {
+                            self.rt.block_on(h.shutdown());
+                        }
+                        self.start();
+                    }
+                    Err(e) => self.notify(format!("{e:#}"), true),
+                }
+            }
+            if !server.trim().is_empty() {
+                ui.weak("The server address is the one typed above.");
+            }
+        });
     }
 
     fn status_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
@@ -864,6 +959,13 @@ fn confirm(ctx: &egui::Context, title: &str, text: &str, ok: &str) -> Option<boo
 
 fn unix(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// The host can run with nobody signed in: registered (its own credential), or asking a
+/// server to add it.
+pub(super) fn runs_signed_out() -> bool {
+    Registration::load().is_some()
+        || admin::load_config().ok().and_then(|c| rdesk_host::enroll::settings(&c.enroll)).is_some()
 }
 
 pub(super) fn remembered_enabled() -> bool {

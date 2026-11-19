@@ -20,7 +20,10 @@ use egui::{Color32, RichText, Sense, Vec2};
 use rdesk_common::account::Session;
 use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, parse_host_id};
-use rdesk_proto::api::{GroupRef, HistoryEntry, Machine, ShareRole, UpdateMachine, UserRef, Visibility};
+use rdesk_proto::api::{
+    CreatedEnrollKey, EnrollKey, GroupRef, HistoryEntry, Machine, MachineRequest, NewEnrollKey, SetShares, ShareRole,
+    UpdateMachine, UserRef, Visibility,
+};
 use tokio::sync::mpsc;
 
 use super::account::spawn;
@@ -36,6 +39,8 @@ const ERROR: Color32 = Color32::from_rgb(230, 70, 70);
 #[derive(Default, Clone)]
 pub(super) struct Snapshot {
     machines: Option<Result<Vec<Machine>, String>>,
+    /// Computers asking this user (or, for admins, anyone) to approve them.
+    requests: Vec<MachineRequest>,
     agent_keys: Option<Result<Vec<(String, String)>, String>>,
     refreshing: bool,
 }
@@ -80,15 +85,21 @@ async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<Wo
         }
         shared.lock().unwrap().refreshing = true;
         ctx.request_repaint();
-        let list = match Session::load() {
+        let (list, requests) = match Session::load() {
             Some(s) => match s.api() {
-                Ok(api) => api.machines().await.map_err(|e| short_error(&e)),
-                Err(e) => Err(short_error(&e)),
+                Ok(api) => {
+                    let (list, requests) = tokio::join!(api.machines(), api.machine_requests());
+                    (list.map_err(|e| short_error(&e)), requests.ok())
+                }
+                Err(e) => (Err(short_error(&e)), None),
             },
-            None => Err("not signed in".into()),
+            None => (Err("not signed in".into()), Some(Vec::new())),
         };
         {
             let mut snap = shared.lock().unwrap();
+            if let Some(r) = requests {
+                snap.requests = r;
+            }
             // Keep the last good list through a short outage.
             if list.is_ok() || !matches!(snap.machines, Some(Ok(_))) {
                 snap.machines = Some(list);
@@ -234,8 +245,32 @@ struct History {
     job: Option<Receiver<Result<Vec<HistoryEntry>, String>>>,
 }
 
+/// The user's enrollment keys and every group (to share the computers a key adds).
+type KeysLoad = Result<(Vec<EnrollKey>, Vec<GroupRef>), String>;
+
+struct NewKeyForm {
+    name: String,
+    reusable: bool,
+    days: u32,
+    visibility: Visibility,
+    groups: HashMap<i64, ShareRole>,
+    error: Option<String>,
+}
+
+/// "Add a computer": the ways to add one, and the enrollment keys.
+struct AddComputer {
+    keys: Option<KeysLoad>,
+    job: Option<Receiver<KeysLoad>>,
+    form: Option<NewKeyForm>,
+    create_job: Option<Receiver<Result<CreatedEnrollKey, String>>>,
+    /// The key just created: shown once.
+    created: Option<String>,
+}
+
 enum Dialog {
     Login(Box<LoginOptions>),
+    AddComputer(Box<AddComputer>),
+    Approve { request: Box<MachineRequest>, name: String, visibility: Visibility },
     Rename { machine: Machine, name: String },
     Share(Box<ShareEdit>),
     Managers(Box<ManagersEdit>),
@@ -472,6 +507,16 @@ impl Computers {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("⟳").on_hover_text("Refresh now").clicked() {
                     self.refresh();
+                }
+                if ui.button("＋ Add a computer…").clicked() {
+                    let d = AddComputer {
+                        keys: None,
+                        job: Some(load_keys(ui.ctx(), None)),
+                        form: None,
+                        create_job: None,
+                        created: None,
+                    };
+                    self.dialog = Some(Dialog::AddComputer(Box::new(d)));
                 }
                 if snap.refreshing || self.job.is_some() {
                     ui.spinner();
@@ -1059,6 +1104,59 @@ impl Computers {
                     keep = false;
                 }
             }
+            Dialog::AddComputer(d) => {
+                if !self.add_computer_ui(ctx, d) {
+                    keep = false;
+                }
+            }
+            Dialog::Approve { request, name, visibility } => {
+                let m = egui::Modal::new(egui::Id::unique("approve-machine")).show(ctx, |ui| {
+                    ui.set_width(440.0);
+                    ui.heading(format!("Approve {}?", request.name));
+                    ui.label(format!(
+                        "Only if that computer shows the code {}. Once approved it is yours: you choose who may \
+                         reach it, and can share, rename or unregister it.",
+                        request.code
+                    ));
+                    ui.add_space(6.0);
+                    egui::Grid::new("approve-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(260.0));
+                        ui.end_row();
+                        ui.label("Who can see it");
+                        ui.vertical(|ui| {
+                            for v in [Visibility::Private, Visibility::Shared, Visibility::Everyone] {
+                                ui.radio_value(visibility, v, vis_label(v));
+                            }
+                        });
+                        ui.end_row();
+                    });
+                    ui.add_space(6.0);
+                    let mut done = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("Approve").clicked() {
+                            done = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            done = Some(false);
+                        }
+                    });
+                    done
+                });
+                match m.inner {
+                    Some(true) => {
+                        let (id, n, v) = (request.id, name.trim().to_string(), *visibility);
+                        self.run(ctx, move |api| async move {
+                            let m = api.approve_machine(id, Some(n), v).await?;
+                            Ok(format!("{} was added: it shows up online in a few seconds.", m.name))
+                        });
+                        keep = false;
+                    }
+                    Some(false) => keep = false,
+                    None if m.should_close() => keep = false,
+                    None => {}
+                }
+            }
             Dialog::Unregister(machine) => {
                 let m = egui::Modal::new(egui::Id::unique("unregister-machine")).show(ctx, |ui| {
                     ui.heading(format!("Unregister {}?", machine.name));
@@ -1152,6 +1250,10 @@ impl Computers {
                 ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(220.0));
                 ui.checkbox(&mut self.show_offline, "show offline");
             });
+            if !snap.requests.is_empty() {
+                ui.add_space(10.0);
+                self.requests_ui(ui, &snap.requests);
+            }
             let needle = self.search.trim().to_lowercase();
             let matches = |m: &Machine| {
                 (needle.is_empty() || m.name.to_lowercase().contains(&needle) || m.owner.email.contains(&needle))
@@ -1180,6 +1282,157 @@ impl Computers {
         self.dialogs(&ctx, &snap);
     }
 
+    /// Computers that asked to be added, with Approve / Refuse.
+    fn requests_ui(&mut self, ui: &mut egui::Ui, requests: &[MachineRequest]) {
+        let ctx = ui.ctx().clone();
+        ui.label(RichText::new("Waiting for your approval").strong().size(17.0));
+        ui.weak("Approve only computers you expect: compare the code with the one the computer shows.");
+        ui.add_space(4.0);
+        egui::Grid::new("requests").num_columns(5).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
+            for r in requests {
+                ui.label(format!("{} {}", os_icon(&r.os), r.name));
+                ui.monospace(&r.code);
+                ui.weak(match &r.owner {
+                    Some(o) => format!("for {}", o.email),
+                    None => "no owner (for admins)".into(),
+                });
+                ui.weak(format!("asked {}", when(r.created_at)));
+                ui.horizontal(|ui| {
+                    if ui.button("Approve…").clicked() {
+                        self.dialog = Some(Dialog::Approve {
+                            request: Box::new(r.clone()),
+                            name: r.name.clone(),
+                            visibility: Visibility::Private,
+                        });
+                    }
+                    if ui.button("Refuse").clicked() {
+                        let (id, name) = (r.id, r.name.clone());
+                        self.run(&ctx, move |api| async move {
+                            api.reject_machine(id).await?;
+                            Ok(format!("{name} was refused."))
+                        });
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    /// The "Add a computer" window; `false` once closed.
+    fn add_computer_ui(&mut self, ctx: &egui::Context, d: &mut AddComputer) -> bool {
+        if let Some(rx) = &d.job
+            && let Ok(r) = rx.try_recv()
+        {
+            d.job = None;
+            d.keys = Some(r);
+        }
+        if let Some(rx) = &d.create_job
+            && let Ok(r) = rx.try_recv()
+        {
+            d.create_job = None;
+            match r {
+                Ok(c) => {
+                    d.created = Some(c.key);
+                    d.form = None;
+                    d.job = Some(load_keys(ctx, None));
+                }
+                Err(e) => {
+                    if let Some(f) = &mut d.form {
+                        f.error = Some(e);
+                    }
+                }
+            }
+        }
+        let (server, email) = Session::load().map(|s| (s.server.clone(), s.user.email.clone())).unwrap_or_default();
+        let mut open = true;
+        egui::Window::new("Add a computer")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                    ui.label(RichText::new("Signing in on it").strong());
+                    ui.label("Install rdesk there, sign in, and register it on its This computer page.");
+                    ui.add_space(10.0);
+
+                    ui.label(RichText::new("Without signing in on it").strong());
+                    ui.label(
+                        "On its sign-in screen, choose \"Only share this computer\" and enter your e-mail. Or, on \
+                         the command line:",
+                    );
+                    copy_box(ui, &format!("rdesk host enroll --server {server} --owner {email}\nrdesk host run"));
+                    ui.weak("It then shows up here, under Waiting for your approval, with a code to compare.");
+                    ui.add_space(10.0);
+
+                    ui.label(RichText::new("Ready-made images (Raspberry Pi, Orange Pi…)").strong());
+                    ui.label(
+                        "An enrollment key adds computers at once, with no approval: whoever has the key can add \
+                         computers to your account until it expires or you revoke it.",
+                    );
+                    if let Some(k) = &d.created {
+                        ui.add_space(4.0);
+                        ui.colored_label(Color32::from_rgb(46, 184, 92), "New key (shown only now, copy it):");
+                        copy_box(ui, &format!("RDESK_SERVER={server}\nRDESK_ENROLL_KEY={k}"));
+                        ui.weak("Put these in the host service's environment, or run `rdesk host enroll --key …`.");
+                    }
+                    ui.add_space(4.0);
+                    let revoke = keys_table(ui, d.keys.as_ref());
+                    if let Some(id) = revoke {
+                        d.job = Some(load_keys(ctx, Some(id)));
+                    }
+                    ui.add_space(6.0);
+                    let groups = match &d.keys {
+                        Some(Ok((_, g))) => g.clone(),
+                        _ => Vec::new(),
+                    };
+                    match &mut d.form {
+                        None => {
+                            if ui.button("New key…").clicked() {
+                                d.created = None;
+                                d.form = Some(NewKeyForm {
+                                    name: String::new(),
+                                    reusable: true,
+                                    days: 7,
+                                    visibility: Visibility::Private,
+                                    groups: HashMap::new(),
+                                    error: None,
+                                });
+                            }
+                        }
+                        Some(f) => match new_key_form(ui, f, &groups, d.create_job.is_some()) {
+                            Some(true) => {
+                                let req = NewEnrollKey {
+                                    name: f.name.trim().to_string(),
+                                    reusable: f.reusable,
+                                    expires_in_days: f.days,
+                                    visibility: f.visibility,
+                                    shares: SetShares {
+                                        users: Vec::new(),
+                                        groups: if f.visibility == Visibility::Shared {
+                                            f.groups.iter().map(|(g, r)| (*g, *r)).collect()
+                                        } else {
+                                            Vec::new()
+                                        },
+                                    },
+                                };
+                                f.error = None;
+                                d.create_job = Some(spawn(ctx, move || async move {
+                                    let s = Session::load().ok_or_else(|| "not signed in".to_string())?;
+                                    let api = s.api().map_err(|e| format!("{e:#}"))?;
+                                    api.create_enroll_key(&req).await.map_err(|e| format!("{e:#}"))
+                                }));
+                            }
+                            Some(false) => d.form = None,
+                            None => {}
+                        },
+                    }
+                });
+            });
+        open
+    }
+
     fn grid(&mut self, ui: &mut egui::Ui, list: &[Machine]) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(10.0);
@@ -1193,6 +1446,142 @@ impl Computers {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// The user's keys and all groups, after revoking `revoke`.
+fn load_keys(ctx: &egui::Context, revoke: Option<i64>) -> Receiver<KeysLoad> {
+    spawn(ctx, move || async move {
+        let s = Session::load().ok_or_else(|| "not signed in".to_string())?;
+        let api = s.api().map_err(|e| format!("{e:#}"))?;
+        if let Some(id) = revoke {
+            api.revoke_enroll_key(id).await.map_err(|e| format!("{e:#}"))?;
+        }
+        let (keys, groups) = tokio::join!(api.enroll_keys(), api.all_groups());
+        Ok((keys.map_err(|e| format!("{e:#}"))?, groups.map_err(|e| format!("{e:#}"))?))
+    })
+}
+
+/// Read-only text with a Copy button.
+fn copy_box(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal(|ui| {
+        let mut shown = text;
+        ui.add(egui::TextEdit::multiline(&mut shown).code_editor().desired_rows(2).desired_width(480.0));
+        if ui.button("Copy").clicked() {
+            ui.ctx().copy_text(text.to_string());
+        }
+    });
+}
+
+/// The enrollment keys; returns the one to revoke.
+fn keys_table(ui: &mut egui::Ui, keys: Option<&KeysLoad>) -> Option<i64> {
+    let mut revoke = None;
+    match keys {
+        None => {
+            ui.spinner();
+        }
+        Some(Err(e)) => {
+            ui.colored_label(ERROR, e);
+        }
+        Some(Ok((keys, _))) if keys.is_empty() => {
+            ui.weak("No keys yet.");
+        }
+        Some(Ok((keys, _))) => {
+            egui::Grid::new("enroll-keys").num_columns(5).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                for k in keys {
+                    ui.label(&k.name);
+                    ui.monospace(format!("{}…", k.prefix));
+                    let used = if k.reusable {
+                        format!("{} computer(s)", k.uses)
+                    } else if k.uses > 0 {
+                        "used".into()
+                    } else {
+                        "single use".into()
+                    };
+                    ui.weak(format!("{} · {used}", vis_label(k.visibility)));
+                    let live = !k.revoked && k.expires_at > now();
+                    if k.revoked {
+                        ui.weak("revoked");
+                    } else if !live {
+                        ui.weak("expired");
+                    } else {
+                        ui.weak(format!("{} day(s) left", (k.expires_at - now() + 86_399) / 86_400));
+                    }
+                    if live && ui.button("Revoke").clicked() {
+                        revoke = Some(k.id);
+                    }
+                    ui.end_row();
+                }
+            });
+        }
+    }
+    revoke
+}
+
+/// The new-key form: `Some(true)` create, `Some(false)` cancel.
+fn new_key_form(ui: &mut egui::Ui, f: &mut NewKeyForm, groups: &[GroupRef], busy: bool) -> Option<bool> {
+    let mut out = None;
+    ui.group(|ui| {
+        egui::Grid::new("new-key").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("e.g. Raspberry Pis").desired_width(240.0));
+            ui.end_row();
+            ui.label("Use");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut f.reusable, true, "many computers");
+                ui.radio_value(&mut f.reusable, false, "one computer");
+            });
+            ui.end_row();
+            ui.label("Valid for");
+            ui.add(egui::DragValue::new(&mut f.days).range(1..=365).suffix(" day(s)"));
+            ui.end_row();
+            ui.label("Who can see them");
+            ui.vertical(|ui| {
+                for v in [Visibility::Private, Visibility::Shared, Visibility::Everyone] {
+                    ui.radio_value(&mut f.visibility, v, vis_label(v));
+                }
+            });
+            ui.end_row();
+            if f.visibility == Visibility::Shared {
+                ui.label("Shared with");
+                ui.vertical(|ui| {
+                    if groups.is_empty() {
+                        ui.weak("No groups yet (create one on the Groups page).");
+                    }
+                    for g in groups {
+                        ui.horizontal(|ui| {
+                            let mut on = f.groups.contains_key(&g.id);
+                            if ui.checkbox(&mut on, &g.name).changed() {
+                                if on {
+                                    f.groups.insert(g.id, ShareRole::Control);
+                                } else {
+                                    f.groups.remove(&g.id);
+                                }
+                            }
+                            if let Some(role) = f.groups.get_mut(&g.id) {
+                                role_picker(ui, ("key-role", g.id), role);
+                            }
+                        });
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        if let Some(e) = &f.error {
+            ui.colored_label(ERROR, e);
+        }
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!busy && !f.name.trim().is_empty(), egui::Button::new("Create key")).clicked() {
+                out = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                out = Some(false);
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+    });
+    out
+}
 
 fn os_icon(os: &str) -> &'static str {
     match os.to_ascii_lowercase().as_str() {

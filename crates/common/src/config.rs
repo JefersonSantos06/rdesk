@@ -106,6 +106,30 @@ pub struct HostConfig {
     /// own password or SSH key (an extra lock).
     pub require_local: bool,
     pub transport: TransportTuning,
+    /// Join a server without anyone signing in on this computer.
+    #[serde(skip_serializing_if = "EnrollConfig::is_empty")]
+    pub enroll: EnrollConfig,
+}
+
+/// `[enroll]` in host.toml: how an unregistered host asks a server to add it. The
+/// `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` and `RDESK_NAME` environment variables
+/// take precedence (handy for ready-made images and services).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnrollConfig {
+    pub server: Option<String>,
+    /// E-mail of who should own it: they approve it in the app.
+    pub owner: Option<String>,
+    /// An enrollment key: added at once (removed from here once used).
+    pub key: Option<String>,
+    /// Defaults to the computer's name.
+    pub name: Option<String>,
+}
+
+impl EnrollConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Default for HostConfig {
@@ -118,6 +142,7 @@ impl Default for HostConfig {
             clipboard: true,
             require_local: false,
             transport: TransportTuning::default(),
+            enroll: EnrollConfig::default(),
         }
     }
 }

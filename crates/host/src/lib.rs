@@ -4,6 +4,7 @@ pub mod admin;
 pub mod capture;
 pub mod control;
 pub mod elevation;
+pub mod enroll;
 pub mod input;
 pub mod keymap;
 pub mod power;

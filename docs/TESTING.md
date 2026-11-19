@@ -30,6 +30,15 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Admin do sistema vê todos os computadores na aba *Admin*, mas não conecta nos não compartilhados.
 - [ ] *Unregister*: some da lista; o host passa a aceitar só pela LAN (senha/chave).
 
+## Computador só acessado (sem login nele)
+- [ ] Tela de login → *Only share this computer* com o e-mail do dono: mostra "Waiting for … (code XXXX-XXXX)"; fechar a janela (tray) não cancela.
+- [ ] O dono vê o pedido em *Waiting for your approval* com o mesmo código; *Approve…* → o computador fica *Online* em segundos, sem reiniciar nada.
+- [ ] *Refuse*: o host mostra que foi recusado e para de insistir.
+- [ ] E-mail inexistente: o host fica esperando e ninguém vê pedido nenhum.
+- [ ] Chave de cadastro reutilizável compartilhada com um grupo: duas máquinas entram sozinhas e o grupo as vê; *Revoke* impede a terceira.
+- [ ] Raspberry Pi com a imagem e `deploy/rdesk-host.service`: primeiro boot entra sozinho; duas placas da mesma imagem têm IDs diferentes.
+- [ ] Descadastrar uma máquina que entrou por chave: ao reiniciar ela vira pedido de aprovação, não volta sozinha.
+
 ## Autenticação
 - [ ] Chave do 1Password: aparece a aprovação/Touch ID uma vez; conecta.
 - [ ] Chave não autorizada + sem senha → mensagem clara, sem retry infinito.

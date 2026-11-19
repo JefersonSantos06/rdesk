@@ -26,7 +26,7 @@ pub fn visibility_str(v: Visibility) -> &'static str {
     }
 }
 
-fn parse_visibility(s: &str) -> Visibility {
+pub(crate) fn parse_visibility(s: &str) -> Visibility {
     match s {
         "shared" => Visibility::Shared,
         "everyone" => Visibility::Everyone,
@@ -164,9 +164,25 @@ impl Db {
         Ok(())
     }
 
+    /// Unregister. The host ID is remembered, so an enrollment key cannot silently bring
+    /// it back: it then has to be approved again.
     pub fn remove_machine(&self, id: i64) -> Result<()> {
-        self.with(|c| c.execute("DELETE FROM machines WHERE id = ?1", [id]))?;
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO removed_machines (endpoint_id, removed_at)
+                 SELECT endpoint_id, ?2 FROM machines WHERE id = ?1",
+                params![id, now()],
+            )?;
+            c.execute("DELETE FROM machines WHERE id = ?1", [id])
+        })?;
         Ok(())
+    }
+
+    /// A new token for a machine (the old one stops working).
+    pub fn rotate_machine_token(&self, id: i64) -> Result<String> {
+        let token = random_token();
+        self.with(|c| c.execute("UPDATE machines SET token_hash = ?2 WHERE id = ?1", params![id, hash_token(&token)]))?;
+        Ok(token)
     }
 
     /// What the machine reported about itself.
@@ -525,7 +541,7 @@ impl Db {
     }
 }
 
-fn clean_name(name: &str) -> Result<String> {
+pub(crate) fn clean_name(name: &str) -> Result<String> {
     let n: String = name.trim().chars().filter(|c| !c.is_control()).take(64).collect();
     if n.is_empty() {
         bail!("the name cannot be empty");

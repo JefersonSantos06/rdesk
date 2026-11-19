@@ -70,6 +70,8 @@ pub struct State {
     pub codes: Mutex<HashMap<String, PendingCode>>,
     /// Wakes a machine's long poll when something concerns it.
     pub machine_events: Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>,
+    /// Wakes a host waiting for its approval (keyed by host ID, hex).
+    pub enroll_events: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 pub type Shared = Arc<State>;
@@ -110,6 +112,7 @@ impl State {
             flows: Mutex::new(HashMap::new()),
             codes: Mutex::new(HashMap::new()),
             machine_events: Mutex::new(HashMap::new()),
+            enroll_events: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -146,9 +149,23 @@ impl State {
         }
     }
 
+    pub fn enroll_notify(&self, endpoint_hex: &str) -> Arc<tokio::sync::Notify> {
+        self.enroll_events.lock().unwrap().entry(endpoint_hex.to_string()).or_default().clone()
+    }
+
+    /// The request of this host was decided: answer its waiting request now.
+    pub fn wake_enroll(&self, endpoint_hex: &str) {
+        if let Some(n) = self.enroll_events.lock().unwrap().remove(endpoint_hex) {
+            n.notify_waiters();
+        }
+    }
+
     /// Release every waiting long poll (shutting down).
     pub fn wake_all(&self) {
         for n in self.machine_events.lock().unwrap().values() {
+            n.notify_waiters();
+        }
+        for n in self.enroll_events.lock().unwrap().values() {
             n.notify_waiters();
         }
     }
@@ -157,5 +174,10 @@ impl State {
     pub fn sweep(&self) {
         self.flows.lock().unwrap().retain(|_, f| f.created.elapsed() < FLOW_TTL);
         self.codes.lock().unwrap().retain(|_, c| c.created.elapsed() < CODE_TTL);
+        // Nobody waits on these any more (a waiting request holds its own clone).
+        self.enroll_events.lock().unwrap().retain(|_, n| Arc::strong_count(n) > 1);
+        if let Err(e) = self.db.sweep_requests() {
+            tracing::warn!("cleaning up approval requests: {e:#}");
+        }
     }
 }

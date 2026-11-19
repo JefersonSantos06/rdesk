@@ -146,3 +146,17 @@ fn key_names_unique() {
     names.dedup();
     assert_eq!(names.len(), Key::ALL.len());
 }
+
+#[test]
+fn approval_codes_are_short_and_stable() {
+    assert_eq!(api::approval_code("3f2a91c0deadbeef"), "3F2A-91C0");
+    assert_eq!(api::approval_code("ab"), "AB");
+}
+
+#[test]
+fn enroll_replies_are_tagged() {
+    let p = serde_json::to_value(api::EnrollReply::Pending { code: "3F2A-91C0".into() }).unwrap();
+    assert_eq!(p, serde_json::json!({"status": "pending", "code": "3F2A-91C0"}));
+    let r: api::EnrollReply = serde_json::from_value(serde_json::json!({"status": "rejected"})).unwrap();
+    assert!(matches!(r, api::EnrollReply::Rejected));
+}

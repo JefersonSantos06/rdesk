@@ -10,7 +10,7 @@ use axum::http::{StatusCode, header};
 use base64::Engine as _;
 use rdesk_proto::api::{
     AgentSync, AgentSyncReply, GroupRef, HistoryEntry, Machine, Managers, RegisterMachine, Registered, Revocation,
-    SetManagers, SetShares, Shares, TicketRequest, TicketResponse, UpdateMachine, UserRef, Visibility,
+    SetManagers, SetShares, ShareRole, Shares, TicketRequest, TicketResponse, UpdateMachine, UserRef, Visibility,
     register_message,
 };
 use rdesk_proto::ticket::{SignedTicket, TICKET_MAX_SECS, TicketClaims};
@@ -28,7 +28,7 @@ fn user_ref(u: &User) -> UserRef {
     UserRef { id: u.id, email: u.email.clone(), name: u.name.clone() }
 }
 
-fn parse_endpoint(hex_id: &str) -> Result<[u8; 32], Error> {
+pub(crate) fn parse_endpoint(hex_id: &str) -> Result<[u8; 32], Error> {
     let b = hex::decode(hex_id.trim()).map_err(|_| err(StatusCode::BAD_REQUEST, "endpoint id is not hex"))?;
     b.try_into().map_err(|_| err(StatusCode::BAD_REQUEST, "endpoint id must be 32 bytes"))
 }
@@ -171,13 +171,17 @@ pub async fn get_shares(
 ) -> Result<Json<Shares>, Error> {
     managed(&st, id, &s.user)?;
     let (users, groups) = st.db.shares(id)?;
-    let users =
-        users.into_iter().filter_map(|(u, r)| st.db.user(u).ok().flatten().map(|u| (user_ref(&u), r))).collect();
+    Ok(Json(shares_view(&st, &users, &groups)))
+}
+
+/// Ids and roles as names and roles (users and groups that no longer exist are left out).
+pub(crate) fn shares_view(st: &Shared, users: &[(i64, ShareRole)], groups: &[(i64, ShareRole)]) -> Shares {
+    let users = users.iter().filter_map(|&(u, r)| st.db.user(u).ok().flatten().map(|u| (user_ref(&u), r))).collect();
     let groups = groups
-        .into_iter()
-        .filter_map(|(g, r)| st.db.group(g).ok().flatten().map(|g| (GroupRef { id: g.id, name: g.name }, r)))
+        .iter()
+        .filter_map(|&(g, r)| st.db.group(g).ok().flatten().map(|g| (GroupRef { id: g.id, name: g.name }, r)))
         .collect();
-    Ok(Json(Shares { users, groups }))
+    Shares { users, groups }
 }
 
 /// `PUT /api/machines/{id}/shares`: replace the list.

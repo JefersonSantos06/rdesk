@@ -172,8 +172,9 @@ impl Account {
         self.toast = Some(("Signed out.".into(), false, Instant::now()));
     }
 
-    /// The whole window when nobody is signed in.
-    pub(super) fn login_screen(&mut self, ui: &mut egui::Ui) {
+    /// The whole window when nobody is signed in; `extra` draws below it (with the server
+    /// address typed so far).
+    pub(super) fn login_screen(&mut self, ui: &mut egui::Ui, extra: impl FnOnce(&mut egui::Ui, &str)) {
         let ctx = ui.ctx().clone();
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.18).max(20.0));
@@ -214,6 +215,7 @@ impl Account {
             }
             ui.add_space(18.0);
             ui.weak("Only e-mails allowed by an admin of the server can sign in. The sign-in lasts 10 days.");
+            extra(ui, &self.server);
         });
     }
 

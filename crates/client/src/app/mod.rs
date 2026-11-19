@@ -141,9 +141,9 @@ impl App {
         #[cfg(feature = "host")]
         let host = {
             let mut h = host_page::HostPage::new(exe.clone(), ctx.clone());
-            // A registered computer has its own credential: it stays reachable with nobody signed in.
-            let registered = rdesk_common::account::Registration::load().is_some();
-            if (account.signed_in() || registered) && host_page::remembered_enabled() {
+            // A registered computer has its own credential: it stays reachable with nobody signed in
+            // (and one asking a server to add it keeps asking).
+            if (account.signed_in() || host_page::runs_signed_out()) && host_page::remembered_enabled() {
                 h.start();
             }
             h
@@ -186,7 +186,7 @@ impl App {
             AppCmd::ToggleHost =>
             {
                 #[cfg(feature = "host")]
-                if self.account.signed_in() || rdesk_common::account::Registration::load().is_some() {
+                if self.account.signed_in() || host_page::runs_signed_out() {
                     self.host.toggle();
                 } else {
                     self.show_window(ctx);
@@ -284,12 +284,11 @@ impl eframe::App for App {
             // An unregistered host depends on someone being signed in; a registered one does not.
             #[cfg(feature = "host")]
             {
-                let registered = rdesk_common::account::Registration::load().is_some();
                 if self.account.signed_in() {
                     if host_page::remembered_enabled() && !self.host.running() {
                         self.host.start();
                     }
-                } else if !registered {
+                } else if !host_page::runs_signed_out() {
                     self.host.suspend();
                 }
             }
@@ -323,7 +322,22 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.account.signed_in() {
-            egui::CentralPanel::default().show(ui, |ui| self.account.login_screen(ui));
+            #[cfg(feature = "host")]
+            let host = &mut self.host;
+            egui::CentralPanel::default().show(ui, |ui| {
+                self.account.login_screen(ui, |_ui, _server| {
+                    #[cfg(feature = "host")]
+                    host.join_section(_ui, _server);
+                })
+            });
+            #[cfg(feature = "host")]
+            if let Some((text, true, at)) = &self.host.toast
+                && at.elapsed() < Duration::from_secs(12)
+            {
+                egui::Panel::bottom("signed-out-status").show(ui, |ui| {
+                    ui.colored_label(Color32::from_rgb(230, 70, 70), text);
+                });
+            }
             return;
         }
         egui::Panel::top("nav").show(ui, |ui| {

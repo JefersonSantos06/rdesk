@@ -28,10 +28,12 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
 
 ## O app (tudo pela interface)
 
-Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login o app não faz nada. Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
+Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login o app não faz nada. A exceção é um computador que só vai **ser acessado**: na mesma tela, *Only share this computer (no sign-in)* pede o e-mail de quem vai ser o dono (ou uma chave de cadastro) e o computador espera a aprovação (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)). Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
 
 **🖥 Computers** — os computadores que você pode acessar, vindos do servidor (como no TeamViewer):
 - *My computers* (os que você cadastrou) e *Shared with me* (os que compartilharam com você ou que estão visíveis para todos).
+- *Waiting for your approval*: computadores que pediram para entrar com o seu e-mail (admins também veem os pedidos sem dono). Confira o código que o computador mostra e clique em **Approve…** (nome e quem pode ver) ou **Refuse**.
+- **＋ Add a computer…**: as formas de incluir um computador e as **chaves de cadastro** (criar, ver quantas vezes foram usadas, revogar).
 - Status ao vivo: *Online*, *In use*, *Offline · seen 3 h ago*.
 - **Connect** (ou duplo clique) abre a sessão numa janela própria; **Files** abre já no painel de transferência de arquivos (enviar, navegar nas pastas, baixar).
 - Nos seus (e nos que você co-gerencia): **Share…** (pessoas e grupos, cada um com *full control*, *view only* ou *files only*), *Who can see it* (só eu / compartilhado / todos do servidor), *Rename…*, *History…* (quem acessou, quando, por quanto tempo). Só do dono: *Managers…* (co-gestores) e *Unregister…*.
@@ -79,11 +81,45 @@ rdesk machines managers "PC da sala" --set joao@gmail.com
 rdesk machines history "PC da sala"
 rdesk machines visibility "PC da sala" private|shared|everyone
 rdesk groups create Família && rdesk groups add Família joao@gmail.com [--admin]
+rdesk machines requests                      # computadores esperando a sua aprovação
+rdesk machines approve 3F2A-91C0 --name "Pi da sala" --visibility shared
+rdesk machines refuse 3F2A-91C0
+rdesk machines keys create "Raspberry Pis" --days 30 --group Família:view   # imprime a chave uma vez
+rdesk machines keys list
+rdesk machines keys revoke "Raspberry Pis"
 ```
+
+### Computador só acessado (sem login nele)
+
+Um computador que nunca acessa ninguém (o PC de um parente, um Raspberry Pi) não precisa de conta. Ele pede ao servidor para entrar, provando que tem a própria chave, e só vira computador do servidor quando:
+
+- **o dono aprova** (pelo e-mail): no app, *Only share this computer* na tela de login; ou
+
+  ```sh
+  rdesk host enroll --server rdesk.seu-dominio.com --owner voce@gmail.com [--name "PC da vó"]
+  rdesk host run
+  ```
+
+  O host mostra um código (ex.: `3F2A-91C0`) e fica esperando. O dono vê o pedido em *Computers → Waiting for your approval*, confere o código e aprova; o host entra na hora. Sem `--owner`, quem aprova são os admins do servidor. O servidor responde igual para e-mails que não existem e limita os pedidos pendentes (10 por pessoa, 100 no total); um pedido recusado fica recusado por 30 dias.
+- **ou com uma chave de cadastro**, sem aprovação: crie em *Computers → Add a computer → New key…* (ou `rdesk machines keys create`) e use `rdesk host enroll --server … --key rdk_…`. A chave tem validade (até 365 dias), pode ser de uso único ou reutilizável, e define quem vê os computadores que ela cadastra (inclusive grupos). Revogar a chave não tira os computadores já cadastrados. Um computador descadastrado não volta sozinho com a chave: ele vira um pedido de aprovação para o dono da chave.
+
+As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` fazem o mesmo que `host enroll` e têm prioridade sobre o `host.toml`. A chave é apagada do `host.toml` depois de usada.
+
+**Imagem pronta (Raspberry Pi, Orange Pi…)**:
+
+1. Instale o `rdesk` na imagem (compilado no próprio Pi ou para `aarch64-unknown-linux-gnu`), com sessão gráfica X11 e login automático.
+2. **Não** inclua a pasta de config do rdesk (`~/.config/rdesk/`) na imagem: cada placa cria o próprio host ID no primeiro boot. Placas com a mesma pasta teriam o mesmo ID.
+3. Crie uma chave reutilizável (ex.: 30 dias, compartilhada com o grupo Família) e coloque em `~/.config/rdesk-enroll.env` (permissão 600):
+   ```sh
+   RDESK_SERVER=rdesk.seu-dominio.com
+   RDESK_ENROLL_KEY=rdk_…
+   ```
+4. Instale o serviço de usuário [`deploy/rdesk-host.service`](deploy/rdesk-host.service) (`systemctl --user enable rdesk-host`).
+5. No primeiro boot cada placa aparece em *My computers*. Terminada a leva, revogue a chave.
 
 ### Host (PC de casa)
 
-1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, aba *This computer*).
+1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, aba *This computer*). Sem login nele: `rdesk host enroll` (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)).
 2. Execute: `rdesk host run` (ou ligue o host no app). `rdesk host check` mostra o diagnóstico.
 3. (Opcional) Cadeado extra, ou acesso pela LAN sem servidor: senha (`rdesk host set-password --op "op://Private/rdesk/password"`, guardada como registro OPAQUE) e/ou chaves SSH (`rdesk host add-key --from-agent` ou `rdesk host add-key "ssh-ed25519 AAAA…"`). Para exigir também esse fator depois da permissão do servidor: `require_local = true` no `host.toml` (ou *Options → Extra lock* no app).
 4. Iniciar com o Windows: pelo app (Settings → *Start when I log in, as administrator*) ou com `rdesk autostart login-admin` num terminal de administrador. Manualmente:

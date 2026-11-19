@@ -256,7 +256,7 @@ pub struct Shares {
     pub groups: Vec<(GroupRef, ShareRole)>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetShares {
     /// `(user id, role)`.
     pub users: Vec<(i64, ShareRole)>,
@@ -358,7 +358,7 @@ pub struct SetRole {
 }
 
 /// `POST /api/agent/sync`: the machine reports itself and waits (up to ~25 s) for news.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSync {
     /// Last [`AgentSyncReply::cursor`] seen (0 at start).
     pub cursor: i64,
@@ -392,4 +392,132 @@ pub struct AgentSyncReply {
 pub struct Revocation {
     pub user_id: i64,
     pub before: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Adding a computer without signing in on it: the owner's e-mail (approved in the app)
+// or an enrollment key (no approval).
+// ---------------------------------------------------------------------------
+
+/// No authentication: the host proves it holds its key by signing [`enroll_message`].
+pub const PATH_ENROLL: &str = "/api/enroll";
+/// Computers waiting for approval (the requesting user's, plus ownerless ones for admins).
+pub const PATH_MACHINE_REQUESTS: &str = "/api/machine-requests";
+pub const PATH_ENROLL_KEYS: &str = "/api/enroll-keys";
+
+/// Signed by the host key when it asks to be added.
+pub const ENROLL_DOMAIN: &[u8] = b"rdesk-enroll-v1";
+/// Longest the server holds an enrollment request open waiting for the approval.
+pub const ENROLL_MAX_WAIT_SECS: u32 = 25;
+/// Enrollment keys start with this, so they are recognizable in config files.
+pub const ENROLL_KEY_PREFIX: &str = "rdk_";
+
+/// What the enrollment signature covers.
+pub fn enroll_message(endpoint: &[u8; 32], timestamp: i64) -> Vec<u8> {
+    let mut m = ENROLL_DOMAIN.to_vec();
+    m.extend_from_slice(endpoint);
+    m.extend_from_slice(&timestamp.to_le_bytes());
+    m
+}
+
+/// The code shown on the host and next to the request in the app, to tell computers
+/// apart before approving: the first 8 hex digits of the host ID, `3F2A-91C0`.
+pub fn approval_code(endpoint_hex: &str) -> String {
+    let h: String = endpoint_hex.chars().filter(char::is_ascii_hexdigit).take(8).collect::<String>().to_uppercase();
+    if h.len() < 8 { h } else { format!("{}-{}", &h[..4], &h[4..]) }
+}
+
+/// `POST /api/enroll`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollRequest {
+    pub endpoint_id: String,
+    pub name: String,
+    pub os: String,
+    pub timestamp: i64,
+    /// Hex Ed25519 signature of [`enroll_message`] by the host key.
+    pub signature: String,
+    /// Who should own it (approves it in the app). `None` with no key: the system admins.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// An enrollment key: registered at once, owned by whoever created the key.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// How long the server may wait for the approval before answering "pending"
+    /// (at most [`ENROLL_MAX_WAIT_SECS`]).
+    #[serde(default)]
+    pub wait_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum EnrollReply {
+    Registered(Box<Registered>),
+    /// Waiting for the owner (or an admin) to approve it; ask again.
+    Pending {
+        code: String,
+    },
+    /// The owner refused it.
+    Rejected,
+}
+
+/// `GET /api/machine-requests`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineRequest {
+    pub id: i64,
+    pub endpoint_id: String,
+    /// See [`approval_code`].
+    pub code: String,
+    pub name: String,
+    pub os: String,
+    /// `None`: asked without an owner, for the system admins.
+    pub owner: Option<UserRef>,
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
+/// `POST /api/machine-requests/{id}/approve`: whoever approves owns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproveMachine {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub visibility: Visibility,
+}
+
+/// `GET /api/enroll-keys`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollKey {
+    pub id: i64,
+    pub name: String,
+    /// The first characters, to recognize it (`rdk_AbC1…`).
+    pub prefix: String,
+    /// Can add many computers (otherwise only one).
+    pub reusable: bool,
+    /// What the computers it adds start with.
+    pub visibility: Visibility,
+    pub shares: Shares,
+    pub created_at: i64,
+    pub expires_at: i64,
+    /// Computers added with it.
+    pub uses: i64,
+    pub revoked: bool,
+}
+
+/// `POST /api/enroll-keys`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewEnrollKey {
+    pub name: String,
+    #[serde(default)]
+    pub reusable: bool,
+    /// 1 to 365.
+    pub expires_in_days: u32,
+    pub visibility: Visibility,
+    #[serde(default)]
+    pub shares: SetShares,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatedEnrollKey {
+    /// Shown only now: the server keeps just its hash.
+    pub key: String,
+    pub info: EnrollKey,
 }

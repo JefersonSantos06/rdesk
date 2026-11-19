@@ -46,6 +46,9 @@ pub struct HostStatus {
     pub relay: Option<Result<String, String>>,
     /// Registered with a server: `Ok("name on server")`, `Err` when the server refused it.
     pub registration: Option<Result<String, String>>,
+    /// Asking a server to add it (not registered yet): what is happening, e.g. waiting for
+    /// the owner's approval.
+    pub enrollment: Option<String>,
     pub session: Option<SessionInfo>,
     /// Newest last; at most [`MAX_EVENTS`].
     pub events: VecDeque<HostEvent>,
@@ -93,6 +96,10 @@ impl Reporter {
 
     pub fn registration(&self, r: Option<Result<String, String>>) {
         self.update(|st| st.registration = r);
+    }
+
+    pub fn enrollment(&self, e: Option<String>) {
+        self.update(|st| st.enrollment = e);
     }
 
     pub fn session(&self, s: Option<SessionInfo>) {
@@ -152,6 +159,7 @@ impl HostHandle {
             }
             r.session(None);
             r.relay(None);
+            r.enrollment(None);
         });
         Self { reporter, ctl, task }
     }

@@ -78,7 +78,20 @@ pub async fn register(session: &Session, name: &str, visibility: rdesk_proto::ap
         endpoint_id: config::format_host_id(&id.fingerprint()),
     };
     reg.save()?;
+    forget_enrollment();
     Ok(reg)
+}
+
+/// Registered (or unregistered) by hand: stop asking a server to add this computer.
+fn forget_enrollment() {
+    if let Ok(mut cfg) = load_config()
+        && !cfg.enroll.is_empty()
+    {
+        cfg.enroll = Default::default();
+        if let Err(e) = save_config(&cfg) {
+            tracing::warn!("host.toml: {e:#}");
+        }
+    }
 }
 
 /// Remove this computer from the server (only who registered it can) and forget it here.
@@ -93,6 +106,7 @@ pub async fn unregister(session: &Session) -> Result<()> {
         Err(e) if format!("{e:#}").contains("no such computer") => {}
         Err(e) => return Err(e),
     }
+    forget_enrollment();
     Registration::clear()
 }
 

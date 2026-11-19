@@ -9,6 +9,7 @@ pub mod access;
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod enroll;
 pub mod groups;
 pub mod login;
 pub mod machines;
@@ -61,6 +62,12 @@ pub fn router(st: Shared) -> Router {
         .route(&format!("{}/{{id}}/history", paths::PATH_MACHINES), get(machines::history))
         .route(paths::PATH_ADMIN_MACHINES, get(machines::admin_list))
         .route(paths::PATH_AGENT_SYNC, post(machines::agent_sync))
+        .route(paths::PATH_ENROLL, post(enroll::enroll))
+        .route(paths::PATH_MACHINE_REQUESTS, get(enroll::list_requests))
+        .route(&format!("{}/{{id}}/approve", paths::PATH_MACHINE_REQUESTS), post(enroll::approve))
+        .route(&format!("{}/{{id}}/reject", paths::PATH_MACHINE_REQUESTS), post(enroll::reject))
+        .route(paths::PATH_ENROLL_KEYS, get(enroll::list_keys).post(enroll::create_key))
+        .route(&format!("{}/{{id}}", paths::PATH_ENROLL_KEYS), axum::routing::delete(enroll::revoke_key))
         .route(paths::PATH_USERS, get(machines::users))
         .route(paths::PATH_GROUPS, get(groups::list).post(groups::create))
         .route(&format!("{}/all", paths::PATH_GROUPS), get(groups::all))

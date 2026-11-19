@@ -17,7 +17,9 @@ use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfi
 use rdesk_common::transport;
 #[cfg(feature = "host")]
 use rdesk_common::transport::HostIdentity;
-use rdesk_proto::api::{GroupRole, Machine, ShareRole, UpdateMachine, Visibility};
+use rdesk_proto::api::{
+    GroupRole, Machine, MachineRequest, NewEnrollKey, SetShares, ShareRole, UpdateMachine, Visibility,
+};
 #[cfg(feature = "host")]
 use ssh_key::PublicKey;
 #[cfg(feature = "host")]
@@ -163,6 +165,27 @@ enum HostCmd {
     ClearPassword,
     /// Diagnose permissions, monitors and network.
     Check,
+    /// Join a server without signing in here: the next `host run` asks the server to add
+    /// this computer (its owner approves it in the app, or a key adds it at once).
+    /// The RDESK_SERVER, RDESK_OWNER, RDESK_ENROLL_KEY and RDESK_NAME variables do the same.
+    Enroll {
+        /// The rdesk server, e.g. rdesk.example.com.
+        #[arg(long, required_unless_present = "clear")]
+        server: Option<String>,
+        /// E-mail of who will own it (they approve it). Without it (and without a key), the
+        /// server's admins approve it.
+        #[arg(long, conflicts_with = "key")]
+        owner: Option<String>,
+        /// An enrollment key (Computers → Add a computer): added at once, no approval.
+        #[arg(long)]
+        key: Option<String>,
+        /// Name on the server (default: this computer's name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Stop asking (forget these settings).
+        #[arg(long, conflicts_with_all = ["server", "owner", "key", "name"])]
+        clear: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -231,6 +254,47 @@ enum MachinesCmd {
     },
     /// The last sessions on a computer (its managers and system admins).
     History { machine: String },
+    /// Computers waiting for your approval (asked with your e-mail; admins: also without one).
+    Requests,
+    /// Approve a waiting computer (by its code, as it shows it): it becomes yours.
+    Approve {
+        /// The code (e.g. 3F2A-91C0) or the request number.
+        request: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: VisArg,
+    },
+    /// Refuse a waiting computer.
+    Refuse { request: String },
+    /// Enrollment keys: add computers (e.g. ready-made images) without approval.
+    #[command(subcommand)]
+    Keys(KeysCmd),
+}
+
+#[derive(Subcommand)]
+enum KeysCmd {
+    List,
+    /// Create a key (printed once; keep it secret).
+    Create {
+        name: String,
+        /// Valid for this many days (1 to 365).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Usable for a single computer.
+        #[arg(long)]
+        once: bool,
+        /// Who can see the computers it adds.
+        #[arg(long, value_enum, default_value = "private")]
+        visibility: VisArg,
+        /// Share them with these groups: `group[:control|view|files]` (sets "shared").
+        #[arg(long = "group")]
+        groups: Vec<String>,
+    },
+    /// Revoke a key (computers it added stay).
+    Revoke {
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -583,6 +647,20 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             Ok(())
         }
         HostCmd::Check => runtime()?.block_on(host_check()),
+        HostCmd::Enroll { server, owner, key, name, clear } => {
+            if clear {
+                rdesk_host::enroll::save(Default::default())?;
+                println!("This computer will no longer ask a server to add it.");
+                return Ok(());
+            }
+            rdesk_host::enroll::save(config::EnrollConfig { server, owner, key, name })?;
+            if rdesk_common::account::Registration::load().is_some() {
+                println!("Saved, but this computer is already registered: unregister it first to join another way.");
+            } else {
+                println!("Saved. Start the host (`rdesk host run`, or the app): it asks the server to add it.");
+            }
+            Ok(())
+        }
     }
 }
 #[cfg(feature = "host")]
@@ -648,10 +726,97 @@ fn vis_label(v: Visibility) -> &'static str {
     }
 }
 
+/// A waiting computer by its code (`3F2A-91C0`, any case, dash optional) or number.
+fn find_request<'a>(list: &'a [MachineRequest], what: &str) -> Result<&'a MachineRequest> {
+    let norm = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_uppercase();
+    let w = norm(what);
+    list.iter()
+        .find(|r| norm(&r.code) == w || r.id.to_string() == what.trim())
+        .ok_or_else(|| anyhow!("no computer waiting with code {what:?} (see `rdesk machines requests`)"))
+}
+
 async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
     let s = session()?;
     let api = s.api()?;
     match cmd {
+        MachinesCmd::Requests => {
+            let list = api.machine_requests().await?;
+            if list.is_empty() {
+                println!("No computers waiting for your approval.");
+            }
+            for r in list {
+                let owner = r.owner.map(|o| o.email).unwrap_or_else(|| "(admins)".into());
+                println!("{}\t{}\t{}\t{owner}", r.code, r.name, r.os);
+            }
+        }
+        MachinesCmd::Approve { request, name, visibility } => {
+            let list = api.machine_requests().await?;
+            let r = find_request(&list, &request)?;
+            let m = api.approve_machine(r.id, name, visibility.into()).await?;
+            println!("{} is yours now ({}); it comes online in a few seconds.", m.name, vis_label(m.visibility));
+        }
+        MachinesCmd::Refuse { request } => {
+            let list = api.machine_requests().await?;
+            let r = find_request(&list, &request)?;
+            api.reject_machine(r.id).await?;
+            println!("Refused {}.", r.name);
+        }
+        MachinesCmd::Keys(KeysCmd::List) => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+            for k in api.enroll_keys().await? {
+                let state = if k.revoked {
+                    "revoked".to_string()
+                } else if k.expires_at <= now {
+                    "expired".into()
+                } else if !k.reusable && k.uses > 0 {
+                    "used".into()
+                } else {
+                    format!("{} day(s) left", (k.expires_at - now + 86_399) / 86_400)
+                };
+                let uses = if k.reusable { "reusable" } else { "single use" };
+                println!(
+                    "{}\t{}…\t{}\t{uses}, {} computer(s)\t{state}",
+                    k.name,
+                    k.prefix,
+                    vis_label(k.visibility),
+                    k.uses
+                );
+            }
+        }
+        MachinesCmd::Keys(KeysCmd::Create { name, days, once, visibility, groups }) => {
+            let all_groups = api.all_groups().await?;
+            let mut gids = Vec::new();
+            for spec in &groups {
+                let (g, role) = split_role(spec)?;
+                let found = all_groups.iter().find(|x| x.name.eq_ignore_ascii_case(&g));
+                gids.push((found.ok_or_else(|| anyhow!("no group {g}"))?.id, role));
+            }
+            let visibility = if gids.is_empty() { visibility.into() } else { Visibility::Shared };
+            let req = NewEnrollKey {
+                name,
+                reusable: !once,
+                expires_in_days: days,
+                visibility,
+                shares: SetShares { users: Vec::new(), groups: gids },
+            };
+            let c = api.create_enroll_key(&req).await?;
+            println!("{}", c.key);
+            eprintln!(
+                "Shown only now. On the computers to add (or in their service's environment):\n  \
+                 RDESK_SERVER={} RDESK_ENROLL_KEY={}\nor: rdesk host enroll --server {} --key {}",
+                s.server, c.key, s.server, c.key
+            );
+        }
+        MachinesCmd::Keys(KeysCmd::Revoke { key }) => {
+            let keys = api.enroll_keys().await?;
+            let w = key.trim();
+            let k = keys
+                .iter()
+                .find(|k| k.name.eq_ignore_ascii_case(w) || k.id.to_string() == w || w.starts_with(&k.prefix))
+                .ok_or_else(|| anyhow!("no key {key:?} (see `rdesk machines keys list`)"))?;
+            api.revoke_enroll_key(k.id).await?;
+            println!("Revoked {}.", k.name);
+        }
         MachinesCmd::List => {
             let list = api.machines().await?;
             if list.is_empty() {

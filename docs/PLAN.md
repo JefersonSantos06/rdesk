@@ -101,8 +101,18 @@ Planejado:
 - O host não responde mais ao `Probe` (nada antes do login).
 - Primeira conexão: medida em ~25 ms do bind ao login pelo relay local; o app agora cria o endpoint e pede o tíquete em paralelo.
 
+### Fase 5: computadores sem login (feita, branch `iroh-transport`)
+- O host pede para entrar (`POST /api/enroll`, assinado com a chave do host), sem conta:
+  - com o **e-mail do dono**: vira um pedido que o dono aprova no app, conferindo um código (os 8 primeiros dígitos do host ID). Sem e-mail, os admins aprovam. O servidor responde igual para e-mails inexistentes e limita os pedidos (10 por pessoa, 100 no total);
+  - com uma **chave de cadastro** (`rdk_…`, criada no app, com validade, uso único ou reutilizável, visibilidade e grupos): entra na hora.
+- O host espera a aprovação num long poll e entra sem reiniciar; recebe o token de máquina só depois de aprovado.
+- Um computador descadastrado não volta sozinho com uma chave: vira pedido de aprovação.
+- Configuração por `rdesk host enroll`, `[enroll]` no `host.toml` ou variáveis de ambiente (`RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY`, `RDESK_NAME`); o host cria o próprio ID no primeiro boot.
+- App: *Only share this computer* na tela de login; *Waiting for your approval* e *Add a computer…* (chaves) na aba Computers. CLI: `rdesk machines requests|approve|refuse|keys`.
+
 ## Ainda não verificado
 - Imagem Docker (o `Dockerfile` não foi construído aqui) e a unit do systemd numa VPS de verdade.
 - Login real com Google e GitHub (precisa das credenciais OAuth no seu domínio).
 - Passkey num navegador de verdade (precisa do servidor num domínio com HTTPS).
 - Certificado Let's Encrypt na VPS.
+- Imagem de Raspberry/Orange Pi com `deploy/rdesk-host.service` (compilação para ARM, sessão X11 com login automático).

@@ -70,7 +70,10 @@ Ou pelo app, na aba **Admin** (só para admins do sistema), ou pela CLI do app: 
 
 ## Computadores e acesso
 
-- Cada computador é cadastrado por um usuário (no app, aba *This computer*, ou `rdesk machines register`), com prova de posse da chave do host. Ele ganha uma credencial própria: usa o relay e sincroniza com o servidor mesmo sem ninguém logado.
+- Cada computador é cadastrado por um usuário, com prova de posse da chave do host. Ele ganha uma credencial própria: usa o relay e sincroniza com o servidor mesmo sem ninguém logado. Três formas:
+  - logado nele: aba *This computer* ou `rdesk machines register`;
+  - sem login nele, pelo **e-mail do dono**: o host pede para entrar (`rdesk host enroll --owner …` ou *Only share this computer* na tela de login) e o dono aprova no app, conferindo um código. Sem e-mail, os admins aprovam. Pedidos pendentes não entram no relay;
+  - sem login nele, com uma **chave de cadastro** criada no app: entra na hora, já com a visibilidade e os grupos da chave. Ideal para imagens prontas (Raspberry Pi). Veja o [README](../README.md#computador-só-acessado-sem-login-nele).
 - Quem pode ver: **só eu**, **compartilhado** (com pessoas e/ou grupos) ou **todos do servidor**.
 - Cada compartilhamento tem um **papel**: *full control* (tela, teclado e mouse, clipboard, arquivos), *view only* (só a tela) ou *files only* (só arquivos). Quem tem vários compartilhamentos soma as permissões.
 - **Co-gestores** (*Managers…*, só o dono escolhe): têm acesso total e podem compartilhar, renomear, mudar quem vê e ver o histórico. Descadastrar é só do dono.

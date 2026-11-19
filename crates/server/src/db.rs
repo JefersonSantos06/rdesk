@@ -120,6 +120,37 @@ const SCHEMA: &[&str] = &[
         UNIQUE (machine_id, session)
     );
     "#,
+    // v4: adding computers without signing in on them (approval requests, enrollment keys).
+    r#"
+    CREATE TABLE machine_requests (
+        id INTEGER PRIMARY KEY,
+        endpoint_id TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        os TEXT NOT NULL DEFAULT '',
+        owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        rejected INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL
+    );
+    CREATE TABLE enroll_keys (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        key_hash BLOB NOT NULL UNIQUE,
+        prefix TEXT NOT NULL,
+        reusable INTEGER NOT NULL,
+        visibility TEXT NOT NULL,
+        shares TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        uses INTEGER NOT NULL DEFAULT 0,
+        revoked INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE removed_machines (
+        endpoint_id TEXT PRIMARY KEY,
+        removed_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn now() -> i64 {

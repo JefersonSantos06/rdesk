@@ -150,6 +150,8 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     if cfg!(windows) && !opts.fake_input && !crate::elevation::is_elevated() {
         tracing::warn!("{}", crate::elevation::NOT_ELEVATED_HINT);
     }
+    // A fresh install (or a ready-made image's first boot) gets its own identity here.
+    crate::admin::ensure_initialized()?;
     let mut cfg: HostConfig = config::load_toml(config::HOST_CONFIG)?;
     if let Some(p) = opts.port {
         cfg.port = p;
@@ -158,7 +160,19 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     let host_fp = identity.fingerprint();
     reporter.fingerprint(host_fp);
     // Registered: the server's relay with this computer's own token, and tickets required.
-    let registration = registration_for(&host_fp);
+    let mut registration = registration_for(&host_fp);
+    // Not registered but told which server to join: ask it, and wait for the approval.
+    if registration.is_none()
+        && let Some(e) = crate::enroll::settings(&cfg.enroll)
+    {
+        match crate::enroll::until_registered(&identity, &e, &reporter, &mut ctl).await? {
+            Some(r) => registration = Some(r),
+            None => {
+                reporter.event("Host stopped", false);
+                return Ok(());
+            }
+        }
+    }
     let net = if registration.is_some() { config::host_network() } else { config::NetworkConfig::default() };
     let ticket = match &registration {
         Some(r) => Some(TicketPolicy {
@@ -173,7 +187,9 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     let auth_cfg = load_auth_config(host_fp, ticket.clone(), cfg.require_local)?;
     let local = !auth_cfg.authorized_keys.is_empty() || auth_cfg.opaque.is_some();
     if ticket.is_none() && !local {
-        bail!("no way to log in yet: register this computer with your rdesk server, or set a password");
+        bail!(
+            "no way to log in yet: add this computer to your rdesk server (`rdesk host enroll`, or register it              in the app), or set a password"
+        );
     }
     if ticket.is_some() && cfg.require_local && !local {
         bail!("the extra lock is on but this computer has no password or SSH key: set one, or turn it off");

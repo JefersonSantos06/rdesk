@@ -1,0 +1,23 @@
+# ~/.config/systemd/user/rdesk-host.service: the rdesk host of a computer that is only
+# accessed (e.g. a Raspberry Pi image). See "Computador só acessado" in the README.
+#
+#   ~/.config/rdesk-enroll.env (chmod 600):
+#     RDESK_SERVER=rdesk.example.com
+#     RDESK_ENROLL_KEY=rdk_...        # or RDESK_OWNER=you@gmail.com (you approve it in the app)
+#   systemctl --user daemon-reload && systemctl --user enable --now rdesk-host
+#
+# Capturing the screen needs the desktop session (X11, with automatic login).
+# Do not put ~/.config/rdesk/ in the image: each board creates its own host ID on first boot.
+[Unit]
+Description=rdesk host
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/rdesk host run
+EnvironmentFile=%h/.config/rdesk-enroll.env
+Environment=DISPLAY=:0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
