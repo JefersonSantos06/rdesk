@@ -114,7 +114,7 @@ async fn sharing_controls_access_and_unsharing_kicks() {
     let (mut w, mut r) = c.conn.open_bi().await.unwrap();
     let mut creds = ClientAuth { ticket: Some(ticket.clone()), ..no_ticket };
     let ok = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await.unwrap();
-    assert_eq!(ok.access, Access::FULL);
+    assert_eq!(rdesk_proto::Access::from(ok.access), Access::FULL);
     wait_for("the host to report the session", || async {
         bia_api.machines().await.unwrap().first().is_some_and(|m| m.in_session)
     })
@@ -171,7 +171,7 @@ async fn sharing_controls_access_and_unsharing_kicks() {
         c.conn.close(close::NORMAL, b"");
         ok
     };
-    assert_eq!(login(&bia_api).await.unwrap().access, Access::VIEW);
+    assert_eq!(rdesk_proto::Access::from(login(&bia_api).await.unwrap().access), Access::VIEW);
 
     // A co-manager may share it too (but not choose managers).
     ana_api.set_managers(reg.machine_id, vec![bia.id]).await.unwrap();
@@ -208,7 +208,7 @@ async fn sharing_controls_access_and_unsharing_kicks() {
             }
         }
     }
-    assert_eq!(ok.expect("a ticket from the new key never worked").access, Access::FULL);
+    assert_eq!(rdesk_proto::Access::from(ok.expect("a ticket from the new key never worked").access), Access::FULL);
     let saved = rdesk_common::account::Registration::load().unwrap();
     assert_eq!(saved.server_key, hex::encode(new_key.public().as_bytes()), "the new key is remembered");
 

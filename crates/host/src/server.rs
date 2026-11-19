@@ -172,7 +172,10 @@ fn start_notice(reporter: &Reporter, ctl: mpsc::UnboundedSender<Ctl>) {
     tokio::spawn(async move {
         let mut shown: Option<String> = None;
         loop {
-            let text = reporter.snapshot().session.map(|s| format!("{} is connected to this computer", s.client));
+            let text = reporter.snapshot().session.map(|s| {
+                let terminal = if s.terminals > 0 { " · terminal" } else { "" };
+                format!("{} connected{terminal}", s.client)
+            });
             if text != shown {
                 crate::win::notice::show(text.clone());
                 shown = text;
@@ -312,6 +315,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         injector: Injector::spawn(opts.fake_input),
         cfg: cfg.clone(),
         files_as_user: files_as_user(),
+        reporter: reporter.clone(),
     });
     match shared.capturer.monitors().await {
         Ok(m) => {
@@ -509,7 +513,8 @@ impl Server {
         drop(_permit);
         transport::raise_stream_limits(&conn);
 
-        if monitors.is_empty() {
+        // Without a screen, only sessions that need none (terminal, files) are possible.
+        if monitors.is_empty() && authed.access.screen {
             conn.close(close::PROTOCOL, b"host has no capturable monitor");
             bail!("no monitors to share (macOS: grant Screen Recording; Linux: needs X11)");
         }
@@ -550,7 +555,7 @@ impl Server {
             Some(u) => format!("{} ({})", u.label(), authed.client_name),
             None => authed.client_name.clone(),
         };
-        let info = SessionInfo { client, peer, method, since: SystemTime::now() };
+        let info = SessionInfo { client, peer, method, since: SystemTime::now(), terminals: 0 };
         if !matches!(authed.kind, AuthKind::Resume) {
             self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
         }

@@ -197,9 +197,10 @@ rdesk connect <host ID>@192.168.0.20     # computador não cadastrado, na LAN
 Ordem de autenticação: token de retomada → **tíquete do servidor** (pedido automaticamente) → se o computador tiver o cadeado extra: chave SSH (agente do 1Password; aprovação/Touch ID) → senha (`op read` ou prompt).
 
 Na janela:
-- **▼ rdesk** (topo) abre o menu: monitores, fps/qualidade, tela cheia, Cmd ⇄ Ctrl, Ctrl+Alt+Del, arquivos.
+- **▼ rdesk** (topo) abre o menu: monitores, fps/qualidade, tela cheia, teclas do Mac, Ctrl+Alt+Del, arquivos.
 - Arraste arquivos para a janela para enviá-los ao host (vão para `Downloads/rdesk`).
-- No Mac, Cmd vira Ctrl no host por padrão (`--no-swap-cmd-ctrl` desliga).
+- No Mac, por padrão, Cmd vira Ctrl, o Option esquerdo vira a tecla Windows e o Control vira Alt; o Option direito continua AltGr (`--no-swap-cmd-ctrl` desliga).
+- Minimizada, a janela pausa o vídeo; ao voltar, recebe a tela inteira de novo.
 
 Linha de comando:
 

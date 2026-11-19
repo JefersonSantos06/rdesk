@@ -216,7 +216,17 @@ Planejado:
 - Servidor: `install-server.sh` nos Releases. Pergunta só o domínio e o e-mail do admin; cria o usuário, a unit e as regras de firewall, roda o `init` e mostra as URLs para o Google e o GitHub.
 - Página `/download` no servidor, com os instaladores da versão liberada já apontando para ele.
 
-### Fase 10: terminal remoto
+### Fase 10: terminal remoto (feita, branch `main`)
+Como ficou:
+- Um stream novo (`StreamOpen::Terminal`) na conexão da sessão: `TermClient` (tamanho, teclas) e `TermHost` (saída, fim). Sem mudar o protocolo: o `AuthOk` continua com o formato antigo (`WireAccess`), e a permissão `terminal` vale no host, pelo tíquete; *full control* (inclusive o `screen,input,files` de servidores antigos) inclui o terminal.
+- Novo papel **terminal only**; host sem tela aceita sessões só de terminal e arquivos.
+- Host: `portable-pty` (ConPTY no Windows, pty no Linux/Mac); PowerShell no Windows, o shell do usuário no resto. No serviço do Windows, o shell roda num auxiliar iniciado como o usuário logado (`rdesk host file-helper terminal`).
+- App: *Terminal* na janela da sessão (▼ rdesk), nos cartões e no menu dos computadores (e na lista *On this network*); a janela desenha a tela com `vt100` e responde às perguntas do terminal (o ConPTY pergunta a posição do cursor antes de tudo).
+- CLI: `rdesk shell <computador>`, no terminal local em modo cru.
+- Atividade "… opened a terminal" e "(terminal open)" na barra de aviso.
+- Fora desta fase: terminal como administrador no Windows.
+
+Planejado:
 - App: botão **Terminal** na aba *Computers* e no menu da sessão. Abre uma janela de terminal dentro do app (emulador embutido; a avaliar: `egui_term`, baseado no `alacritty_terminal`). Várias abas por conexão.
 - CLI: `rdesk shell "PC"` usa o próprio terminal local.
 - Host: um pseudo-terminal (ConPTY no Windows, pty no Linux; a avaliar: `portable-pty`) num stream próprio da conexão iroh, com dados e redimensionamento.

@@ -154,6 +154,13 @@ enum Command {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// A shell on a computer, in this terminal (as whoever is signed in there).
+    #[cfg(feature = "client")]
+    Shell {
+        target: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[cfg(feature = "host")]
@@ -166,6 +173,8 @@ enum FileHelperCmd {
     },
     /// A folder listing, as JSON on standard output.
     List { path: String },
+    /// A terminal on standard input and output.
+    Terminal,
 }
 
 #[cfg(all(windows, feature = "host"))]
@@ -503,6 +512,31 @@ struct ConnectArgs {
     /// Open with the file-transfer panel showing.
     #[arg(long)]
     files: bool,
+    /// Open a terminal on it right away.
+    #[arg(long)]
+    terminal: bool,
+}
+
+/// The raw standard input and output: std's stdout is line-buffered, so binary replies
+/// (with no newline) would sit in its buffer while the other side waits for them.
+#[cfg(feature = "host")]
+fn raw_stdio() -> Result<(std::fs::File, std::fs::File)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        Ok((
+            std::fs::File::from(std::io::stdin().as_handle().try_clone_to_owned()?),
+            std::fs::File::from(std::io::stdout().as_handle().try_clone_to_owned()?),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        Ok((
+            std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?),
+            std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?),
+        ))
+    }
 }
 
 /// The file helper of the service's host: one file stream, or one folder listing.
@@ -512,27 +546,20 @@ fn file_helper(cmd: FileHelperCmd) -> Result<()> {
     match cmd {
         FileHelperCmd::Serve { inbox } => {
             let inbox = inbox.unwrap_or_else(|| rdesk_common::config::HostConfig::default().inbox_dir());
-            // The raw pipe handles: std's stdout is line-buffered, so binary replies (with no
-            // newline) would sit in its buffer while the other side waits for them.
-            #[cfg(windows)]
-            let (stdin, stdout) = {
-                use std::os::windows::io::AsHandle;
-                (
-                    std::fs::File::from(std::io::stdin().as_handle().try_clone_to_owned()?),
-                    std::fs::File::from(std::io::stdout().as_handle().try_clone_to_owned()?),
-                )
-            };
-            #[cfg(unix)]
-            let (stdin, stdout) = {
-                use std::os::fd::AsFd;
-                (
-                    std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?),
-                    std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?),
-                )
-            };
+            let (stdin, stdout) = raw_stdio()?;
             rt.block_on(async {
                 let (mut r, mut w) = (tokio::fs::File::from_std(stdin), tokio::fs::File::from_std(stdout));
                 rdesk_common::files::serve(&mut r, &mut w, &inbox).await?;
+                tokio::io::AsyncWriteExt::flush(&mut w).await?;
+                Ok(())
+            })
+        }
+        FileHelperCmd::Terminal => {
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let (stdin, stdout) = raw_stdio()?;
+            rt.block_on(async {
+                let (mut r, mut w) = (tokio::fs::File::from_std(stdin), tokio::fs::File::from_std(stdout));
+                rdesk_host::terminal::serve(&mut r, &mut w).await?;
                 tokio::io::AsyncWriteExt::flush(&mut w).await?;
                 Ok(())
             })
@@ -785,6 +812,8 @@ fn main() -> Result<()> {
         Command::Get { target, remote, out, auth } => runtime()?.block_on(cli_get(target, remote, out, auth)),
         #[cfg(feature = "client")]
         Command::Ls { target, path, auth } => runtime()?.block_on(cli_ls(target, path, auth)),
+        #[cfg(feature = "client")]
+        Command::Shell { target, auth } => runtime()?.block_on(cli_shell(target, auth)),
     }
 }
 
@@ -1587,7 +1616,127 @@ fn connect(a: ConnectArgs) -> Result<()> {
         swap_cmd_ctrl: swap,
         download_dir,
         open_files: a.files,
+        open_terminal: a.terminal,
     })
+}
+
+/// This terminal in raw mode (keys go through as they are), restored when dropped.
+#[cfg(feature = "client")]
+struct RawTerminal {
+    #[cfg(windows)]
+    modes: (u32, u32),
+}
+
+#[cfg(feature = "client")]
+impl RawTerminal {
+    fn enable() -> Result<Self> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Console::{
+                ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+                SetConsoleMode,
+            };
+            unsafe {
+                let (i, o) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+                let (mut mi, mut mo) = (0u32, 0u32);
+                if GetConsoleMode(i, &mut mi) == 0 || GetConsoleMode(o, &mut mo) == 0 {
+                    bail!("rdesk shell needs a console");
+                }
+                SetConsoleMode(
+                    i,
+                    (mi & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
+                        | ENABLE_VIRTUAL_TERMINAL_INPUT,
+                );
+                SetConsoleMode(o, mo | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                Ok(Self { modes: (mi, mo) })
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            crossterm::terminal::enable_raw_mode()?;
+            Ok(Self {})
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+            };
+            SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.modes.0);
+            SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), self.modes.1);
+        }
+        #[cfg(not(windows))]
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// `rdesk shell`: the computer's shell in this terminal.
+#[cfg(feature = "client")]
+async fn cli_shell(target: String, a: AuthArgs) -> Result<()> {
+    use rdesk_proto::{TermClient, TermHost};
+    use std::io::Read as _;
+    let t = resolve_target(&target, &a).await?;
+    let s = cli_session(&t).await?;
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 30));
+    let mut link = rdesk_client::terminal::open(s.conn.clone(), cols, rows, || {}).await?;
+    let raw = RawTerminal::enable()?;
+    let keys = link.tx.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut stdin = std::io::stdin();
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || keys.send(TermClient::Input(buf[..n].to_vec())).is_err() {
+                break;
+            }
+        }
+    });
+    let sizes = link.tx.clone();
+    tokio::spawn(async move {
+        let mut last = (cols, rows);
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if let Ok(now) = crossterm::terminal::size()
+                && now != last
+            {
+                last = now;
+                if sizes.send(TermClient::Resize { cols: now.0, rows: now.1 }).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let mut out = std::io::stdout();
+    let mut ended = Ok(0u32);
+    while let Some(m) = link.rx.recv().await {
+        match m {
+            TermHost::Output(b) => {
+                out.write_all(&b)?;
+                out.flush()?;
+            }
+            TermHost::Started { .. } => {}
+            TermHost::Exited(code) => {
+                ended = Ok(code);
+                break;
+            }
+            TermHost::Error(e) => {
+                ended = Err(e);
+                break;
+            }
+        }
+    }
+    drop(raw);
+    s.close().await;
+    match ended {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code as i32),
+        Err(e) => bail!(e),
+    }
 }
 
 /// A logged-in connection for one-shot CLI commands (no video/UI machinery).

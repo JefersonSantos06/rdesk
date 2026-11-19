@@ -129,8 +129,11 @@ impl SettingsPage {
             ui.add_space(14.0);
             ui.label(RichText::new("Remote sessions").strong().size(16.0));
             changed |= ui
-                .checkbox(&mut self.cfg.swap_cmd_ctrl, "Send Cmd as Ctrl (for a Mac controlling Windows/Linux)")
-                .on_hover_text("On macOS this is on by default for each session window.")
+                .checkbox(&mut self.cfg.swap_cmd_ctrl, "Mac keys (for a Mac controlling Windows/Linux)")
+                .on_hover_text(
+                    "Cmd → Ctrl, left Option → Windows key, Control → Alt; the right Option stays AltGr. \
+                     On macOS this is on by default for each session window.",
+                )
                 .changed();
             if changed {
                 self.save();

@@ -45,7 +45,25 @@ where
     if let Some(dir) = &inbox {
         args.extend(["--inbox", dir]);
     }
-    let mut sp = helper(&args, true)?;
+    relay_as_user(&args, r, w).await
+}
+
+/// A terminal ([`crate::terminal::serve`]) in a helper started as the signed-in user.
+pub async fn terminal_as_user<R, W>(r: &mut R, w: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    relay_as_user(&["terminal"], r, w).await
+}
+
+/// Start `rdesk host file-helper <args>` as the signed-in user and relay one stream to it.
+async fn relay_as_user<R, W>(args: &[&str], r: &mut R, w: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut sp = helper(args, true)?;
     let mut to_helper = tokio::fs::File::from_std(sp.stdin.take().expect("piped stdin"));
     let mut from_helper = tokio::fs::File::from_std(sp.stdout.take().expect("piped stdout"));
     let send = async {

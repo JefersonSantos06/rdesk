@@ -58,21 +58,57 @@ pub struct Access {
     pub input: bool,
     /// Send, browse and download files.
     pub files: bool,
+    /// Open a terminal (a shell as the signed-in user). Not in [`AuthOk`] on the wire (that
+    /// keeps the older layout, see [`WireAccess`]): the host knows it from the ticket.
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+/// [`Access`] as [`AuthOk`] carries it: the first protocol version's three fields, so
+/// older and newer apps and hosts keep understanding each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAccess {
+    pub screen: bool,
+    pub input: bool,
+    pub files: bool,
+}
+
+impl From<Access> for WireAccess {
+    fn from(a: Access) -> Self {
+        WireAccess { screen: a.screen, input: a.input, files: a.files }
+    }
+}
+
+impl From<WireAccess> for Access {
+    /// Full control includes the terminal; the wire does not say more.
+    fn from(w: WireAccess) -> Self {
+        let full = w.screen && w.input && w.files;
+        Access { screen: w.screen, input: w.input, files: w.files, terminal: full }
+    }
 }
 
 impl Access {
-    pub const FULL: Access = Access { screen: true, input: true, files: true };
-    pub const VIEW: Access = Access { screen: true, input: false, files: false };
-    pub const FILES: Access = Access { screen: false, input: false, files: true };
-    pub const NONE: Access = Access { screen: false, input: false, files: false };
+    pub const FULL: Access = Access { screen: true, input: true, files: true, terminal: true };
+    pub const VIEW: Access = Access { screen: true, input: false, files: false, terminal: false };
+    pub const FILES: Access = Access { screen: false, input: false, files: true, terminal: false };
+    pub const TERMINAL: Access = Access { screen: false, input: false, files: false, terminal: true };
+    pub const NONE: Access = Access { screen: false, input: false, files: false, terminal: false };
 
     pub fn union(self, o: Access) -> Access {
-        Access { screen: self.screen || o.screen, input: self.input || o.input, files: self.files || o.files }
+        Access {
+            screen: self.screen || o.screen,
+            input: self.input || o.input,
+            files: self.files || o.files,
+            terminal: self.terminal || o.terminal,
+        }
     }
 
     /// Everything `o` allows is allowed here too.
     pub fn covers(self, o: Access) -> bool {
-        (self.screen || !o.screen) && (self.input || !o.input) && (self.files || !o.files)
+        (self.screen || !o.screen)
+            && (self.input || !o.input)
+            && (self.files || !o.files)
+            && (self.terminal || !o.terminal)
     }
 
     pub fn is_none(self) -> bool {
@@ -91,6 +127,9 @@ impl Access {
         if self.files {
             v.push("files");
         }
+        if self.terminal {
+            v.push("terminal");
+        }
         v.join(",")
     }
 
@@ -100,7 +139,10 @@ impl Access {
             return Access::FULL;
         }
         let has = |w: &str| s.split(',').any(|p| p.trim() == w);
-        Access { screen: has("screen"), input: has("input"), files: has("files") }
+        let (screen, input, files) = (has("screen"), has("input"), has("files"));
+        // Servers before the terminal wrote full control as "screen,input,files".
+        let terminal = has("terminal") || (screen && input && files);
+        Access { screen, input, files, terminal }
     }
 
     /// "full control", "view only", "files only", "view + files"…
@@ -109,6 +151,7 @@ impl Access {
             Access::FULL => "full control".into(),
             Access::VIEW => "view only".into(),
             Access::FILES => "files only".into(),
+            Access::TERMINAL => "terminal only".into(),
             Access::NONE => "no access".into(),
             a => a.to_text().replace(',', " + "),
         }
@@ -122,7 +165,7 @@ pub struct AuthOk {
     pub resume_ttl_s: u32,
     pub host: HostInfo,
     /// What this session may do (the host enforces it).
-    pub access: Access,
+    pub access: WireAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +296,39 @@ pub enum StreamOpen {
     Input,
     Acks,
     File,
+    /// A terminal (bidirectional): [`TermClient`] in, [`TermHost`] out.
+    Terminal,
+}
+
+/// The client's side of a terminal stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TermClient {
+    /// First message: the window's size in characters.
+    Start {
+        cols: u16,
+        rows: u16,
+    },
+    /// Keys, as a terminal sends them (UTF-8 and escape sequences).
+    Input(Vec<u8>),
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+}
+
+/// The host's side of a terminal stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TermHost {
+    /// The shell runs: which one, and as whom.
+    Started {
+        shell: String,
+        user: String,
+    },
+    Output(Vec<u8>),
+    /// The shell ended (its exit code).
+    Exited(u32),
+    /// It could not start (or stopped for this reason).
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

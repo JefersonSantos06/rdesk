@@ -29,6 +29,9 @@ pub struct SessionInfo {
     /// "key SHA256:…", "password" or "resume".
     pub method: String,
     pub since: SystemTime,
+    /// Terminals open in it now.
+    #[serde(default)]
+    pub terminals: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,6 +121,15 @@ impl Reporter {
 
     pub fn session(&self, s: Option<SessionInfo>) {
         self.update(|st| st.session = s);
+    }
+
+    /// A terminal opened (+1) or closed (-1) in the current session.
+    pub fn terminal(&self, delta: i32) {
+        self.update(|st| {
+            if let Some(s) = &mut st.session {
+                s.terminals = s.terminals.saturating_add_signed(delta);
+            }
+        });
     }
 
     /// Clear the session only if it is still `peer`'s (a newer one may have replaced it).

@@ -457,7 +457,7 @@ where
                 resume_token,
                 resume_ttl_s: RESUME_TTL.as_secs() as u32,
                 host: host_info(),
-                access,
+                access: access.into(),
             }),
         )
         .await?;

@@ -2,9 +2,12 @@
 //! gated by client acknowledgements.
 //!
 //! At most [`MAX_IN_FLIGHT`] frames are unacknowledged at once. On a slow link
-//! the frame rate drops instead of latency growing. A frame not acknowledged in
-//! time is reset and its tiles become dirty again, so the picture always
-//! converges without explicit resync.
+//! the frame rate drops instead of latency growing. Frames travel on reliable
+//! streams, so a slow frame is left to finish: resetting it would throw away what
+//! was already sent and the next frame, larger still, would meet the same fate
+//! (the picture froze while it kept changing). Only a frame stuck for
+//! [`STUCK_AFTER`] is reset and its tiles become dirty again. Lossless refinement
+//! goes [`REFINE_PER_FRAME`] tiles at a time, so it never holds back what changes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +26,12 @@ pub const MAX_IN_FLIGHT: usize = 2;
 /// A tile that changed within this window is sent lossy (JPEG);
 /// once still for this long it is refined losslessly.
 const MOTION_WINDOW: Duration = Duration::from_millis(300);
+/// A frame unacknowledged this long is given up on (a safety net: acks travel on a
+/// reliable stream, so this means the client stopped reading).
+const STUCK_AFTER: Duration = Duration::from_secs(10);
+/// Lossless refinements per frame (a 64×64 tile is up to 16 KB): a settled screen is
+/// refined over a few frames instead of in one that takes seconds on a slow link.
+const REFINE_PER_FRAME: usize = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoSettings {
@@ -74,6 +83,7 @@ impl Scheduler {
         let hashes: Vec<TileHash> =
             (0..self.tiles.len()).into_par_iter().map(|i| frame.hash_tile(self.rect(i))).collect();
         let mut out = Vec::new();
+        let mut refinements = 0;
         for (i, hash) in hashes.into_iter().enumerate() {
             let t = &mut self.tiles[i];
             if t.current != Some(hash) {
@@ -87,9 +97,12 @@ impl Scheduler {
             let send = if t.confirmed != Some(hash) {
                 // Client has something else: send unless this exact content is already on its way.
                 !inflight_same
+            } else if !t.confirmed_lossless && !moving && t.inflight.is_none() && refinements < REFINE_PER_FRAME {
+                // Client has this content lossy and it has settled: refine it.
+                refinements += 1;
+                true
             } else {
-                // Client has this content; refine if it was lossy and has settled.
-                !t.confirmed_lossless && !moving && t.inflight.is_none()
+                false
             };
             if send {
                 let lossy = moving;
@@ -215,13 +228,11 @@ pub async fn run(
                 s.lost(id);
             }
         }
-        let rtt = transport::rtt(&conn);
-        let stale_after = Duration::from_millis(600).max(rtt * 4);
-        let stale: Vec<u64> =
-            inflight.iter().filter(|(_, f)| f.sent_at.elapsed() > stale_after).map(|(id, _)| *id).collect();
-        for id in stale {
+        let stuck: Vec<u64> =
+            inflight.iter().filter(|(_, f)| f.sent_at.elapsed() > STUCK_AFTER).map(|(id, _)| *id).collect();
+        for id in stuck {
             if let Some(mut f) = inflight.remove(&id) {
-                tracing::debug!("frame {id} stale after {stale_after:?}, resending its tiles");
+                tracing::warn!("frame {id} unacknowledged after {STUCK_AFTER:?}, resending its tiles");
                 if let Some(c) = f.cancel.take() {
                     let _ = c.send(());
                 }
@@ -384,6 +395,40 @@ mod tests {
         s.acked(4);
         assert_eq!(s.lossy_count(), 0);
         assert!(s.plan(&b, 5, t0 + Duration::from_secs(2)).is_empty());
+    }
+
+    #[test]
+    fn refinement_is_spread_over_frames() {
+        let (w, h) = (64 * 20, 64 * 5); // 100 tiles
+        let mut s = Scheduler::new(w, h);
+        let t0 = Instant::now();
+        s.plan(&frame_with(w, h, 1), 1, t0);
+        s.acked(1);
+        // Everything changes: all of it goes at once, lossy.
+        let b = frame_with(w, h, 9);
+        let p = s.plan(&b, 2, t0 + Duration::from_millis(10));
+        assert_eq!(p.len(), 100);
+        assert!(p.iter().all(|p| p.lossy));
+        s.acked(2);
+        // Settled: refined a batch at a time.
+        let t = t0 + Duration::from_secs(1);
+        let mut id = 3;
+        let mut batches = Vec::new();
+        loop {
+            let p = s.plan(&b, id, t);
+            if p.is_empty() {
+                break;
+            }
+            assert!(p.iter().all(|p| !p.lossy));
+            batches.push(p.len());
+            s.acked(id);
+            id += 1;
+        }
+        assert_eq!(batches, vec![REFINE_PER_FRAME, REFINE_PER_FRAME, 100 - 2 * REFINE_PER_FRAME]);
+        assert_eq!(s.lossy_count(), 0);
+        // A change still goes out in full while a refinement batch is in flight.
+        let c = frame_with(w, h, 20);
+        assert_eq!(s.plan(&c, id, t + Duration::from_millis(10)).len(), 100);
     }
 
     #[test]

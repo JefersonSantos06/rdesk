@@ -39,13 +39,16 @@ pub fn map(code: KeyCode) -> Option<Key> {
     )
 }
 
-/// Mac client → PC host: make Cmd act as Ctrl (and vice versa) so shortcuts feel native.
+/// Mac keyboard → PC host, so shortcuts feel native: Cmd is Ctrl, the left Option is
+/// the Windows key and Control is Alt. The right Option stays AltGr (accents and
+/// symbols on international layouts).
 pub fn swap_cmd_ctrl(k: Key) -> Key {
     match k {
         Key::MetaLeft => Key::ControlLeft,
         Key::MetaRight => Key::ControlRight,
-        Key::ControlLeft => Key::MetaLeft,
-        Key::ControlRight => Key::MetaRight,
+        Key::AltLeft => Key::MetaLeft,
+        Key::ControlLeft => Key::AltLeft,
+        Key::ControlRight => Key::AltLeft,
         other => other,
     }
 }
@@ -59,6 +62,15 @@ mod tests {
         assert_eq!(map(KeyCode::KeyA), Some(Key::KeyA));
         assert_eq!(map(KeyCode::SuperLeft), Some(Key::MetaLeft));
         assert_eq!(map(KeyCode::IntlRo), Some(Key::IntlRo));
+    }
+
+    #[test]
+    fn mac_modifiers() {
         assert_eq!(swap_cmd_ctrl(Key::MetaLeft), Key::ControlLeft);
+        assert_eq!(swap_cmd_ctrl(Key::MetaRight), Key::ControlRight);
+        assert_eq!(swap_cmd_ctrl(Key::AltLeft), Key::MetaLeft, "left Option is the Windows key");
+        assert_eq!(swap_cmd_ctrl(Key::ControlLeft), Key::AltLeft);
+        assert_eq!(swap_cmd_ctrl(Key::AltRight), Key::AltRight, "right Option stays AltGr");
+        assert_eq!(swap_cmd_ctrl(Key::KeyC), Key::KeyC);
     }
 }

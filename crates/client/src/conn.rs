@@ -88,6 +88,10 @@ pub enum UiEvent {
     },
     /// The connection will not be retried (auth failure, replaced by another client...).
     Fatal(String),
+    /// A terminal opened (or why not).
+    Terminal(Result<crate::terminal::TermSlot, String>),
+    /// Something to redraw (terminal output).
+    Wake,
     Quit,
 }
 
@@ -96,10 +100,21 @@ pub enum Cmd {
     Input(InputEvent),
     SelectMonitor(u32),
     FullFrame,
-    SetQuality { max_fps: u8, jpeg_quality: u8 },
+    SetQuality {
+        max_fps: u8,
+        jpeg_quality: u8,
+    },
     Push(PathBuf),
-    Pull { remote: String, local_dir: PathBuf },
+    Pull {
+        remote: String,
+        local_dir: PathBuf,
+    },
     ListDir(String),
+    /// Open a terminal on the host (answered with [`UiEvent::Terminal`]).
+    OpenTerminal {
+        cols: u16,
+        rows: u16,
+    },
     Quit,
 }
 
@@ -545,12 +560,13 @@ async fn once(
     };
     *resume = Some((ok.session_id, ok.resume_token));
     notify(UiEvent::Connected(ok.host.clone()));
-    notify(UiEvent::Access(ok.access));
+    let access: rdesk_proto::Access = ok.access.into();
+    notify(UiEvent::Access(access));
     notify(UiEvent::Status(format!("Connected to {}", ok.host.hostname)));
 
     // The clipboard goes both ways: only with full control.
-    let clipboard = opts.clipboard && ok.access.input;
-    match run_session(&conn, ctrl_w, ctrl_r, monitor, cmd_rx, view, notify, clipboard, ok.access.input).await {
+    let clipboard = opts.clipboard && access.input;
+    match run_session(&conn, ctrl_w, ctrl_r, monitor, cmd_rx, view, notify, clipboard, access.input).await {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -764,6 +780,17 @@ async fn run_session(
                         transfer_id += 1;
                         spawn_pull(conn.clone(), remote, local_dir, transfer_id, notify.clone());
                     }
+                    Cmd::OpenTerminal { cols, rows } => {
+                        let (conn, notify) = (conn.clone(), notify.clone());
+                        tokio::spawn(async move {
+                            let wake = notify.clone();
+                            let r = crate::terminal::open(conn, cols, rows, move || wake(UiEvent::Wake)).await;
+                            notify(UiEvent::Terminal(
+                                r.map(|l| crate::terminal::TermSlot(std::sync::Arc::new(std::sync::Mutex::new(Some(l)))))
+                                    .map_err(|e| format!("{e:#}")),
+                            ));
+                        });
+                    }
                 }
             }
             _ = conn.closed() => break Ok(false),
@@ -802,6 +829,13 @@ async fn read_frame(s: &mut RecvStream, view: &SharedView) -> Result<u64> {
         v.frame.blit(rect, &scratch)?;
         if !v.full_dirty {
             v.dirty.push(rect);
+            // Nothing drawn for a while (a minimized window): don't pile up rectangles.
+            let tiles =
+                (v.frame.width.div_ceil(rdesk_proto::TILE) * v.frame.height.div_ceil(rdesk_proto::TILE)) as usize;
+            if v.dirty.len() > tiles {
+                v.full_dirty = true;
+                v.dirty.clear();
+            }
         }
     }
     view.lock().unwrap().frames += 1;

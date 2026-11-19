@@ -23,6 +23,8 @@ serde_json = "1"
 # Direct access: which addresses share a network with this computer.
 netwatch = "0.20"
 ipnet = "2"
+# Remote terminal: ConPTY on Windows, a pty elsewhere.
+portable-pty = "0.9"
 
 # Windows injects input with SendInput directly (scancodes), so enigo is only for macOS/Linux.
 [target.'cfg(not(windows))'.dependencies]
@@ -35,7 +37,7 @@ windows-sys = { version = "0.61", features = [
     # The Windows service: sessions, desktops, tokens, processes, pipes, the notice window.
     "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Environment",
     "Win32_System_Pipes", "Win32_Security_Authorization", "Win32_Storage_FileSystem",
-    "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Memory",
+    "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Memory", "Win32_Graphics_Dwm",
 ] }
 windows-service = "0.8"
 

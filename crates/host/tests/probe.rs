@@ -72,7 +72,7 @@ async fn probes_learn_nothing_and_are_not_logins() {
         password: None,
     };
     let ok = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await.unwrap();
-    assert_eq!(ok.access, rdesk_proto::Access::FULL, "a local login may do everything");
+    assert_eq!(rdesk_proto::Access::from(ok.access), rdesk_proto::Access::FULL, "a local login may do everything");
     c.conn.close(transport::close::NORMAL, b"bye");
     host.abort();
 }

@@ -59,6 +59,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Sem administrador, mudar uma opção pede *Manage as administrator*; como administrador, salvar reinicia o host do serviço.
 - [ ] *Remove the service…*: os arquivos voltam para o perfil e o app volta a rodar o host.
 
+## Terminal
+- [ ] *Terminal* no cartão de um computador: abre a janela com o PowerShell (Windows) ou o shell do usuário (Linux/Mac); cores, setas, Tab, Ctrl+C e colar funcionam; programas de tela cheia (vim, htop) desenham certo.
+- [ ] Redimensionar a janela: o shell acompanha (por exemplo `$Host.UI.RawUI.WindowSize` ou `tput cols`).
+- [ ] Com o serviço do Windows: o shell roda como quem está logado (`whoami`), não como SYSTEM; sem ninguém logado, o terminal é recusado.
+- [ ] Papel *terminal only*: abre só o terminal, sem imagem; *view only* e *files only* não abrem terminal.
+- [ ] `rdesk shell "PC"` num terminal: funciona e devolve o código de saída do shell.
+- [ ] A barra de aviso no host mostra "(terminal open)"; a atividade registra quem abriu.
+
 ## Instalação
 - [ ] `https://seu-servidor/download` mostra a versão liberada; o Windows baixa `rdesk@seu-servidor.exe` e o app já vem com o servidor preenchido.
 - [ ] *Install rdesk on this computer*: aparece em *Configurações → Aplicativos*; o Menu Iniciar abre o rdesk de `Program Files`; *Desinstalar* por lá remove tudo e devolve as configurações do host.

@@ -245,6 +245,14 @@ impl LoginOptions {
     }
 }
 
+/// What a session window opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Open {
+    Screen,
+    Files,
+    Terminal,
+}
+
 /// Computers saved on this device to reach without the server, by name.
 pub(super) fn local_computers() -> Vec<HostEntry> {
     let mut list: Vec<HostEntry> = load_client_config().hosts.into_values().filter(|e| !e.name.is_empty()).collect();
@@ -325,7 +333,7 @@ enum Dialog {
 /// A share's role, as a small drop-down.
 fn role_picker(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, role: &mut ShareRole) {
     egui::ComboBox::from_id_salt(salt).selected_text(role.label()).width(110.0).show_ui(ui, |ui| {
-        for r in [ShareRole::Control, ShareRole::View, ShareRole::Files] {
+        for r in ShareRole::ALL {
             ui.selectable_value(role, r, r.label());
         }
     });
@@ -419,26 +427,30 @@ impl Computers {
         let lower = t.to_lowercase();
         if let Some(m) = list.iter().find(|m| m.name.to_lowercase() == lower || m.endpoint_id.starts_with(&lower)) {
             let m = m.clone();
-            self.open(&m, false);
+            self.open(&m, Open::Screen);
             return;
         }
         match t.split_once('@') {
-            Some((id, _)) if parse_host_id(id).is_ok() => self.spawn_session(t, t, false),
+            Some((id, _)) if parse_host_id(id).is_ok() => self.spawn_session(t, t, Open::Screen),
             _ => self.notify(format!("{t}: no computer with that name or ID (ID@address for one on the LAN)."), true),
         }
     }
 
-    fn open(&mut self, m: &Machine, files: bool) {
+    fn open(&mut self, m: &Machine, how: Open) {
         if !m.can_access {
             self.notify(format!("{} is not shared with you.", m.name), true);
             return;
         }
-        self.spawn_session(&m.endpoint_id, &m.name, files);
+        self.spawn_session(&m.endpoint_id, &m.name, how);
     }
 
-    fn spawn_session(&mut self, target: &str, label: &str, files: bool) {
+    fn spawn_session(&mut self, target: &str, label: &str, how: Open) {
         if self.session_open(target) {
-            let hint = if files { " Use Files in its ▼ rdesk menu." } else { "" };
+            let hint = match how {
+                Open::Screen => "",
+                Open::Files => " Use Files in its ▼ rdesk menu.",
+                Open::Terminal => " Use Terminal in its ▼ rdesk menu.",
+            };
             self.notify(format!("A window for {label} is already open.{hint}"), false);
             return;
         }
@@ -455,8 +467,14 @@ impl Computers {
         };
         let mut cmd = std::process::Command::new(&self.exe);
         cmd.args(["connect", target]);
-        if files {
-            cmd.arg("--files");
+        match how {
+            Open::Screen => {}
+            Open::Files => {
+                cmd.arg("--files");
+            }
+            Open::Terminal => {
+                cmd.arg("--terminal");
+            }
         }
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
         #[cfg(windows)]
@@ -643,14 +661,22 @@ impl Computers {
                     ui.horizontal(|ui| {
                         let label = if status == Status::Open { "Focus" } else { "Connect" };
                         if ui.add_enabled(m.can_access, egui::Button::new(label)).clicked() {
-                            self.open(m, false);
+                            self.open(m, Open::Screen);
                         }
                         if ui
                             .add_enabled(m.can_access, egui::Button::new("Files").small())
                             .on_hover_text("Open a session on the file-transfer panel")
                             .clicked()
                         {
-                            self.open(m, true);
+                            self.open(m, Open::Files);
+                        }
+                        if m.access.terminal
+                            && ui
+                                .add_enabled(m.can_access, egui::Button::new("Terminal").small())
+                                .on_hover_text("A shell on that computer, as whoever is signed in there")
+                                .clicked()
+                        {
+                            self.open(m, Open::Terminal);
                         }
                         if m.can_manage && ui.small_button("Share…").clicked() {
                             self.start_share(&ctx, m);
@@ -660,15 +686,19 @@ impl Computers {
         });
         let resp = resp.response;
         if resp.double_clicked() {
-            self.open(m, false);
+            self.open(m, Open::Screen);
         }
         resp.context_menu(|ui| {
             if ui.add_enabled(m.can_access, egui::Button::new("Connect")).clicked() {
-                self.open(m, false);
+                self.open(m, Open::Screen);
                 ui.close();
             }
             if ui.add_enabled(m.can_access, egui::Button::new("Files…")).clicked() {
-                self.open(m, true);
+                self.open(m, Open::Files);
+                ui.close();
+            }
+            if ui.add_enabled(m.can_access && m.access.terminal, egui::Button::new("Terminal…")).clicked() {
+                self.open(m, Open::Terminal);
                 ui.close();
             }
             if ui
@@ -1448,11 +1478,14 @@ impl Computers {
                         if ui.small_button("Edit…").clicked() {
                             self.dialog = Some(Dialog::Login(Box::new(LoginOptions::load_local(Some(e)))));
                         }
+                        if ui.button("Terminal").clicked() {
+                            self.spawn_session(&local_target(e), &e.name, Open::Terminal);
+                        }
                         if ui.button("Files").clicked() {
-                            self.spawn_session(&local_target(e), &e.name, true);
+                            self.spawn_session(&local_target(e), &e.name, Open::Files);
                         }
                         if ui.button("Connect").clicked() {
-                            self.spawn_session(&local_target(e), &e.name, false);
+                            self.spawn_session(&local_target(e), &e.name, Open::Screen);
                         }
                     });
                 });

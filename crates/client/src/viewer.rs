@@ -27,6 +27,8 @@ pub struct ViewerOpts {
     pub connect: ConnectOpts,
     /// Start with the menu open on the file-transfer panel.
     pub open_files: bool,
+    /// Open a terminal as soon as it connects.
+    pub open_terminal: bool,
     pub swap_cmd_ctrl: bool,
     pub download_dir: PathBuf,
 }
@@ -39,6 +41,7 @@ pub fn run(opts: ViewerOpts) -> Result<()> {
         let _ = proxy.send_event(ev);
     });
     let mut app = App::new(handle, name, opts.swap_cmd_ctrl, opts.download_dir);
+    app.terminal_on_connect = opts.open_terminal;
     if opts.open_files {
         app.menu_open = true;
         app.send(Cmd::ListDir(app.remote_path.clone()));
@@ -101,6 +104,10 @@ struct App {
     transfers: BTreeMap<u64, Transfer>,
     download_dir: PathBuf,
     next_repaint: Option<Instant>,
+    /// The terminal window (and whether to open one once connected).
+    terminal: Option<crate::terminal::TermView>,
+    terminal_open: bool,
+    terminal_on_connect: bool,
 }
 
 impl App {
@@ -132,6 +139,9 @@ impl App {
             transfers: BTreeMap::new(),
             download_dir,
             next_repaint: None,
+            terminal: None,
+            terminal_open: false,
+            terminal_on_connect: false,
         }
     }
 
@@ -294,6 +304,35 @@ impl App {
             });
             self.menu_open = open;
         }
+
+        if self.terminal_open
+            && let Some(t) = &mut self.terminal
+        {
+            let mut open = true;
+            // Without a picture (a terminal-only session) it takes the window.
+            let size =
+                if self.tex.is_none() { screen.size() - egui::vec2(20.0, 50.0) } else { egui::vec2(900.0, 520.0) };
+            egui::Window::new(format!("Terminal · {}", t.status))
+                .id(egui::Id::unique("terminal"))
+                .open(&mut open)
+                .resizable(true)
+                .default_size(size)
+                .show(&ctx, |ui| t.ui(ui));
+            self.terminal_open = open;
+            if !open {
+                // Closing the window ends the shell.
+                self.terminal = None;
+            }
+        }
+    }
+
+    fn open_terminal(&mut self) {
+        if self.terminal.as_ref().is_some_and(|t| !t.ended) {
+            self.terminal_open = true;
+            return;
+        }
+        self.terminal = None;
+        self.send(Cmd::OpenTerminal { cols: 100, rows: 30 });
     }
 
     fn password_dialog(&mut self, ctx: &egui::Context) {
@@ -336,6 +375,9 @@ impl App {
         if let Some(h) = &self.host {
             ui.label(format!("{} ({})", h.hostname, h.os));
         }
+        if ui.button("Terminal").on_hover_text("A shell on that computer, as whoever is signed in there").clicked() {
+            self.open_terminal();
+        }
         ui.label(format!(
             "{} · RTT {} ms{} · {:.0} fps · {:.0} kbit/s",
             self.status,
@@ -374,7 +416,8 @@ impl App {
             if ui.button("Refresh picture").clicked() {
                 self.send(Cmd::FullFrame);
             }
-            ui.checkbox(&mut self.swap_cmd_ctrl, "Cmd ⇄ Ctrl");
+            ui.checkbox(&mut self.swap_cmd_ctrl, "Mac keys")
+                .on_hover_text("Cmd → Ctrl, left Option → Windows key, Control → Alt");
             if ui.button("Ctrl+Alt+Del").on_hover_text("Only works if the host runs elevated").clicked() {
                 use rdesk_proto::Key::*;
                 for k in [ControlLeft, AltLeft, Delete] {
@@ -531,6 +574,10 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => self.input(InputEvent::ReleaseAll),
+            // Back from minimized or covered: frames kept arriving, but nothing was drawn
+            // (macOS skips redraws then) and the wake-up for new frames was spent. The
+            // picture is current in memory: just draw it.
+            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => self.request_redraw(),
             WindowEvent::DroppedFile(p) => {
                 self.send(Cmd::Push(p.clone()));
                 self.menu_open = true;
@@ -585,7 +632,14 @@ impl ApplicationHandler<UiEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UiEvent) {
         match event {
-            UiEvent::FrameUpdated => {}
+            UiEvent::FrameUpdated | UiEvent::Wake => {}
+            UiEvent::Terminal(Ok(slot)) => {
+                if let Some(link) = slot.0.lock().unwrap().take() {
+                    self.terminal = Some(crate::terminal::TermView::new(link, 100, 30));
+                    self.terminal_open = true;
+                }
+            }
+            UiEvent::Terminal(Err(e)) => self.notice = Some((format!("Terminal: {e}"), Instant::now())),
             UiEvent::Status(s) => {
                 self.status = s;
                 self.update_title();
@@ -624,6 +678,9 @@ impl ApplicationHandler<UiEvent> for App {
                 }
             }
             UiEvent::Connected(h) => {
+                if std::mem::take(&mut self.terminal_on_connect) {
+                    self.send(Cmd::OpenTerminal { cols: 100, rows: 30 });
+                }
                 self.fatal = None;
                 self.monitors = h.monitors.clone();
                 self.active = h.active_monitor;

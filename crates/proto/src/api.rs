@@ -190,14 +190,19 @@ pub enum ShareRole {
     View,
     /// Files only (no screen).
     Files,
+    /// A terminal only (no screen): for servers and boards without a desktop.
+    Terminal,
 }
 
 impl ShareRole {
+    pub const ALL: [ShareRole; 4] = [ShareRole::Control, ShareRole::View, ShareRole::Files, ShareRole::Terminal];
+
     pub fn access(self) -> crate::Access {
         match self {
             ShareRole::Control => crate::Access::FULL,
             ShareRole::View => crate::Access::VIEW,
             ShareRole::Files => crate::Access::FILES,
+            ShareRole::Terminal => crate::Access::TERMINAL,
         }
     }
 
@@ -206,6 +211,7 @@ impl ShareRole {
             ShareRole::Control => "control",
             ShareRole::View => "view",
             ShareRole::Files => "files",
+            ShareRole::Terminal => "terminal",
         }
     }
 
@@ -214,6 +220,7 @@ impl ShareRole {
             "control" => Some(ShareRole::Control),
             "view" => Some(ShareRole::View),
             "files" => Some(ShareRole::Files),
+            "terminal" => Some(ShareRole::Terminal),
             _ => None,
         }
     }
@@ -223,6 +230,7 @@ impl ShareRole {
             ShareRole::Control => "full control",
             ShareRole::View => "view only",
             ShareRole::Files => "files only",
+            ShareRole::Terminal => "terminal only",
         }
     }
 }

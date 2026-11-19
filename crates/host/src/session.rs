@@ -28,6 +28,8 @@ pub struct Shared {
     /// Run by the Windows service (as SYSTEM): files go through a helper started as the
     /// signed-in user (see `win::files`).
     pub files_as_user: bool,
+    /// For "… opened a terminal" in the activity and on the session bar.
+    pub reporter: crate::control::Reporter,
 }
 
 pub fn pick_initial(monitors: &[MonitorDesc]) -> Option<&MonitorDesc> {
@@ -49,6 +51,11 @@ pub async fn run(
     let peer = transport::describe_peer(&conn);
     let access = auth.access;
     let files_as_user = shared.files_as_user;
+    let reporter = shared.reporter.clone();
+    let who = match &auth.user {
+        Some(u) => u.label(),
+        None => auth.client_name.clone(),
+    };
     tracing::info!(
         "session {} started: {} ({:?}, {}) from {peer}",
         hex(&auth.session_id),
@@ -60,12 +67,20 @@ pub async fn run(
     let injector = shared.injector.clone();
     injector.event(InputEvent::ReleaseAll);
 
-    let initial = pick_initial(&monitors).ok_or_else(|| anyhow!("no monitors"))?.clone();
-    injector.send(InputCmd::Monitor(initial.input_rect));
+    // A terminal- or files-only session (or a computer without a screen) needs no monitor.
+    let initial = match pick_initial(&monitors) {
+        Some(m) => Some(m.clone()),
+        None if access.screen => return Err(anyhow!("no monitors")),
+        None => None,
+    };
+    if let Some(m) = &initial {
+        injector.send(InputCmd::Monitor(m.input_rect));
+    }
+    let initial_id = initial.as_ref().map(|m| m.info.id).unwrap_or(0);
     let monitors = Arc::new(tokio::sync::Mutex::new(monitors));
 
     let (settings_tx, settings_rx) = watch::channel(VideoSettings {
-        monitor: initial.info.id,
+        monitor: initial_id,
         max_fps: shared.cfg.max_fps,
         jpeg_quality: shared.cfg.jpeg_quality,
         epoch: 0,
@@ -211,7 +226,9 @@ pub async fn run(
                                     let _ = ack_tx.send(a.frame_id);
                                 }
                             }
-                            StreamOpen::File => return Err(anyhow!("file stream must be bidirectional")),
+                            StreamOpen::File | StreamOpen::Terminal => {
+                                return Err(anyhow!("file and terminal streams must be bidirectional"));
+                            }
                         }
                         Ok(())
                     }
@@ -236,6 +253,7 @@ pub async fn run(
                     Err(_) => return Ok("bi acceptor"),
                 };
                 let (inbox, chosen_inbox) = (inbox.clone(), chosen_inbox.clone());
+                let (reporter, who) = (reporter.clone(), who.clone());
                 tokio::spawn(async move {
                     let res: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut r, MAX_SMALL_MSG).await? {
@@ -244,6 +262,22 @@ pub async fn run(
                                 serve_as_user(&mut r, &mut w, chosen_inbox.as_deref()).await
                             }
                             StreamOpen::File => files::serve(&mut r, &mut w, &inbox).await,
+                            StreamOpen::Terminal if !access.terminal => {
+                                let reason = "this session may not open a terminal".to_string();
+                                write_msg(&mut w, &rdesk_proto::TermHost::Error(reason)).await?;
+                                Ok(())
+                            }
+                            StreamOpen::Terminal => {
+                                reporter.event(format!("{who} opened a terminal"), false);
+                                reporter.terminal(1);
+                                let r2 = if files_as_user {
+                                    terminal_as_user(&mut r, &mut w).await
+                                } else {
+                                    crate::terminal::serve(&mut r, &mut w).await
+                                };
+                                reporter.terminal(-1);
+                                r2
+                            }
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
                     }
@@ -252,7 +286,7 @@ pub async fn run(
                         Ok(()) => {
                             let _ = w.finish();
                         }
-                        Err(e) => tracing::warn!("file transfer failed: {e:#}"),
+                        Err(e) => tracing::warn!("file transfer or terminal failed: {e:#}"),
                     }
                 });
             }
@@ -297,7 +331,7 @@ pub async fn run(
     // Tell the client what it can choose from.
     if access.screen {
         let list = monitors.lock().await;
-        let _ = out_tx.send(HostMsg::Monitors { monitors: infos(&list), active: initial.info.id });
+        let _ = out_tx.send(HostMsg::Monitors { monitors: infos(&list), active: initial_id });
     }
 
     // The session lives as long as the connection; the first task to finish ends it.
@@ -317,7 +351,7 @@ pub async fn run(
 }
 
 #[cfg(windows)]
-use crate::win::files::{list_as_user, serve_as_user};
+use crate::win::files::{list_as_user, serve_as_user, terminal_as_user};
 
 #[cfg(not(windows))]
 async fn list_as_user(_: &str) -> Result<(String, Vec<rdesk_proto::DirEntry>), String> {
@@ -326,6 +360,11 @@ async fn list_as_user(_: &str) -> Result<(String, Vec<rdesk_proto::DirEntry>), S
 
 #[cfg(not(windows))]
 async fn serve_as_user<R, W>(_: &mut R, _: &mut W, _: Option<&std::path::Path>) -> Result<()> {
+    Err(anyhow!("not available"))
+}
+
+#[cfg(not(windows))]
+async fn terminal_as_user<R, W>(_: &mut R, _: &mut W) -> Result<()> {
     Err(anyhow!("not available"))
 }
 
