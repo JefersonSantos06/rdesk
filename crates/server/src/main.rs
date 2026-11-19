@@ -182,7 +182,7 @@ fn print_info(cfg: &ServerConfig) {
         cfg.listen,
         if cfg.tls == Tls::Acme { "HTTPS, Let's Encrypt" } else { "plain HTTP" }
     );
-    if cfg.tls == Tls::Acme && cfg.relay_quic_port != 0 {
+    if cfg.relay_quic() {
         println!("Relay QUIC:  UDP {} (open it in the firewall)", cfg.relay_quic_port);
     }
     println!(

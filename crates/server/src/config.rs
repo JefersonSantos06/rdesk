@@ -42,8 +42,13 @@ pub struct ServerConfig {
     /// Use Let's Encrypt's staging CA (for trying the setup without rate limits).
     pub acme_staging: bool,
     /// UDP port for the relay's QUIC address discovery (helps hole punching); 0 = off.
-    /// Needs TLS.
+    /// Needs TLS: Let's Encrypt (`tls = "acme"`), or `tls_cert` and `tls_key`.
     pub relay_quic_port: u16,
+    /// Behind a reverse proxy (`tls = "none"`): the proxy's certificate for this host
+    /// (PEM files, e.g. Caddy's Let's Encrypt ones), used only by the relay's QUIC.
+    /// Read again after renewals.
+    pub tls_cert: Option<std::path::PathBuf>,
+    pub tls_key: Option<std::path::PathBuf>,
     pub google: Option<OAuthApp>,
     pub github: Option<OAuthApp>,
     /// Log in by typing an allowed e-mail, without Google/GitHub (2FA still required).
@@ -61,6 +66,8 @@ impl Default for ServerConfig {
             acme_contact: None,
             acme_staging: false,
             relay_quic_port: 7842,
+            tls_cert: None,
+            tls_key: None,
             google: None,
             github: None,
             dev_login: false,
@@ -69,6 +76,11 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// The relay answers QUIC address discovery (it has a certificate for it).
+    pub fn relay_quic(&self) -> bool {
+        self.relay_quic_port != 0 && (self.tls == Tls::Acme || (self.tls_cert.is_some() && self.tls_key.is_some()))
+    }
+
     pub fn load(data: &Path) -> Result<Self> {
         let path = data.join(CONFIG_FILE);
         let text = std::fs::read_to_string(&path)

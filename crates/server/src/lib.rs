@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod api;
+pub mod certfile;
 pub mod config;
 pub mod db;
 pub mod enroll;
@@ -162,13 +163,19 @@ pub async fn start_full(
         }
         Tls::None => None,
     };
-    let quic = match &acme {
-        Some(a) if cfg.relay_quic_port != 0 => {
-            let tls = rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(a.resolver());
-            Some((SocketAddr::new(listen.ip(), cfg.relay_quic_port), tls))
-        }
-        _ => None,
-    };
+    let resolver: Option<std::sync::Arc<dyn rustls::server::ResolvesServerCert>> =
+        match (&acme, &cfg.tls_cert, &cfg.tls_key) {
+            _ if !cfg.relay_quic() => None,
+            (Some(a), _, _) => Some(a.resolver()),
+            (None, Some(cert), Some(key)) => Some(std::sync::Arc::new(certfile::FileCert::new(cert, key)?)),
+            _ => None,
+        };
+    // Behind a proxy the TCP side listens on a private address; QUIC is for everyone.
+    let quic_ip = if acme.is_some() { listen.ip() } else { std::net::Ipv6Addr::UNSPECIFIED.into() };
+    let quic = resolver.map(|r| {
+        let tls = rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(r);
+        (SocketAddr::new(quic_ip, cfg.relay_quic_port), tls)
+    });
     let relay = relay::spawn(db, st.online.clone(), quic).await?;
     *st.relay_http.lock().unwrap() = Some(relay.http);
 

@@ -72,8 +72,7 @@ pub async fn info(State(st): State<Shared>) -> Json<ServerInfo> {
         api: API_VERSION,
         version: env!("CARGO_PKG_VERSION").to_string(),
         relay_url: st.relay_url(),
-        relay_quic_port: (st.cfg.tls == crate::config::Tls::Acme && st.cfg.relay_quic_port != 0)
-            .then_some(st.cfg.relay_quic_port),
+        relay_quic_port: st.cfg.relay_quic().then_some(st.cfg.relay_quic_port),
         server_key: hex::encode(st.key.public().as_bytes()),
         providers: st.cfg.providers(),
     })

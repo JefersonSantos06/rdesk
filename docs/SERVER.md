@@ -40,6 +40,30 @@ docker compose -f deploy/docker-compose.yml logs -f
 
 Os dados ficam no volume `rdesk-data` (montado em `/data`). Os comandos de administração rodam do mesmo jeito: `docker compose -f deploy/docker-compose.yml run --rm rdesk-server users list`.
 
+## Atrás de um proxy reverso (Caddy, nginx…)
+
+Se as portas 80/443 já são de um proxy que faz o HTTPS, o `rdesk-server` roda sem TLS num endereço privado e o proxy repassa o domínio para ele (inclusive o `/relay`, que é um upgrade HTTP). No `server.toml`:
+
+```toml
+public_url = "https://rdesk.seu-dominio.com"
+listen = "172.18.0.1:8090"      # um endereço que só o proxy alcança
+tls = "none"
+# O certificado do proxy para o mesmo domínio: a descoberta de endereço (QUIC, UDP 7842)
+# do relay usa ele. Relido quando o proxy renova.
+tls_cert = "/caminho/rdesk.seu-dominio.com.crt"
+tls_key = "/caminho/rdesk.seu-dominio.com.key"
+```
+
+No Caddy:
+
+```
+rdesk.seu-dominio.com {
+	reverse_proxy 172.18.0.1:8090
+}
+```
+
+O DNS do domínio deve apontar direto para a VPS (na Cloudflare: *DNS only*, nuvem cinza), e a UDP 7842 precisa estar aberta.
+
 ## Login com Google
 
 1. Em [console.cloud.google.com](https://console.cloud.google.com/) → *APIs e serviços* → *Credenciais* → *Criar credenciais* → *ID do cliente OAuth* → tipo **Aplicativo da Web**.
