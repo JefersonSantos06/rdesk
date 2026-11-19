@@ -14,6 +14,10 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 - **Frames com controle por ACK**: no máximo 2 frames em trânsito; em link ruim cai o fps, não cresce a latência. Tiles perdidos são reenviados sozinhos.
 - Tiles 64×64: só o que mudou é enviado; JPEG enquanto se mexe, zstd sem perdas quando para (texto nítido).
 
+## Baixar
+
+As versões publicadas ficam nos [Releases](../../releases): app para Windows e Linux (x64 e arm64, também em `.deb`) e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
+
 ## Compilar
 
 ```sh
@@ -200,3 +204,7 @@ rdesk connect <host ID>@127.0.0.1:7421 --identity ./chave_teste --headless --fra
 ```
 
 Checklist manual: [docs/TESTING.md](docs/TESTING.md).
+
+## Licença
+
+Projeto pessoal, sem licença por enquanto: o código está visível, mas todos os direitos são reservados.

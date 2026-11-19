@@ -1,3 +1,6 @@
 /target
 *.part
 .idea/
+
+# Release signing keys (they live outside the repository; see docs/RELEASE.md).
+rdesk-release-*.key

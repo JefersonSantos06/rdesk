@@ -120,7 +120,10 @@ Planejado:
 ### Ordem das próximas fases
 6 → 7 → 8 → 9, porque tudo usa os arquivos que a fase 6 publica e o atualizador do Windows mora no serviço (fase 7). A fase 10 (terminal) depende só da fase 7 e pode vir logo depois dela.
 
-### Fase 6: repositório aberto e versões publicadas
+### Fase 6: repositório aberto e versões publicadas (preparada, branch `iroh-transport`)
+Como ficou: [RELEASE.md](RELEASE.md). Histórico varrido sem segredos; `rdesk-release` (chaves, manifesto, assinatura, verificação); `release.yml`; verificação no app em `rdesk_common::release`. Falta você: guardar as chaves, criar o secret, tornar o repositório público e publicar a primeira tag. O instalador do Windows ficou para a fase 9.
+
+Planejado:
 - Antes de abrir o repositório:
   - varrer todo o histórico em busca de segredos (ex.: `gitleaks`);
   - usar o e-mail `noreply` do GitHub nos próximos commits (os antigos continuam com o e-mail atual);

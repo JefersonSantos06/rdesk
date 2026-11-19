@@ -4,6 +4,7 @@ pub mod api;
 pub mod codec;
 pub mod key;
 pub mod msg;
+pub mod release;
 pub mod ticket;
 
 pub use codec::{

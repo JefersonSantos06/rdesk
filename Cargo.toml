@@ -1,11 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/proto", "crates/common", "crates/host", "crates/client", "crates/rdesk", "crates/server"]
+members = ["crates/proto", "crates/common", "crates/host", "crates/client", "crates/rdesk", "crates/server", "crates/release"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
 publish = false
 
 [workspace.dependencies]
