@@ -17,6 +17,13 @@ Uso interno (família): ninguém de fora entra, nada é público. Funciona como 
 | Servidor fora do ar | Tíquetes já emitidos valem por até 12 h |
 | Senha / chave SSH no host | Opcionais: cadeado extra por máquina |
 | Uma máquina na rede | Só é acessada. Para acessar outras, é preciso uma conta de usuário liberada pelo admin |
+| Código e versões | Repositório público no GitHub, **sem licença** por enquanto (código visível, todos os direitos reservados); versões nos GitHub Releases |
+| Atualizações | Automáticas, mas só depois que um admin libera no app: primeiro para máquinas de teste, depois para todas. O servidor atualiza por um clique próprio |
+| Docker | Continua existindo, **sem** atualização automática |
+| Host no Windows | Vira um serviço (SYSTEM): acessível na tela de login, no bloqueio e no UAC; segue só a sessão do console (não RDP) |
+| Quem está na frente do PC | Vê um aviso durante a sessão e pode encerrá-la; não precisa aceitar a conexão; sem ser admin, não desliga o acesso |
+| Placas (Pi) | Raspberry Pi OS ou Armbian normais + script de instalação + arquivo de configuração na partição de boot; sem imagens próprias |
+| Terminal | Acesso ao terminal da máquina pelo app e pela CLI |
 
 ## Como funciona
 
@@ -43,11 +50,11 @@ Uso interno (família): ninguém de fora entra, nada é público. Funciona como 
 
 ### Quem acessa o quê
 
-Um usuário acessa uma máquina se for **gestor** dela (quem cadastrou, e futuramente co-gestores) ou se:
+Um usuário acessa uma máquina se for **gestor** dela (quem cadastrou e os co-gestores) ou se:
 - a máquina for **"todos"**; ou
 - for **compartilhada** com ele diretamente ou com um grupo do qual ele é membro.
 
-Admins do sistema gerenciam a lista de e-mails e os usuários e **veem todas as máquinas** (nome, quem cadastrou, nível de acesso, status). Mas só **acessam** as que foram compartilhadas com eles, pela mesma regra de qualquer usuário. Cada compartilhamento guarda um *papel*: por enquanto só "controle total"; "só ver" e "só arquivos" ficam para depois.
+Admins do sistema gerenciam a lista de e-mails e os usuários e **veem todas as máquinas** (nome, quem cadastrou, nível de acesso, status). Mas só **acessam** as que foram compartilhadas com eles, pela mesma regra de qualquer usuário. Cada compartilhamento guarda um *papel*: *full control*, *view only* ou *files only* (e, na fase 10, *terminal only*).
 
 ## Fases
 
@@ -109,6 +116,83 @@ Planejado:
 - Um computador descadastrado não volta sozinho com uma chave: vira pedido de aprovação.
 - Configuração por `rdesk host enroll`, `[enroll]` no `host.toml` ou variáveis de ambiente (`RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY`, `RDESK_NAME`); o host cria o próprio ID no primeiro boot.
 - App: *Only share this computer* na tela de login; *Waiting for your approval* e *Add a computer…* (chaves) na aba Computers. CLI: `rdesk machines requests|approve|refuse|keys`.
+
+### Ordem das próximas fases
+6 → 7 → 8 → 9, porque tudo usa os arquivos que a fase 6 publica e o atualizador do Windows mora no serviço (fase 7). A fase 10 (terminal) depende só da fase 7 e pode vir logo depois dela.
+
+### Fase 6: repositório aberto e versões publicadas
+- Antes de abrir o repositório:
+  - varrer todo o histórico em busca de segredos (ex.: `gitleaks`);
+  - usar o e-mail `noreply` do GitHub nos próximos commits (os antigos continuam com o e-mail atual);
+  - revisar o README para quem chega de fora;
+  - sem licença por enquanto.
+- Chave de assinatura das versões (Ed25519), gerada fora da VPS:
+  - a privada fica nos *Secrets* do GitHub, com cópia no 1Password;
+  - os binários levam a pública e uma reserva, para dar para trocar a principal.
+  - Assim, quem tomar a VPS, o GitHub ou o caminho do download não consegue entregar um binário alterado.
+- `release.yml`, disparado por tag `v*`:
+  - compila Windows x64, Linux x64 e Linux arm64 (runner ARM nativo, gratuito em repositório público) e o servidor x64 e arm64;
+  - gera o instalador do Windows, o pacote de atualização, os `.deb` (amd64 e arm64), o binário do servidor e o `release.json` (versão, versão de protocolo e SHA-256 de cada arquivo) com a assinatura dele;
+  - publica tudo num GitHub Release. A versão vem do `Cargo.toml` do workspace e precisa bater com a tag.
+- O macOS continua sendo testado no CI, mas fica fora dos releases.
+- Windows sem certificado de assinatura de código: o SmartScreen avisa só na primeira instalação (o que o app baixa sozinho não passa por ele).
+
+### Fase 7: serviço do Windows
+- Serviço `rdesk` (SYSTEM), instalado em `C:\Program Files\rdesk`:
+  - guarda a identidade da máquina, o cadastro, o endpoint iroh, o sync e as atualizações;
+  - dados em `C:\ProgramData\rdesk`, legíveis só por SYSTEM e Administradores;
+  - a máquina fica acessível logo depois de reiniciar, antes de alguém entrar no Windows.
+- Agente de tela na sessão do **console** (não segue sessões RDP):
+  - lançado pelo serviço com token de SYSTEM, para acompanhar a troca de área de trabalho: tela de login, bloqueio, UAC, Gerenciador de Tarefas;
+  - relançado quando o usuário sai, troca de conta ou bloqueia a tela.
+- Arquivos recebidos são gravados como o usuário logado, na pasta Downloads dele.
+- Aviso na tela durante a sessão ("Fulano está conectado", com botão *Encerrar*). Não há pedido para aceitar a conexão. Sem ser admin, o usuário local não desliga o acesso.
+- App da bandeja: cliente e painel do host. Conversa com o serviço por um named pipe com controle de acesso; ligar e desligar o host exige admin.
+- Saem: *Restart as administrator*, a tarefa agendada *login-admin* e o aviso de bloqueio por UAC.
+- Migração automática no instalador: `host_id.key`, `machine.json` e `host.toml` passam do perfil do usuário para `ProgramData`, com o mesmo host ID (ninguém recadastra); o início automático antigo é removido.
+- Linux: o host continua como serviço do usuário na sessão X11 (`deploy/rdesk-host.service`), sem tela de login; ganha o mesmo aviso de sessão.
+
+### Fase 8: atualização automática
+- Servidor como política, GitHub como armazenamento:
+  1. O rdesk-server consulta os Releases de hora em hora (API pública, sem token), confere a assinatura e mostra na aba *Admin* a versão nova, com o changelog.
+  2. Dois cliques: **Liberar para máquinas de teste** (marcadas pelo admin) e depois **Liberar para todos**.
+  3. O servidor passa a informar a versão liberada no sync dos hosts e para os apps logados. Um endpoint público informa só o número da versão liberada (para o atualizador do Linux).
+  4. Cada máquina baixa do GitHub, confere a assinatura e o hash, **espera não haver sessão aberta**, troca e reinicia.
+  5. Os hosts informam a versão no sync; a aba *Admin* mostra quem atualizou e quem ficou para trás.
+- Windows: o serviço lança um aplicador separado que para o serviço, troca os arquivos e o inicia de novo. Se a versão nova não falar com o servidor em 2 minutos, ele volta para a anterior. A bandeja reabre na versão nova.
+- Linux: `rdesk-update` (serviço e timer como root) instala o `.deb`; o host percebe o binário novo e reinicia quando estiver ocioso.
+- Servidor: clique próprio no *Admin* (**Atualizar servidor**), feito antes de liberar as máquinas. Faz backup do banco antes, guarda o binário anterior e volta para ele (`OnFailure=` do systemd) se o novo não subir.
+- Docker: sem atualização automática. O *Admin* só avisa que existe versão nova; quem usa Docker atualiza a imagem por conta própria.
+- Compatibilidade:
+  - o servidor atualiza primeiro e continua aceitando apps antigos;
+  - cliente e host aceitam o protocolo atual e o anterior;
+  - o servidor informa uma versão mínima, abaixo da qual o app pede para atualizar;
+  - voltar de versão só por ordem explícita (impede que sirvam uma versão antiga assinada com falha conhecida).
+
+### Fase 9: instaladores
+- Windows (Inno Setup):
+  - modos **App completo** (cliente, host e bandeja) e **Só ser acessado** (só o serviço, com o e-mail do dono ou uma chave de cadastro da fase 5);
+  - o endereço do servidor vem no nome do arquivo (`rdesk-setup@rdesk.seu-dominio.com.exe`);
+  - modo silencioso para automação: `/VERYSILENT /SERVER=… /KEY=…`.
+- Linux: `install.sh` servido pelo próprio servidor, já com o endereço preenchido (`curl -fsSL https://rdesk.seu-dominio.com/install.sh | sh -s -- --host --key …`). Detecta a arquitetura e instala o `.deb` e os serviços.
+- Placas: Raspberry Pi OS ou Armbian normais, com o script e um `rdesk.toml` na partição de boot, lido no primeiro boot.
+- Servidor: `install-server.sh` nos Releases. Pergunta só o domínio e o e-mail do admin; cria o usuário, a unit e as regras de firewall, roda o `init` e mostra as URLs para o Google e o GitHub.
+- Página `/download` no servidor, com os instaladores da versão liberada já apontando para ele.
+
+### Fase 10: terminal remoto
+- App: botão **Terminal** na aba *Computers* e no menu da sessão. Abre uma janela de terminal dentro do app (emulador embutido; a avaliar: `egui_term`, baseado no `alacritty_terminal`). Várias abas por conexão.
+- CLI: `rdesk shell "PC"` usa o próprio terminal local.
+- Host: um pseudo-terminal (ConPTY no Windows, pty no Linux; a avaliar: `portable-pty`) num stream próprio da conexão iroh, com dados e redimensionamento.
+- Como quem roda:
+  - Windows: como o usuário logado no console (o serviço obtém o token dele); sem ninguém logado, o terminal é recusado. Shell padrão: PowerShell.
+  - Linux: como o usuário do host, com o shell dele.
+- Permissão:
+  - nova permissão `terminal` no tíquete (protocolo v3);
+  - *full control* inclui o terminal (o teclado já dá acesso equivalente);
+  - novo papel **terminal only**, para servidores e placas sem tela;
+  - *view only* e *files only* não incluem.
+- Host sem tela (placa sem X11): aceita sessões só de terminal e arquivos.
+- O histórico registra "terminal", e o aviso da fase 7 mostra "Fulano abriu um terminal".
 
 ## Ainda não verificado
 - Imagem Docker (o `Dockerfile` não foi construído aqui) e a unit do systemd numa VPS de verdade.
