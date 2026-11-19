@@ -45,7 +45,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: The tag matches the workspace version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
@@ -127,7 +127,7 @@ jobs:
           tar -czf "dist/rdesk-server-$VERSION-${{ matrix.platform }}.tar.gz"             -C target/release rdesk-server -C "$GITHUB_WORKSPACE/deploy" rdesk-server.service \
             rdesk-server-update.path rdesk-server-update.service
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.platform }}-${{ matrix.part }}
           path: dist/*
@@ -142,9 +142,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: dist-*
           path: dist
