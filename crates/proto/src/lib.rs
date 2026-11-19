@@ -1,5 +1,6 @@
 //! rdesk wire protocol.
 
+pub mod api;
 pub mod codec;
 pub mod key;
 pub mod msg;

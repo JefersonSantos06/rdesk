@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use rdesk_common::account::{self, Session};
 use rdesk_common::agent::{self, Agent};
 #[cfg(feature = "client")]
 use rdesk_common::auth;
@@ -60,9 +61,18 @@ enum Command {
     /// Manage saved hosts (client.toml).
     #[command(subcommand)]
     Hosts(HostsCmd),
-    /// Network settings shared by the host and the client (network.toml).
+    /// Sign in to your rdesk server (opens the browser: Google/GitHub + second factor).
+    Login {
+        /// Server address, e.g. rdesk.example.com (default: the last one used).
+        server: Option<String>,
+    },
+    /// Sign out (ends this computer's session on the server).
+    Logout,
+    /// Who is signed in, until when, and whether the relay answers.
+    Whoami,
+    /// Allowed users of the server (system admins only).
     #[command(subcommand)]
-    Net(NetCmd),
+    Users(UsersCmd),
     /// List the keys your SSH agent (1Password) offers.
     AgentKeys {
         #[arg(long)]
@@ -176,11 +186,29 @@ enum HostsCmd {
 }
 
 #[derive(Subcommand)]
-enum NetCmd {
-    /// Show the network settings and whether the relay answers.
-    Status,
-    /// Use your private relay (`https://relay.example.com`), or `off` for none.
-    Relay { url: String },
+enum UsersCmd {
+    List,
+    /// Allow an e-mail to sign in.
+    Add {
+        email: String,
+        #[arg(long)]
+        admin: bool,
+    },
+    Remove {
+        email: String,
+    },
+    /// Make a system admin (`on`) or a regular user (`off`).
+    Admin {
+        email: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// Block sign-in and end the user's sessions (`on`), or allow again (`off`).
+    Disable {
+        email: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -324,7 +352,10 @@ fn main() -> Result<()> {
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
         Command::Hosts(h) => hosts_cmd(h),
-        Command::Net(n) => net_cmd(n),
+        Command::Login { server } => runtime()?.block_on(login(server)),
+        Command::Logout => runtime()?.block_on(logout()),
+        Command::Whoami => runtime()?.block_on(whoami()),
+        Command::Users(u) => runtime()?.block_on(users_cmd(u)),
         Command::AgentKeys { agent_sock } => runtime()?.block_on(agent_keys(agent_sock)),
         #[cfg(feature = "client")]
         Command::Send { target, files, auth } => runtime()?.block_on(cli_send(target, files, auth)),
@@ -519,9 +550,7 @@ fn hosts_cmd(cmd: HostsCmd) -> Result<()> {
             let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
             let addr = addr.unwrap_or_default();
             if addr.is_empty() && config::load_network().relay.is_none() {
-                eprintln!(
-                    "note: no relay configured, so {alias} is reachable only with --addr (see `rdesk net relay`)"
-                );
+                eprintln!("note: not signed in to a server, so {alias} is reachable only with --addr (`rdesk login`)");
             }
             cfg.hosts.insert(
                 alias.clone(),
@@ -548,38 +577,123 @@ fn hosts_cmd(cmd: HostsCmd) -> Result<()> {
     }
 }
 
-fn net_cmd(cmd: NetCmd) -> Result<()> {
-    match cmd {
-        NetCmd::Relay { url } => {
-            let mut net = config::load_network();
-            net.relay = if matches!(url.trim(), "" | "off" | "none") { None } else { Some(url.trim().to_string()) };
-            rdesk_common::transport::relay_url(&net)?;
-            config::ensure_config_dir()?;
-            config::save_toml(config::NETWORK_CONFIG, &net)?;
-            match &net.relay {
-                Some(u) => println!("Relay set to {u}. Restart running hosts to use it."),
-                None => println!("No relay: computers are reached by address only."),
-            }
-            Ok(())
-        }
-        NetCmd::Status => runtime()?.block_on(net_status()),
-    }
+/// The saved session, or an error telling how to get one.
+fn session() -> Result<Session> {
+    Session::load().ok_or_else(|| anyhow!("not signed in: run `rdesk login <server>`"))
 }
 
-async fn net_status() -> Result<()> {
-    use rdesk_common::transport::{self, Role};
-    let net = config::load_network();
-    println!("Config:  {}", config::config_path(config::NETWORK_CONFIG)?.display());
-    let Some(url) = transport::relay_url(&net)? else {
-        println!("Relay:   none (direct addresses only)");
+async fn login(server: Option<String>) -> Result<()> {
+    let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
+    let server = match server.or_else(|| cfg.server.clone()) {
+        Some(s) => account::normalize_server(&s)?,
+        None => bail!("which server? `rdesk login rdesk.example.com`"),
+    };
+    eprintln!("Opening the browser to sign in to {server}…");
+    let s = account::login(&server, &rdesk_common::local_hostname(), |url| {
+        if account::open_browser(url).is_err() {
+            eprintln!("Open this address in your browser:\n  {url}");
+        }
+        Ok(())
+    })
+    .await?;
+    config::ensure_config_dir()?;
+    cfg.server = Some(s.server.clone());
+    config::save_toml(config::CLIENT_CONFIG, &cfg)?;
+    println!("Signed in to {} as {} (for {} days).", s.server_name, s.user.email, s.days_left());
+    Ok(())
+}
+
+async fn logout() -> Result<()> {
+    let Some(s) = Session::load() else {
+        println!("Not signed in.");
         return Ok(());
     };
+    if let Err(e) = s.api()?.logout().await {
+        eprintln!("warning: the server did not confirm ({e:#}); the local session is removed anyway");
+    }
+    Session::clear()?;
+    println!("Signed out of {}.", s.server_name);
+    Ok(())
+}
+
+async fn whoami() -> Result<()> {
+    use rdesk_common::transport::{self, Role};
+    let Some(s) = Session::load() else {
+        println!("Not signed in. Run `rdesk login <server>`.");
+        return Ok(());
+    };
+    match s.api()?.me().await {
+        Ok(me) => println!(
+            "{} on {} ({}){}, {} more day(s)",
+            me.email,
+            s.server_name,
+            s.server,
+            if me.is_admin { ", system admin" } else { "" },
+            s.days_left()
+        ),
+        Err(e) if e.downcast_ref::<account::NotSignedIn>().is_some() => {
+            Session::clear()?;
+            bail!("the server ended this session ({e:#}): run `rdesk login` again");
+        }
+        Err(e) => println!("{} on {} (server not reachable: {e:#})", s.user.email, s.server),
+    }
+    let net = config::load_network();
     let ep = transport::bind(None, &net, &Default::default(), Role::Client).await?;
     let r = transport::wait_relay(&ep, &net, std::time::Duration::from_secs(8)).await;
     ep.close().await;
     match r {
-        Ok(_) => println!("Relay:   {url} (reachable)"),
-        Err(e) => println!("Relay:   {url} — {e:#}"),
+        Ok(_) => println!("Relay: {} (reachable)", s.relay_url),
+        Err(e) => println!("Relay: {} — {e:#}", s.relay_url),
+    }
+    Ok(())
+}
+
+async fn users_cmd(cmd: UsersCmd) -> Result<()> {
+    let api = session()?.api()?;
+    let find = async |email: &str| -> Result<rdesk_proto::api::AdminUser> {
+        let e = email.trim().to_lowercase();
+        api.users().await?.into_iter().find(|u| u.email == e).ok_or_else(|| anyhow!("{email} is not on the list"))
+    };
+    match cmd {
+        UsersCmd::List => {
+            for u in api.users().await? {
+                let twofa = match (u.has_totp, u.passkeys) {
+                    (false, 0) => "2FA not set up yet".to_string(),
+                    (t, n) => format!(
+                        "2FA: {}{}",
+                        if t { "TOTP " } else { "" },
+                        if n > 0 { format!("{n} passkey(s)") } else { String::new() }
+                    ),
+                };
+                println!(
+                    "{}{}{}\t{twofa}",
+                    u.email,
+                    if u.is_admin { " (admin)" } else { "" },
+                    if u.disabled { " (disabled)" } else { "" }
+                );
+            }
+        }
+        UsersCmd::Add { email, admin } => {
+            let u = api.add_user(&email, admin).await?;
+            println!("{} can now sign in.", u.email);
+        }
+        UsersCmd::Remove { email } => {
+            let u = find(&email).await?;
+            api.remove_user(u.id).await?;
+            println!("Removed {}.", u.email);
+        }
+        UsersCmd::Admin { email, state } => {
+            let u = find(&email).await?;
+            let change = rdesk_proto::api::UpdateUser { is_admin: Some(state == "on"), disabled: None };
+            api.update_user(u.id, &change).await?;
+            println!("{}: admin {state}.", u.email);
+        }
+        UsersCmd::Disable { email, state } => {
+            let u = find(&email).await?;
+            let change = rdesk_proto::api::UpdateUser { is_admin: None, disabled: Some(state == "on") };
+            api.update_user(u.id, &change).await?;
+            println!("{}: disabled {state}.", u.email);
+        }
     }
     Ok(())
 }
@@ -606,6 +720,8 @@ struct Target {
 /// `target` is a saved name, a host ID, `ID@address`, or an address with `--id`.
 #[cfg(feature = "client")]
 fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
+    // Using rdesk needs an account on your server.
+    session()?;
     let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
     let mut entry = match cfg.hosts.get(target) {
         Some(e) => e.clone(),

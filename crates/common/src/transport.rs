@@ -6,7 +6,7 @@
 //! trust on first use: dialing an ID only ever reaches the machine holding its secret key.
 //!
 //! How a client finds the host:
-//! * **Relay** (`network.toml`): both sides keep a connection to your relay; the first
+//! * **Relay** (the rdesk server's, when signed in): both sides keep a connection to it; the first
 //!   packets go through it and iroh switches to a direct path once hole punching succeeds.
 //! * **Address** (the host entry's `addr`): tried directly — LAN, port forwarding, IPv6.
 //!
@@ -111,7 +111,7 @@ pub fn raise_stream_limits(conn: &Connection) {
     conn.set_max_concurrent_uni_streams(VarInt::from_u32(8));
 }
 
-/// The relay from `network.toml`, if one is set.
+/// The relay of the server this computer is signed in to, if any.
 pub fn relay_url(net: &NetworkConfig) -> Result<Option<RelayUrl>> {
     match net.relay.as_deref().map(str::trim) {
         None | Some("") => Ok(None),
@@ -124,7 +124,14 @@ pub fn relay_url(net: &NetworkConfig) -> Result<Option<RelayUrl>> {
 
 fn relay_mode(net: &NetworkConfig) -> Result<RelayMode> {
     Ok(match relay_url(net)? {
-        Some(url) => RelayMode::Custom(RelayMap::from_iter([url])),
+        Some(url) => {
+            let map = RelayMap::from_iter([url]);
+            // The relay only lets in signed-in endpoints.
+            RelayMode::Custom(match &net.token {
+                Some(t) => map.with_auth_token(t.clone()),
+                None => map,
+            })
+        }
         None => RelayMode::Disabled,
     })
 }
@@ -220,7 +227,7 @@ pub async fn connect(
         }
     }
     if addr.is_empty() {
-        bail!("no way to reach this computer: give its address, or set a relay (rdesk net relay <url>)");
+        bail!("no way to reach this computer: sign in to your rdesk server (rdesk login), or give its address");
     }
     let conn = match tokio::time::timeout(timeout, endpoint.connect(addr, rdesk_proto::ALPN)).await {
         Ok(Ok(c)) => c,
@@ -333,7 +340,7 @@ mod tests {
 
     #[test]
     fn relay_urls() {
-        let n = |r: &str| NetworkConfig { relay: Some(r.into()) };
+        let n = |r: &str| NetworkConfig { relay: Some(r.into()), token: None };
         assert!(relay_url(&NetworkConfig::default()).unwrap().is_none());
         assert!(relay_url(&n("  ")).unwrap().is_none());
         assert_eq!(relay_url(&n("relay.example.com")).unwrap().unwrap().as_str(), "https://relay.example.com/");

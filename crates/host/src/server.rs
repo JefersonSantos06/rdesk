@@ -155,7 +155,10 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
                     reporter.relay(Some(Ok(relay.clone())));
                     reporter.event(format!("Connected to the relay {relay}"), false);
                 }
-                Ok(false) => reporter.relay(None),
+                Ok(false) => {
+                    reporter.relay(None);
+                    reporter.event("Not signed in to an rdesk server: reachable only by address (LAN)", true);
+                }
                 Err(e) => {
                     reporter.relay(Some(Err(format!("{e:#}"))));
                     reporter.event(format!("Relay {relay}: {e:#} (direct connections still work)"), true);

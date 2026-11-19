@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 pub const HOST_CONFIG: &str = "host.toml";
 pub const CLIENT_CONFIG: &str = "client.toml";
 pub const AUTHORIZED_KEYS: &str = "authorized_keys";
-pub const NETWORK_CONFIG: &str = "network.toml";
 /// The host's secret key (32 bytes); its public half is the host ID.
 pub const HOST_KEY: &str = "host_id.key";
 pub const OPAQUE_SETUP: &str = "opaque_server_setup.bin";
@@ -171,6 +170,8 @@ pub struct ClientConfig {
     pub swap_cmd_ctrl: bool,
     /// Desktop app behaviour.
     pub app: AppSettings,
+    /// The rdesk server last signed in to (pre-filled on the sign-in page).
+    pub server: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,22 +191,19 @@ impl Default for AppSettings {
     }
 }
 
-/// `network.toml`: how this computer reaches others (shared by the host and the client).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+/// How this computer reaches others: the relay of the rdesk server it is signed in to,
+/// and the session token the relay asks for. Without a session there is no relay, and
+/// computers are reached by address only.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct NetworkConfig {
-    /// Your private relay, e.g. `https://relay.example.com`. Unset: no relay, so computers
-    /// are reached only through their address (LAN, port forwarding).
     pub relay: Option<String>,
+    pub token: Option<String>,
 }
 
 pub fn load_network() -> NetworkConfig {
-    match load_toml(NETWORK_CONFIG) {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!("{e:#}");
-            NetworkConfig::default()
-        }
+    match crate::account::Session::load() {
+        Some(s) => NetworkConfig { relay: Some(s.relay_url), token: Some(s.token) },
+        None => NetworkConfig::default(),
     }
 }
 

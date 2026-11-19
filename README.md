@@ -1,6 +1,6 @@
 # rdesk
 
-Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punching ([iroh](https://www.iroh.computer))** e um **relay privado opcional** no seu servidor, autenticação com **chave SSH do 1Password** (ou senha forte guardada no 1Password) e reconexão automática. Nada a instalar à parte.
+Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punching ([iroh](https://www.iroh.computer))** e um **servidor privado** seu (contas com Google/GitHub + 2FA, e o relay), autenticação com **chave SSH do 1Password** (ou senha forte guardada no 1Password) e reconexão automática. Nada a instalar à parte.
 
 - **Host** (máquina controlada): Windows, macOS, Linux (X11).
 - **Cliente** (viewer): macOS, Linux, Windows.
@@ -28,7 +28,7 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
 
 ## O app (tudo pela interface)
 
-Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Abre uma janela com três abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
+Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login o app não faz nada. Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
 
 **🖥 Computers** — suas máquinas:
 - *My computers*: cada máquina é cadastrada pelo seu **host ID** (mostrado na aba *This computer* dela).
@@ -44,7 +44,9 @@ Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Abre uma janel
 - *Who can log in*: **Set password…** (com *Generate a strong one* e *Read from 1Password*), chaves SSH (**Add SSH key…** do agente do 1Password ou colando a chave pública), remover.
 - *Options*: porta UDP, pasta dos arquivos recebidos, fps, qualidade, clipboard. *Activity*: conexões e **logins que falharam**. *Diagnostics*: o mesmo que `rdesk host check`.
 
-**⚙ Settings**: **Network** (o endereço do seu relay; salvar reinicia o host embutido), iniciar com o sistema (*off / ao fazer login / ao fazer login como administrador* — este último cria uma tarefa agendada sem o limite de 3 dias, pedindo permissão uma vez), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+**⚙ Settings**: **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login / ao fazer login como administrador* — este último cria uma tarefa agendada sem o limite de 3 dias, pedindo permissão uma vez), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+
+**🛡 Admin** (só admins do sistema): quais e-mails podem entrar, tornar admin, desativar, remover.
 
 Tray: *Open rdesk*, estado do host, *Turn host on/off*, *Copy host ID*, *Quit rdesk*.
 
@@ -54,16 +56,17 @@ Logs do app: `<pasta de config>/logs/app.log`; de cada sessão: `logs/session-<n
 
 Tudo o que o app faz também existe como comando; use o que preferir.
 
-### Rede: relay privado (opcional)
+### Servidor e login
 
-Sem relay, o cliente alcança o host só pelo endereço: na LAN, ou pela internet com a porta UDP 7420 redirecionada no roteador. Com um relay (um servidor seu, por exemplo numa VPS), basta o ID, de qualquer lugar:
+O servidor privado fica numa VPS sua: veja [docs/SERVER.md](docs/SERVER.md). Em cada computador:
 
 ```sh
-rdesk net relay https://relay.seu-dominio.com   # `off` desliga
-rdesk net status
+rdesk login rdesk.seu-dominio.com   # abre o navegador: Google/GitHub + 2FA
+rdesk whoami                        # quem está logado, até quando, e se o relay responde
+rdesk logout
 ```
 
-O mesmo arquivo `network.toml` vale para o host e o cliente da máquina. Nenhum endereço é publicado em DNS ou em servidores de terceiros.
+Logado, o relay do servidor é usado sozinho: de qualquer lugar basta o host ID. A sessão vale 10 dias. Nenhum endereço é publicado em DNS ou em servidores de terceiros.
 
 ### Host (PC de casa)
 

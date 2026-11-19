@@ -1,7 +1,10 @@
-//! The desktop app: one window with three pages (Computers, This computer, Settings),
-//! a tray icon, and the built-in host. Closing the window keeps it in the tray, like
-//! AnyDesk; a second launch just shows the running window.
+//! The desktop app: one window with its pages (Computers, This computer, Settings, and
+//! Admin for system admins), a tray icon, and the built-in host. Nothing but the sign-in
+//! screen is available until the user signs in to the rdesk server. Closing the window
+//! keeps it in the tray, like AnyDesk; a second launch just shows the running window.
 
+mod account;
+mod admin;
 mod autostart;
 mod computers;
 #[cfg(feature = "host")]
@@ -43,6 +46,7 @@ enum Page {
     #[cfg(feature = "host")]
     ThisComputer,
     Settings,
+    Admin,
 }
 
 pub fn run(opts: AppOpts) -> Result<()> {
@@ -105,6 +109,8 @@ pub fn run(opts: AppOpts) -> Result<()> {
 
 struct App {
     page: Page,
+    account: account::Account,
+    admin: admin::AdminPage,
     computers: computers::Computers,
     #[cfg(feature = "host")]
     host: host_page::HostPage,
@@ -128,16 +134,19 @@ impl App {
         let shared = Arc::new(Mutex::new(computers::Snapshot::default()));
         let (wtx, wrx) = tokio::sync::mpsc::unbounded_channel();
         computers::spawn_worker(shared.clone(), wrx, ctx.clone());
+        let account = account::Account::new(&ctx);
         #[cfg(feature = "host")]
         let host = {
             let mut h = host_page::HostPage::new(exe.clone(), ctx.clone());
-            if host_page::remembered_enabled() {
+            if account.signed_in() && host_page::remembered_enabled() {
                 h.start();
             }
             h
         };
         Self {
             page: Page::Computers,
+            account,
+            admin: admin::AdminPage::new(),
             computers: computers::Computers::new(exe.clone(), shared, wtx),
             #[cfg(feature = "host")]
             host,
@@ -168,9 +177,14 @@ impl App {
         match cmd {
             AppCmd::Show => self.show_window(ctx),
             AppCmd::Quit => self.quit(ctx),
-            AppCmd::ToggleHost => {
+            AppCmd::ToggleHost =>
+            {
                 #[cfg(feature = "host")]
-                self.host.toggle();
+                if self.account.signed_in() {
+                    self.host.toggle();
+                } else {
+                    self.show_window(ctx);
+                }
             }
             AppCmd::CopyFingerprint => {
                 #[cfg(feature = "host")]
@@ -191,6 +205,8 @@ impl App {
         #[cfg(feature = "host")]
         all.extend(self.host.toast.as_ref());
         all.extend(self.settings.toast.as_ref());
+        all.extend(self.account.toast.as_ref());
+        all.extend(self.admin.toast.as_ref());
         all.into_iter().filter(|t| t.2.elapsed() < Duration::from_secs(12)).max_by_key(|t| t.2)
     }
 
@@ -198,18 +214,28 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("rdesk").strong().size(22.0));
             ui.add_space(16.0);
+            let ctx = ui.ctx().clone();
+            let mut clicked = None;
             let mut tab = |ui: &mut egui::Ui, page: Page, label: &str| {
                 if ui.selectable_label(self.page == page, RichText::new(label).size(15.0)).clicked() {
-                    self.page = page;
-                    if page == Page::Settings {
-                        self.settings.refresh();
-                    }
+                    clicked = Some(page);
                 }
             };
             tab(ui, Page::Computers, "🖥  Computers");
             #[cfg(feature = "host")]
             tab(ui, Page::ThisComputer, "🏠  This computer");
             tab(ui, Page::Settings, "⚙  Settings");
+            if self.account.is_admin() {
+                tab(ui, Page::Admin, "🛡  Admin");
+            }
+            if let Some(page) = clicked {
+                self.page = page;
+                match page {
+                    Page::Settings => self.settings.refresh(),
+                    Page::Admin => self.admin.reload(&ctx, self.account.session()),
+                    _ => {}
+                }
+            }
             #[cfg(feature = "host")]
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let on = self.host.running();
@@ -235,14 +261,27 @@ impl eframe::App for App {
         while let Ok(cmd) = self.cmds.try_recv() {
             self.handle(cmd, ctx);
         }
+        self.account.tick();
         self.computers.tick();
         self.settings.tick();
+        self.admin.tick(ctx, self.account.session());
+        if std::mem::take(&mut self.account.changed) {
+            if !self.account.is_admin() && self.page == Page::Admin {
+                self.page = Page::Computers;
+            }
+            // Signing in or out changes the relay (and its token): start or stop the host.
+            #[cfg(feature = "host")]
+            if self.account.signed_in() {
+                if host_page::remembered_enabled() {
+                    self.host.suspend();
+                    self.host.start();
+                }
+            } else {
+                self.host.suspend();
+            }
+        }
         #[cfg(feature = "host")]
         {
-            if std::mem::take(&mut self.settings.network_changed) {
-                // The built-in host binds its endpoint with the relay at start.
-                self.host.restart();
-            }
             self.host.tick();
             if self.host.quit_requested {
                 self.host.quit_requested = false;
@@ -269,6 +308,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.account.signed_in() {
+            egui::CentralPanel::default().show(ui, |ui| self.account.login_screen(ui));
+            return;
+        }
         egui::Panel::top("nav").show(ui, |ui| {
             ui.add_space(6.0);
             self.nav(ui);
@@ -289,6 +332,7 @@ impl eframe::App for App {
                             #[cfg(feature = "host")]
                             Page::ThisComputer => "Others can connect to this computer while the host is on",
                             Page::Settings => "Changes are saved immediately",
+                            Page::Admin => "Only these e-mails can sign in to your server",
                         });
                     }
                 }
@@ -303,7 +347,11 @@ impl eframe::App for App {
             Page::Computers => self.computers.show(ui),
             #[cfg(feature = "host")]
             Page::ThisComputer => self.host.show(ui),
-            Page::Settings => self.settings.show(ui),
+            Page::Settings => {
+                self.account.settings_section(ui);
+                self.settings.show(ui);
+            }
+            Page::Admin => self.admin.show(ui, self.account.session()),
         });
     }
 

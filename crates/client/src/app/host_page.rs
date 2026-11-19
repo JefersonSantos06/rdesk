@@ -153,6 +153,13 @@ impl HostPage {
         remember_enabled(false);
     }
 
+    /// Stop because the user signed out; it starts again on the next sign-in if it was on.
+    pub(super) fn suspend(&mut self) {
+        if let Some(h) = self.handle.take() {
+            self.rt.block_on(h.shutdown());
+        }
+    }
+
     /// Restart if running (after a settings change).
     pub(super) fn restart(&mut self) {
         if let Some(h) = self.handle.take() {

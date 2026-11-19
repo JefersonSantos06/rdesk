@@ -1,5 +1,6 @@
 //! Shared rdesk logic used by both host and client.
 
+pub mod account;
 pub mod agent;
 pub mod auth;
 pub mod clipboard;

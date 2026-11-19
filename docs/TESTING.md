@@ -4,9 +4,17 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 
 ## Rede
 - [ ] Sem relay, na LAN: `rdesk connect <ID>@<ip-da-lan>` conecta; a barra mostra RTT `(direct)`.
-- [ ] Com relay (`rdesk net relay …` nas duas pontas): conecta só com o ID, de outra rede (4G); a barra começa em `(relay)` e passa a `(direct)` quando o hole punching funciona.
+- [ ] Logado no servidor (`rdesk login …` nas duas pontas): conecta só com o ID, de outra rede (4G); a barra começa em `(relay)` e passa a `(direct)` quando o hole punching funciona.
 - [ ] Relay fora do ar: o host mostra *Relay unreachable* e conexões diretas continuam funcionando.
 - [ ] ID errado (um caractere trocado) → não conecta ("no answer"), nada é enviado.
+
+## Servidor e contas
+- [ ] App sem login: só a tela de login aparece; o tray não liga o host.
+- [ ] Login com Google e com GitHub; e-mail fora da lista → "not allowed".
+- [ ] Primeiro login pede para cadastrar o 2FA (passkey ou TOTP); os seguintes pedem o 2FA sempre.
+- [ ] Código TOTP já usado é recusado; 5 códigos errados encerram a tentativa.
+- [ ] *Admin*: adicionar e-mail, tornar admin, desativar (a pessoa é deslogada), remover.
+- [ ] Sessão revogada/desativada no servidor: o app volta para a tela de login ao abrir.
 
 ## Autenticação
 - [ ] Chave do 1Password: aparece a aprovação/Touch ID uma vez; conecta.

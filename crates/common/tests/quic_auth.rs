@@ -134,7 +134,7 @@ async fn local_relay() -> (iroh_relay::server::Server, NetworkConfig) {
     cfg.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, 0)));
     let srv = Server::spawn(cfg).await.unwrap();
     let url = format!("http://{}", srv.http_addr().unwrap());
-    (srv, NetworkConfig { relay: Some(url) })
+    (srv, NetworkConfig { relay: Some(url), token: None })
 }
 
 #[tokio::test(flavor = "multi_thread")]
