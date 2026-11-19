@@ -16,7 +16,7 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 
 ## Baixar
 
-As versões publicadas ficam nos [Releases](../../releases): app para Windows e Linux (x64 e arm64, também em `.deb`) e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
+As versões publicadas ficam nos [Releases](../../releases): app para Windows, Linux (x64 e arm64, também em `.deb`) e Mac com Apple Silicon (`rdesk.app`; na primeira vez, botão direito → *Abrir*), e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Compilar
 

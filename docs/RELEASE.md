@@ -9,11 +9,12 @@ Cada versão é um GitHub Release com os binários e um `release.json` assinado.
 | `rdesk-<versão>-windows-x86_64.zip` | O app (cliente + host) para Windows |
 | `rdesk-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O app para Linux (PC e Raspberry/Orange Pi) |
 | `rdesk_<versão>_amd64.deb`, `…_arm64.deb` | O app como pacote Debian/Ubuntu/Raspberry Pi OS |
+| `rdesk-<versão>-macos-aarch64.tar.gz` | O `rdesk.app` para Mac com Apple Silicon (assinado só localmente: na primeira vez, botão direito → *Abrir*) |
 | `rdesk-server-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O servidor, com a unit do systemd |
 | `release.json` | Versão, versão do protocolo, SHA-256 e tamanho de cada arquivo |
 | `release.json.sig` | Assinatura Ed25519 do `release.json` (hex) |
 
-O app para Linux é compilado no Ubuntu 24.04 (precisa do PipeWire 1.x, para a captura no Wayland) e roda no Ubuntu 24.04 ou mais novo, no Debian 13 e no Raspberry Pi OS atual (trixie); no Debian 12 e no Ubuntu 22.04, compile a partir do código. O servidor é compilado no Ubuntu 22.04 e também roda em VPS com Debian 12. O instalador do Windows (Inno Setup) entra na fase 9; o macOS continua só no CI.
+O app para Linux é compilado no Ubuntu 24.04 (precisa do PipeWire 1.x, para a captura no Wayland) e roda no Ubuntu 24.04 ou mais novo, no Debian 13 e no Raspberry Pi OS atual (trixie); no Debian 12 e no Ubuntu 22.04, compile a partir do código. O servidor é compilado no Ubuntu 22.04 e também roda em VPS com Debian 12. O app para Mac (Apple Silicon, macOS 11+) não tem assinatura da Apple: na primeira vez, botão direito → *Abrir* (ou `xattr -dr com.apple.quarantine rdesk.app`); como host, o macOS pede Gravação de Tela e Acessibilidade. O instalador do Windows (Inno Setup) entra na fase 9.
 
 ## Configuração (uma vez)
 
@@ -49,7 +50,7 @@ Para gerar chaves novas no futuro: `cargo run -p rdesk-release -- keygen --out <
    git push origin v0.2.0
    ```
 
-3. O workflow *Release* (`.github/workflows/release.yml`):
+3. O workflow *Release* (`.github/workflows/release.yml`), que também gera o `rdesk.app` do Mac:
    - confere se a tag bate com a versão do `Cargo.toml`;
    - roda os testes e compila Windows x64, Linux x64 e Linux arm64;
    - gera os `.zip`, `.tar.gz` e `.deb`;

@@ -29,6 +29,10 @@ jobs:
           - os: ubuntu-24.04-arm
             platform: linux-aarch64
             part: app
+          # Apple Silicon (macOS 14).
+          - os: macos-14
+            platform: macos-aarch64
+            part: app
           # The server is plain Rust: Ubuntu 22.04 (glibc 2.35) also covers Debian 12 VPSs.
           - os: ubuntu-22.04
             platform: linux-x86_64
@@ -82,6 +86,33 @@ jobs:
           mkdir dist
           tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release rdesk
           cargo deb -p rdesk --no-build --output dist/
+
+      # macOS: rdesk.app, signed ad hoc (not by Apple: the first launch needs right-click → Open).
+      - name: Package (macOS)
+        if: matrix.part == 'app' && runner.os == 'macOS'
+        run: |
+          mkdir -p dist stage/rdesk.app/Contents/MacOS
+          cp target/release/rdesk stage/rdesk.app/Contents/MacOS/rdesk
+          cat > stage/rdesk.app/Contents/Info.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key><string>dev.rdesk.rdesk</string>
+            <key>CFBundleName</key><string>rdesk</string>
+            <key>CFBundleDisplayName</key><string>rdesk</string>
+            <key>CFBundleExecutable</key><string>rdesk</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - stage/rdesk.app
+          codesign --verify --verbose stage/rdesk.app
+          tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C stage rdesk.app
 
       # The server
       - name: Test and build the server

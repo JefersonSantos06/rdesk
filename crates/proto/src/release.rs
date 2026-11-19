@@ -39,7 +39,7 @@ pub struct ReleaseFile {
     /// Asset name on the release, e.g. `rdesk-0.2.0-windows-x86_64.zip`.
     pub name: String,
     pub kind: FileKind,
-    /// `windows-x86_64`, `linux-x86_64` or `linux-aarch64`.
+    /// `windows-x86_64`, `linux-x86_64`, `linux-aarch64` or `macos-aarch64`.
     pub platform: String,
     /// Hex.
     pub sha256: String,
@@ -49,7 +49,7 @@ pub struct ReleaseFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
-    /// The app (client + host): a `.zip` on Windows, a `.tar.gz` on Linux.
+    /// The app (client + host): a `.zip` on Windows, a `.tar.gz` elsewhere (with `rdesk.app` on macOS).
     App,
     /// The app as a Debian package.
     Deb,
@@ -67,7 +67,7 @@ impl FileKind {
     }
 }
 
-pub const PLATFORMS: [&str; 3] = ["windows-x86_64", "linux-x86_64", "linux-aarch64"];
+pub const PLATFORMS: [&str; 4] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64"];
 
 /// What an asset is, from its name:
 /// `rdesk-<v>-<platform>.zip|.tar.gz`, `rdesk-server-<v>-<platform>.tar.gz`,
@@ -119,6 +119,7 @@ mod tests {
         assert_eq!(classify("rdesk_0.2.0_arm64.deb", v), Some((FileKind::Deb, "linux-aarch64")));
         assert_eq!(classify("rdesk-0.1.0-linux-x86_64.tar.gz", v), None, "other version");
         assert_eq!(classify("rdesk-0.2.0-windows-x86_64.tar.gz", v), None);
+        assert_eq!(classify("rdesk-0.2.0-macos-aarch64.tar.gz", v), Some((FileKind::App, "macos-aarch64")));
         assert_eq!(classify("rdesk-0.2.0-linux-x86_64.zip", v), None);
         assert_eq!(classify("notes.txt", v), None);
     }
