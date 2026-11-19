@@ -171,6 +171,12 @@ pub struct Machine {
     /// Tailscale), without the server's permission.
     #[serde(default)]
     pub direct: bool,
+    /// The rdesk version it runs (from its last sync).
+    #[serde(default)]
+    pub version: String,
+    /// Gets released versions with the test computers.
+    #[serde(default)]
+    pub ring: Ring,
 }
 
 /// What a share grants.
@@ -380,6 +386,10 @@ pub struct AgentSync {
     /// Direct access is on: its own password or key also open it on the local network.
     #[serde(default)]
     pub direct: bool,
+    /// The newest update offer the host has already seen (its version): the server answers
+    /// at once only when there is a newer one.
+    #[serde(default)]
+    pub update_seen: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,6 +402,9 @@ pub struct AgentSyncReply {
     /// for a while after a rotation.
     #[serde(default)]
     pub server_keys: Vec<String>,
+    /// The version released for this computer, if any.
+    #[serde(default)]
+    pub update: Option<UpdateOffer>,
 }
 
 /// Tickets of `user_id` issued at or before `before` are void on this machine.
@@ -527,4 +540,82 @@ pub struct CreatedEnrollKey {
     /// Shown only now: the server keeps just its hash.
     pub key: String,
     pub info: EnrollKey,
+}
+
+// ---- updates (phase 8) ------------------------------------------------------------
+
+/// `GET` (admins): versions found on GitHub and what is released.
+pub const PATH_ADMIN_RELEASES: &str = "/api/admin/releases";
+/// `GET ?machine=<host ID>`, no authentication: the version released for that computer
+/// (for the Linux updater, which runs apart from the host).
+pub const PATH_UPDATE_LATEST: &str = "/api/update/latest";
+
+/// What a computer may update to: the release manifest and its signature as published.
+/// The host checks the signature with the keys built into it, so the server can not
+/// hand it anything rdesk did not sign; files come from `download_base` + their name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateOffer {
+    pub version: String,
+    /// `release.json`, exactly as signed.
+    pub manifest: String,
+    /// `release.json.sig` (hex).
+    pub signature: String,
+    pub download_base: String,
+}
+
+/// Which computers get a released version first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Ring {
+    /// Test computers (marked by an admin).
+    Test,
+    #[default]
+    All,
+}
+
+/// `GET /api/admin/releases`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Releases {
+    /// Newest first.
+    pub releases: Vec<ReleaseInfo>,
+    /// Released to the test computers (they also get what is released to everyone).
+    pub test: Option<String>,
+    /// Released to everyone.
+    pub all: Option<String>,
+    /// This server's version.
+    pub server_version: String,
+    /// When GitHub was last asked, and what went wrong if it failed.
+    pub last_check: Option<i64>,
+    pub check_error: Option<String>,
+    /// The server can update itself (systemd, not a container).
+    #[serde(default)]
+    pub server_can_update: bool,
+    /// What its last update did ("updated to 0.4.0", "installing 0.4.1…", an error).
+    #[serde(default)]
+    pub server_update: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub version: String,
+    /// The release notes (GitHub's text).
+    pub notes: String,
+    pub published_at: i64,
+    pub protocol: u16,
+    /// Platforms it has files for.
+    pub platforms: Vec<String>,
+    /// Computers running it now.
+    pub running: usize,
+}
+
+/// `POST /api/admin/releases/{version}/release`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ReleaseTo {
+    pub ring: Ring,
+}
+
+/// `PUT /api/admin/machines/{id}/ring`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SetRing {
+    pub ring: Ring,
 }

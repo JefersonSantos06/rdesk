@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rdesk_common::config;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
@@ -232,6 +232,7 @@ pub fn install() -> Result<String> {
         actions: Some(vec![restart.clone(), restart.clone(), restart]),
     })?;
     let firewall = firewall_allow(&exe);
+    start_menu_shortcut(&exe);
     service.start::<&str>(&[])?;
     wait_for(&service, ServiceState::Running, Duration::from_secs(20))?;
 
@@ -408,5 +409,123 @@ fn supervise(stop: &mpsc::Receiver<()>) {
     }
     if let Some(a) = agent {
         a.stop();
+    }
+}
+
+// ---- updates --------------------------------------------------------------------------
+
+/// The previous program, kept for going back (`C:\Program Files\rdesk\rdesk.old.exe`).
+fn previous_exe() -> PathBuf {
+    program_dir().join("rdesk.old.exe")
+}
+
+/// Is the host the service runs up and, if registered, in touch with its relay?
+async fn healthy() -> bool {
+    use crate::control::HostState;
+    use crate::ipc::{Request, Response, request};
+    match tokio::time::timeout(Duration::from_secs(3), request(&Request::Status)).await {
+        Ok(Ok(Response::Status(s))) => {
+            matches!(s.state, HostState::Listening(_)) && (s.registration.is_none() || matches!(s.relay, Some(Ok(_))))
+        }
+        _ => false,
+    }
+}
+
+async fn wait_healthy(max: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < max {
+        if healthy().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    false
+}
+
+fn start_stop(start: bool) -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service =
+        manager.open_service(NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START | ServiceAccess::STOP)?;
+    if start {
+        service.start::<&str>(&[])?;
+        wait_for(&service, ServiceState::Running, Duration::from_secs(30))
+    } else {
+        if service.query_status()?.current_state != ServiceState::Stopped {
+            let _ = service.stop();
+        }
+        wait_for(&service, ServiceState::Stopped, Duration::from_secs(30))
+    }
+}
+
+/// `rdesk service apply-update --version V`, run from the downloaded program in
+/// `%ProgramData%\rdesk\updates\V` by the service's host (as SYSTEM). Swaps the program and
+/// goes back to the previous one if the new host does not come up within two minutes.
+pub fn apply_update(version: &str) -> Result<()> {
+    require_admin()?;
+    let me = std::env::current_exe()?;
+    let staging = super::update::staging_dir(version)?;
+    ensure!(
+        same_file(&me, &staging.join("rdesk.exe")),
+        "run from the downloaded update ({}), not from {}",
+        staging.display(),
+        me.display()
+    );
+    let (target, old) = (program_exe(), previous_exe());
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    tracing::info!("installing rdesk {version}");
+
+    start_stop(false)?;
+    // A running copy (the app in the tray) can be renamed, not overwritten.
+    if old.exists() && std::fs::remove_file(&old).is_err() {
+        let aside = program_dir().join(format!("rdesk.old-{}.exe", std::process::id()));
+        let _ = std::fs::rename(&old, aside);
+    }
+    std::fs::rename(&target, &old).context("setting the current program aside")?;
+    if let Err(e) = std::fs::copy(&me, &target) {
+        let _ = std::fs::rename(&old, &target);
+        let _ = start_stop(true);
+        return Err(anyhow::Error::from(e).context("copying the new program"));
+    }
+    start_stop(true)?;
+    if rt.block_on(wait_healthy(Duration::from_secs(120))) {
+        std::fs::write(staging.join(super::update::INSTALLED), b"")?;
+        tracing::info!("rdesk {version} is running");
+        // Earlier downloads are not needed any more.
+        if let Some(all) = staging.parent()
+            && let Ok(dirs) = std::fs::read_dir(all)
+        {
+            for d in dirs.flatten().filter(|d| d.path() != staging) {
+                let _ = std::fs::remove_dir_all(d.path());
+            }
+        }
+        return Ok(());
+    }
+
+    tracing::warn!("rdesk {version} did not come up: going back to the previous program");
+    std::fs::write(staging.join(super::update::FAILED), b"")?;
+    start_stop(false)?;
+    std::fs::remove_file(&target).context("removing the new program")?;
+    std::fs::rename(&old, &target).context("putting the previous program back")?;
+    start_stop(true)?;
+    bail!("rdesk {version} did not start correctly; the previous version is back")
+}
+
+/// A Start menu entry for everyone, to the program the service keeps up to date.
+fn start_menu_shortcut(exe: &Path) {
+    let Some(data) = std::env::var_os("ProgramData") else { return };
+    let lnk = PathBuf::from(data).join(r"Microsoft\Windows\Start Menu\Programs\rdesk.lnk");
+    let script = format!(
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; \
+         $s.WorkingDirectory = '{}'; $s.Description = 'rdesk'; $s.Save()",
+        lnk.display(),
+        exe.display(),
+        program_dir().display()
+    );
+    let ok = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        tracing::warn!("could not create the Start menu entry");
     }
 }

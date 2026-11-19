@@ -82,6 +82,19 @@ enum Command {
     Logout,
     /// Who is signed in, until when, and whether the relay answers.
     Whoami,
+    /// Install the version released on your server (Linux, as root: the .deb; run by
+    /// rdesk-update.timer).
+    Update {
+        /// Your rdesk server.
+        #[arg(long, env = "RDESK_SERVER")]
+        server: String,
+        /// This computer's host ID: test computers get versions first.
+        #[arg(long, env = "RDESK_MACHINE")]
+        machine: Option<String>,
+        /// Only say whether there is something to install.
+        #[arg(long)]
+        check: bool,
+    },
     /// Allowed users of the server (system admins only).
     #[command(subcommand)]
     Users(UsersCmd),
@@ -144,6 +157,12 @@ enum ServiceCmd {
     /// Run by Windows (not by hand).
     #[command(hide = true)]
     Run,
+    /// Install a downloaded version (run by the service's host, from the download).
+    #[command(hide = true)]
+    ApplyUpdate {
+        #[arg(long)]
+        version: String,
+    },
 }
 
 #[cfg(feature = "host")]
@@ -511,12 +530,12 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     match cmd {
         ServiceCmd::Install => {
             println!("{}", service::install()?);
-            // The service replaces "start as administrator at login" (a scheduled task).
+            // Starting at login now opens the program the service keeps up to date, normally
+            // (the service does the administrator part).
             #[cfg(feature = "client")]
-            if rdesk_client::app::current_autostart() == rdesk_client::app::Autostart::LoginAdmin {
-                let exe = std::env::current_exe()?;
-                rdesk_client::app::apply_autostart(rdesk_client::app::Autostart::Login, &exe)?;
-                println!("The app now starts normally at login (the service does the administrator part).");
+            if rdesk_client::app::current_autostart() != rdesk_client::app::Autostart::Off {
+                rdesk_client::app::apply_autostart(rdesk_client::app::Autostart::Login, &service::program_exe())?;
+                println!("At login the app starts from {}.", service::program_exe().display());
             }
             Ok(())
         }
@@ -563,6 +582,7 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
             Ok(())
         }
         ServiceCmd::Run => service::run(),
+        ServiceCmd::ApplyUpdate { version } => service::apply_update(&version),
     }
 }
 
@@ -620,12 +640,18 @@ fn main() -> Result<()> {
     let agent = false;
     #[cfg(all(windows, feature = "host"))]
     let service = matches!(cli.cmd, Some(Command::Service(ServiceCmd::Run)));
+    #[cfg(all(windows, feature = "host"))]
+    let updating = matches!(cli.cmd, Some(Command::Service(ServiceCmd::ApplyUpdate { .. })));
+    #[cfg(not(all(windows, feature = "host")))]
+    let updating = false;
     #[cfg(not(all(windows, feature = "host")))]
     let service = false;
     if app {
         init_file_logging(cli.verbose, config::ensure_config_dir(), "app.log")
     } else if agent {
         init_file_logging(cli.verbose, config::ensure_host_dir(), "host.log")
+    } else if updating {
+        init_file_logging(cli.verbose, config::ensure_host_dir(), "update.log")
     } else if service {
         init_file_logging(cli.verbose, config::ensure_host_dir(), "service.log")
     } else {
@@ -656,6 +682,7 @@ fn main() -> Result<()> {
         Command::Login { server } => runtime()?.block_on(login(server)),
         Command::Logout => runtime()?.block_on(logout()),
         Command::Whoami => runtime()?.block_on(whoami()),
+        Command::Update { server, machine, check } => runtime()?.block_on(update(&server, machine, check)),
         Command::Users(u) => runtime()?.block_on(users_cmd(u)),
         Command::AgentKeys { agent_sock } => runtime()?.block_on(agent_keys(agent_sock)),
         #[cfg(feature = "client")]
@@ -1179,6 +1206,54 @@ async fn groups_cmd(cmd: GroupsCmd) -> Result<()> {
             println!("You left {}.", g.name);
         }
     }
+    Ok(())
+}
+
+/// `rdesk update`: the released version, checked against the release keys built in here.
+async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()> {
+    use rdesk_common::release::{check_file, download, file_for, this_platform, verify_manifest};
+    use rdesk_proto::release::{FileKind, parse_version};
+    let base = account::normalize_server(server)?;
+    let mut url = format!("{base}{}", rdesk_proto::api::PATH_UPDATE_LATEST);
+    if let Some(m) = machine.filter(|m| !m.trim().is_empty()) {
+        url.push_str(&format!("?machine={}", m.trim()));
+    }
+    let offer: Option<rdesk_proto::api::UpdateOffer> = serde_json::from_slice(&download(&url, 1 << 20).await?)?;
+    let Some(offer) = offer else {
+        println!("Nothing released on {base} yet.");
+        return Ok(());
+    };
+    let mine = env!("CARGO_PKG_VERSION");
+    if parse_version(&offer.version) <= parse_version(mine) {
+        println!("Up to date ({mine}; released: {}).", offer.version);
+        return Ok(());
+    }
+    let m = verify_manifest(offer.manifest.as_bytes(), &offer.signature)?;
+    if m.version != offer.version {
+        bail!("the signed manifest is for {}, not {}", m.version, offer.version);
+    }
+    if check {
+        println!("rdesk {} can be installed (this is {mine}).", m.version);
+        return Ok(());
+    }
+    if !cfg!(target_os = "linux") {
+        bail!("rdesk update installs Debian packages (Linux); on Windows the service updates by itself");
+    }
+    let platform = this_platform();
+    let file =
+        file_for(&m, FileKind::Deb, &platform).ok_or_else(|| anyhow!("{} has no package for {platform}", m.version))?;
+    let data = download(&format!("{}{}", offer.download_base, file.name), file.size).await?;
+    check_file(file, &data)?;
+    let dir = std::path::Path::new("/var/cache/rdesk");
+    std::fs::create_dir_all(dir)?;
+    let deb = dir.join(&file.name);
+    std::fs::write(&deb, &data)?;
+    let status = std::process::Command::new("dpkg").arg("-i").arg(&deb).status()?;
+    if !status.success() {
+        bail!("dpkg -i {} failed", deb.display());
+    }
+    let _ = std::fs::remove_file(&deb);
+    println!("Installed rdesk {} (hosts restart when nobody is connected).", m.version);
     Ok(())
 }
 

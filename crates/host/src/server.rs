@@ -33,6 +33,9 @@ pub struct RunOpts {
     pub agent: bool,
 }
 
+/// Sessions open now (for the update watcher of `run`, which has no `Server`).
+static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Failed-login bookkeeping is per IP; connections through the relay share one bucket
 /// (their client keys are throwaway, so per-key limits would be useless).
 const RELAYED: IpAddr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
@@ -53,6 +56,8 @@ pub(crate) struct Server {
     require_local: bool,
     /// Direct access is on: who may log in with this computer's own password or key alone.
     direct: Option<DirectConfig>,
+    /// Run by the Windows service: it installs released versions by itself.
+    pub(crate) agent: bool,
     /// The networks this computer is on ("local network" includes them).
     local_nets: crate::localnet::LocalNets,
     /// Ask the sync loop to report now (a session started or ended).
@@ -190,6 +195,24 @@ pub async fn run(opts: RunOpts) -> Result<()> {
             let _ = ctl.send(Ctl::Stop);
         });
     }
+    // Updated underneath (a package, the Windows service): stop when nobody is connected,
+    // and whatever started us (systemd, the service) starts the new program.
+    if let Ok(exe) = std::env::current_exe() {
+        let ctl = ctl.clone();
+        let written = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let first = written(&exe);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if first.is_some() && written(&exe) != first && SESSIONS.load(std::sync::atomic::Ordering::Relaxed) == 0
+                {
+                    tracing::info!("this program was updated: stopping so the new version starts");
+                    let _ = ctl.send(Ctl::Stop);
+                    return;
+                }
+            }
+        });
+    }
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("shutting down");
@@ -315,6 +338,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         ticket,
         require_local: cfg.require_local,
         direct: direct.then(|| cfg.direct.clone()),
+        agent: opts.agent,
         local_nets: if direct { crate::localnet::LocalNets::watch() } else { Default::default() },
         sync_now: tokio::sync::Notify::new(),
         records: std::sync::Mutex::new(Vec::new()),
@@ -531,6 +555,7 @@ impl Server {
             self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
         }
         self.reporter.session(Some(info.clone()));
+        SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let shared = self.shared.clone();
         let reporter = self.reporter.clone();
         let c2 = conn.clone();
@@ -540,6 +565,7 @@ impl Server {
                 tracing::warn!("session error: {e:#}");
             }
             reporter.session_ended(&info.peer, info.since);
+            SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             me.records
                 .lock()
                 .unwrap()

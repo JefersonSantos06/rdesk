@@ -51,6 +51,8 @@ pub struct ServerConfig {
     pub tls_key: Option<std::path::PathBuf>,
     pub google: Option<OAuthApp>,
     pub github: Option<OAuthApp>,
+    /// Where new rdesk versions are published (GitHub `owner/repo`); empty: do not look.
+    pub update_repo: String,
     /// Log in by typing an allowed e-mail, without Google/GitHub (2FA still required).
     /// Only honoured with `tls = "none"` and a loopback `public_url`: for tests.
     pub dev_login: bool,
@@ -68,6 +70,7 @@ impl Default for ServerConfig {
             relay_quic_port: 7842,
             tls_cert: None,
             tls_key: None,
+            update_repo: "JefersonSantos06/rdesk".into(),
             google: None,
             github: None,
             dev_login: false,

@@ -25,6 +25,8 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
     let mut cursor = 0;
     let mut backoff = Duration::from_secs(2);
     let mut reported_error = false;
+    // The newest version offered so far (the server answers at once only for a newer one).
+    let mut update_seen = String::new();
     loop {
         let addrs: Vec<String> = ep.addr().ip_addrs().map(|a| a.to_string()).collect();
         let sessions: Vec<_> = std::mem::take(&mut *server.records.lock().unwrap());
@@ -37,6 +39,7 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
             sessions,
             server_key: policy.server_keys.read().unwrap().first().map(hex::encode).unwrap_or_default(),
             direct: server.direct_on(),
+            update_seen: update_seen.clone(),
         };
         // Sent again next time unless the server confirms them.
         let requeue = |server: &Server, req: AgentSync| {
@@ -77,6 +80,12 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                     }
                 }
                 server.enforce_revocations().await;
+                if let Some(offer) = reply.update
+                    && offer.version != update_seen
+                {
+                    update_seen = offer.version.clone();
+                    crate::update::offered(offer, &server, &reporter);
+                }
                 if cursor == 0 || reported_error {
                     reporter.registration(Some(Ok(label.clone())));
                     reported_error = false;

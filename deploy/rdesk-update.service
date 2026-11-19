@@ -1,0 +1,15 @@
+# /usr/lib/systemd/system/rdesk-update.service (installed by the .deb): install the rdesk
+# version released on your server. Set the server in /etc/default/rdesk-update:
+#   RDESK_SERVER=rdesk.example.com
+#   RDESK_MACHINE=<this computer's host ID>   # optional: test computers get versions first
+#   sudo systemctl enable --now rdesk-update.timer
+[Unit]
+Description=Install the rdesk version released on your rdesk server
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/default/rdesk-update
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/rdesk-update
+ExecStart=/usr/bin/rdesk update

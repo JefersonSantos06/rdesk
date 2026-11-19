@@ -60,6 +60,9 @@ enum Cmd {
     RotateKey,
     /// Copy the database to a file (safe while the server runs).
     Backup { file: PathBuf },
+    /// Install the update the server prepared (run as root by rdesk-server-update.service).
+    #[command(hide = true)]
+    ApplyUpdate,
 }
 
 #[derive(Subcommand)]
@@ -156,6 +159,13 @@ fn main() -> Result<()> {
             println!("New ticket key: {}", hex_short(new.as_bytes()));
             println!("Restart the server. Hosts get the new key on their next sync and keep accepting");
             println!("tickets signed with the old one for 12 hours.");
+            Ok(())
+        }
+        Cmd::ApplyUpdate => {
+            rdesk_server::install_crypto();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let text = rt.block_on(rdesk_server::selfupdate::apply(&data))?;
+            println!("{text}");
             Ok(())
         }
         Cmd::Backup { file } => {

@@ -19,7 +19,7 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
 rpassword = "7"
 zeroize = "1"
@@ -42,4 +42,8 @@ section = "net"
 priority = "optional"
 depends = "$auto"
 extended-description = "Remote desktop over QUIC (iroh) with a private rdesk server: client and host in one app."
-assets = [["target/release/rdesk", "usr/bin/", "755"]]
+assets = [
+    ["target/release/rdesk", "usr/bin/", "755"],
+    ["../../deploy/rdesk-update.service", "usr/lib/systemd/system/", "644"],
+    ["../../deploy/rdesk-update.timer", "usr/lib/systemd/system/", "644"],
+]

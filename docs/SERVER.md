@@ -106,6 +106,33 @@ Ou pelo app, na aba **Admin** (só para admins do sistema), ou pela CLI do app: 
 - Admins do sistema veem todos os computadores (aba *Admin*), mas só acessam os compartilhados com eles.
 - Os hosts não revelam nada antes do login (nome, sistema, se está em uso): o status vem do servidor.
 
+## Atualizar (versões novas)
+
+O servidor olha os Releases do GitHub de hora em hora (`update_repo` no `server.toml`, vazio desliga) e guarda só as versões com o `release.json` assinado por uma chave de release do rdesk. Na aba **Admin → rdesk versions**:
+
+1. Marque uma ou mais máquinas como **Test computer** (lista *All computers*).
+2. **Release to test computers**: só elas recebem a versão no próximo sync (na hora).
+3. Deu certo? **Release to everyone…**: todas recebem.
+
+Cada computador confere de novo a assinatura e o hash com as chaves embutidas nele, baixa do GitHub e instala quando ninguém está conectado:
+- **Windows** (com o serviço): o próprio serviço; se a versão nova não sobe em 2 minutos, volta para a anterior (log em `C:\ProgramData\rdesk\logs\update.log`).
+- **Linux** (`.deb`): o timer `rdesk-update` (desligado até configurar): `/etc/default/rdesk-update` com `RDESK_SERVER=rdesk.seu-dominio.com` (e `RDESK_MACHINE=<host ID>` para as máquinas de teste), depois `sudo systemctl enable --now rdesk-update.timer`.
+- **Mac**: só avisa; baixe o novo `rdesk.app`.
+
+Computadores não voltam de versão sozinhos: liberar uma versão mais antiga é recusado.
+
+### O próprio servidor
+
+**Update the server** (na mesma lista) baixa e confere a versão, faz backup do banco (`backups/`), troca o programa e reinicia; se a versão nova não responder, o programa e o banco anteriores voltam. Como o servidor roda sem privilégios, quem troca o programa é uma unidade root que roda o programa **já instalado** (que confere tudo de novo):
+
+```sh
+sudo install -m 644 deploy/rdesk-server-update.path deploy/rdesk-server-update.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rdesk-server-update.path
+```
+
+As duas unidades vêm no `.tar.gz` do servidor. No Docker não há atualização por clique: atualize a imagem.
+
 ## Manutenção
 
 ```sh

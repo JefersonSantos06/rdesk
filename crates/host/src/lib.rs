@@ -13,6 +13,7 @@ pub mod power;
 pub mod server;
 pub mod session;
 pub mod sync;
+pub mod update;
 pub mod video;
 #[cfg(windows)]
 pub mod win;

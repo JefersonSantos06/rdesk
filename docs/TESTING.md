@@ -59,6 +59,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Sem administrador, mudar uma opção pede *Manage as administrator*; como administrador, salvar reinicia o host do serviço.
 - [ ] *Remove the service…*: os arquivos voltam para o perfil e o app volta a rodar o host.
 
+## Atualizações
+- [ ] Admin → *rdesk versions* lista as versões do GitHub; *Check now* encontra uma recém-publicada.
+- [ ] Marcar um PC como *Test computer* e *Release to test computers*: só ele baixa e instala (quando ninguém está conectado); o Admin mostra a versão nova nele.
+- [ ] *Release to everyone…*: os outros instalam; o app da bandeja reabre na versão nova.
+- [ ] Versão que não sobe (teste: liberar uma build quebrada): o Windows volta para a anterior e não tenta de novo.
+- [ ] *Update the server*: backup em `backups/`, `/api/info` mostra a versão nova; o resultado aparece no Admin.
+- [ ] Linux com `rdesk-update.timer`: instala o `.deb` e o host reinicia sozinho.
+
 ## Autenticação
 - [ ] Chave do 1Password: aparece a aprovação/Touch ID uma vez; conecta.
 - [ ] Chave não autorizada + sem senha → mensagem clara, sem retry infinito.

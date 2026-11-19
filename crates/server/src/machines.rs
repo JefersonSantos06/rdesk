@@ -64,6 +64,8 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         is_owner: viewer == Some(m.owner_id),
         can_manage,
         direct: m.direct,
+        version: m.version.clone(),
+        ring: m.ring,
     })
 }
 
@@ -326,7 +328,7 @@ pub async fn agent_sync(
     MachineAuth(m): MachineAuth,
     Json(req): Json<AgentSync>,
 ) -> Result<Json<AgentSyncReply>, Error> {
-    st.db.machine_seen(m.id, &req.addrs, &req.os, req.in_session, req.direct)?;
+    st.db.machine_seen(m.id, &req.addrs, &req)?;
     if !req.sessions.is_empty() {
         st.db.record_sessions(m.id, &req.sessions)?;
     }
@@ -336,7 +338,9 @@ pub async fn agent_sync(
     wait.as_mut().enable();
     let (cursor, _) = st.db.revocations(m.id)?;
     let current_key = hex::encode(st.key.public().as_bytes());
-    if cursor <= req.cursor && req.server_key == current_key {
+    // A version the host has not seen yet: answer at once.
+    let new_offer = crate::updates::offer(&st, m.ring)?.is_some_and(|o| o.version != req.update_seen);
+    if cursor <= req.cursor && req.server_key == current_key && !new_offer {
         let _ = tokio::time::timeout(Duration::from_secs(25), wait).await;
     }
     // Unregistered meanwhile: the next call gets 401.
@@ -347,6 +351,7 @@ pub async fn agent_sync(
         revocations: revs.into_iter().map(|(user_id, before)| Revocation { user_id, before }).collect(),
         machine: view(&st, &m, None)?,
         server_keys: st.ticket_keys(),
+        update: crate::updates::offer(&st, m.ring)?,
     }))
 }
 

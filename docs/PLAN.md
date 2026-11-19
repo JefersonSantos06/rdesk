@@ -173,7 +173,15 @@ Planejado:
 - Migração automática no instalador: `host_id.key`, `machine.json` e `host.toml` passam do perfil do usuário para `ProgramData`, com o mesmo host ID (ninguém recadastra); o início automático antigo é removido.
 - Linux: o host continua como serviço do usuário na sessão X11 (`deploy/rdesk-host.service`), sem tela de login; ganha o mesmo aviso de sessão.
 
-### Fase 8: atualização automática
+### Fase 8: atualização automática (feita, branch `main`)
+Como ficou:
+- Servidor: procura os Releases do GitHub de hora em hora (só os com `release.json` assinado); Admin → *rdesk versions*: *Release to test computers*, *Release to everyone…* (sem voltar de versão), máquinas de teste na lista de computadores, a versão de cada uma.
+- A oferta vai no sync (com o manifesto e a assinatura); o host confere com as chaves dele e baixa do GitHub.
+- Windows: o serviço baixa para `ProgramData\rdesk\updates`, espera não haver sessão, `rdesk service apply-update` troca o programa e volta se o novo não sobe em 2 min; o app da bandeja reabre na versão nova; o serviço cria a entrada do Menu Iniciar para o programa em `Program Files`.
+- Linux: `rdesk update` (root, `rdesk-update.timer` no `.deb`) instala o `.deb`; `rdesk host run` reinicia sozinho quando o programa muda e ninguém está conectado. Mac: só avisa.
+- Servidor: *Update the server* no Admin; o servidor prepara e uma unidade root (`rdesk-server-update.path`) instala com o programa já instalado, com backup do banco e retorno se a nova versão não responder.
+
+Planejado:
 - Servidor como política, GitHub como armazenamento:
   1. O rdesk-server consulta os Releases de hora em hora (API pública, sem token), confere a assinatura e mostra na aba *Admin* a versão nova, com o changelog.
   2. Dois cliques: **Liberar para máquinas de teste** (marcadas pelo admin) e depois **Liberar para todos**.

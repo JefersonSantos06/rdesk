@@ -1,0 +1,13 @@
+# /etc/systemd/system/rdesk-server-update.path — see docs/SERVER.md ("Atualizar").
+# The server (as user rdesk) prepares an update in /var/lib/rdesk-server/update and writes
+# the "request" file; this starts rdesk-server-update.service, which installs it as root.
+#   sudo systemctl enable --now rdesk-server-update.path
+[Unit]
+Description=Install rdesk-server updates prepared by the server
+
+[Path]
+PathExists=/var/lib/rdesk-server/update/request
+Unit=rdesk-server-update.service
+
+[Install]
+WantedBy=multi-user.target

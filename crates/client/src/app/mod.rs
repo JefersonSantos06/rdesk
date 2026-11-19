@@ -124,7 +124,16 @@ struct App {
     visible: bool,
     /// Used without a server (only computers on this network), until someone signs in.
     local_mode: bool,
+    /// This program file and when it was written: the Windows service replaces it with a
+    /// new version, and the app then starts again from it.
+    exe: PathBuf,
+    exe_written: Option<std::time::SystemTime>,
+    exe_checked: Instant,
     _instance: instance::Guard,
+}
+
+fn written(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
 /// Remember the choice of using the app without a server.
@@ -176,9 +185,12 @@ impl App {
             computers: computers::Computers::new(exe.clone(), shared, wtx),
             #[cfg(feature = "host")]
             host,
-            settings: settings::SettingsPage::new(exe),
+            settings: settings::SettingsPage::new(exe.clone()),
             visible: !hidden || tray.is_none(),
             local_mode,
+            exe_written: written(&exe),
+            exe_checked: Instant::now(),
+            exe: exe.clone(),
             tray,
             cmds,
             quitting: false,
@@ -334,6 +346,30 @@ impl eframe::App for App {
             let (summary, on) = (self.host.summary(), self.host.running());
             if let Some(t) = &mut self.tray {
                 t.update(&summary, on);
+            }
+        }
+
+        // Updated underneath (the service installed a new version): start again from it, once no
+        // session window of this copy is open.
+        if self.exe_checked.elapsed() >= Duration::from_secs(60) {
+            self.exe_checked = Instant::now();
+            let now = written(&self.exe);
+            if now.is_some() && now != self.exe_written && self.computers.open_sessions() == 0 {
+                let mut cmd = std::process::Command::new(&self.exe);
+                cmd.args(["ui", "--takeover"]);
+                if !self.visible {
+                    cmd.arg("--minimized");
+                }
+                match cmd.spawn() {
+                    Ok(_) => {
+                        tracing::info!("this program was updated: starting the new version");
+                        self.quit(ctx);
+                    }
+                    Err(e) => {
+                        tracing::warn!("starting the updated program: {e}");
+                        self.exe_written = now;
+                    }
+                }
             }
         }
 

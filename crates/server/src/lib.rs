@@ -17,7 +17,9 @@ pub mod machines;
 pub mod oauth;
 pub mod pages;
 pub mod relay;
+pub mod selfupdate;
 pub mod state;
+pub mod updates;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -63,6 +65,12 @@ pub fn router(st: Shared) -> Router {
         .route(&format!("{}/{{id}}/history", paths::PATH_MACHINES), get(machines::history))
         .route(paths::PATH_ADMIN_MACHINES, get(machines::admin_list))
         .route(paths::PATH_AGENT_SYNC, post(machines::agent_sync))
+        .route(paths::PATH_ADMIN_RELEASES, get(updates::list))
+        .route(&format!("{}/check", paths::PATH_ADMIN_RELEASES), post(updates::check_now))
+        .route(&format!("{}/{{version}}/release", paths::PATH_ADMIN_RELEASES), post(updates::release))
+        .route(&format!("{}/{{version}}/server", paths::PATH_ADMIN_RELEASES), post(updates::update_server))
+        .route(&format!("{}/{{id}}/ring", paths::PATH_ADMIN_MACHINES), axum::routing::put(updates::set_ring))
+        .route(paths::PATH_UPDATE_LATEST, get(updates::latest))
         .route(paths::PATH_ENROLL, post(enroll::enroll))
         .route(paths::PATH_MACHINE_REQUESTS, get(enroll::list_requests))
         .route(&format!("{}/{{id}}/approve", paths::PATH_MACHINE_REQUESTS), post(enroll::approve))
@@ -178,6 +186,9 @@ pub async fn start_full(
     });
     let relay = relay::spawn(db, st.online.clone(), quic).await?;
     *st.relay_http.lock().unwrap() = Some(relay.http);
+
+    let _ = st.data_dir.set(data.to_path_buf());
+    updates::spawn_checker(st.clone());
 
     // Housekeeping: forget abandoned sign-ins.
     {

@@ -1,11 +1,12 @@
-//! "Admin" (system admins only): who may sign in to the server.
+//! "Admin" (system admins only): who may sign in to the server, every computer, and which
+//! rdesk version the computers get (first the test computers, then everyone).
 
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use egui::{Color32, RichText};
 use rdesk_common::account::Session;
-use rdesk_proto::api::{AdminUser, Machine, UpdateUser, Visibility};
+use rdesk_proto::api::{AdminUser, Machine, Releases, Ring, UpdateUser, Visibility};
 
 use super::account::spawn;
 
@@ -16,13 +17,20 @@ enum Op {
     Add { email: String, admin: bool },
     Update { id: i64, email: String, change: UpdateUser },
     Remove { id: i64, email: String },
+    Release { version: String, ring: Ring },
+    UpdateServer { version: String },
+    Ring { id: i64, name: String, ring: Ring },
+    Check,
 }
 
-type Loaded = Result<(Vec<AdminUser>, Vec<Machine>), String>;
+type Loaded = Result<(Vec<AdminUser>, Vec<Machine>, Releases), String>;
 
 pub(super) struct AdminPage {
     users: Option<Result<Vec<AdminUser>, String>>,
     machines: Vec<Machine>,
+    releases: Option<Releases>,
+    /// Releasing to everyone asks first.
+    confirm_release: Option<String>,
     load_job: Option<Receiver<Loaded>>,
     op_job: Option<Receiver<Result<String, String>>>,
     new_email: String,
@@ -36,6 +44,8 @@ impl AdminPage {
         Self {
             users: None,
             machines: Vec::new(),
+            releases: None,
+            confirm_release: None,
             load_job: None,
             op_job: None,
             new_email: String::new(),
@@ -49,7 +59,7 @@ impl AdminPage {
         let Some(s) = session.cloned() else { return };
         self.load_job = Some(spawn(ctx, move || async move {
             let api = s.api().map_err(|e| format!("{e:#}"))?;
-            let f = async { anyhow::Ok((api.users().await?, api.admin_machines().await?)) };
+            let f = async { anyhow::Ok((api.users().await?, api.admin_machines().await?, api.releases().await?)) };
             f.await.map_err(|e| format!("{e:#}"))
         }));
     }
@@ -66,6 +76,24 @@ impl AdminPage {
                     api.update_user(id, &change).await.map(|_| format!("Updated {email}."))
                 }
                 Op::Remove { id, email } => api.remove_user(id).await.map(|_| format!("Removed {email}.")),
+                Op::Release { version, ring } => api.release_version(&version, ring).await.map(|_| match ring {
+                    Ring::Test => format!("{version} released to the test computers."),
+                    Ring::All => format!("{version} released to everyone."),
+                }),
+                Op::Ring { id, name, ring } => api.set_ring(id, ring).await.map(|_| match ring {
+                    Ring::Test => format!("{name} now gets new versions first."),
+                    Ring::All => format!("{name} gets new versions with everyone."),
+                }),
+                Op::UpdateServer { version } => api
+                    .update_server(&version)
+                    .await
+                    .map(|_| format!("The server is installing {version}; it restarts in a moment.")),
+                Op::Check => {
+                    let r = api.check_releases().await.map(|_| "Looking for new versions…".to_string());
+                    // Give the server a moment before the list is read again.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    r
+                }
             };
             r.map_err(|e| format!("{e:#}"))
         }));
@@ -77,9 +105,10 @@ impl AdminPage {
         {
             self.load_job = None;
             match r {
-                Ok((users, machines)) => {
+                Ok((users, machines, releases)) => {
                     self.users = Some(Ok(users));
                     self.machines = machines;
+                    self.releases = Some(releases);
                 }
                 Err(e) => self.users = Some(Err(e)),
             }
@@ -205,13 +234,19 @@ impl AdminPage {
             }
         }
         ui.add_space(16.0);
+        self.versions_ui(ui, session);
+        ui.add_space(16.0);
         ui.label(RichText::new("All computers").strong().size(16.0));
         ui.label("Admins see every computer, but connect only to those shared with them.");
-        egui::Grid::new("admin-machines").num_columns(4).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+        let busy = self.op_job.is_some();
+        let mut ring_op = None;
+        egui::Grid::new("admin-machines").num_columns(6).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
             ui.strong("Computer");
             ui.strong("Registered by");
             ui.strong("Visible to");
             ui.strong("Status");
+            ui.strong("Version");
+            ui.strong("Test computer");
             ui.end_row();
             for m in &self.machines {
                 ui.label(&m.name);
@@ -231,9 +266,51 @@ impl AdminPage {
                         None => "never connected".to_string(),
                     }
                 });
+                ui.label(if m.version.is_empty() { "?".to_string() } else { m.version.clone() });
+                let mut test = m.ring == Ring::Test;
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut test, ""))
+                    .on_hover_text("Gets new versions first, before everyone")
+                    .changed()
+                {
+                    let ring = if test { Ring::Test } else { Ring::All };
+                    ring_op = Some(Op::Ring { id: m.id, name: m.name.clone(), ring });
+                }
                 ui.end_row();
             }
         });
+        if let Some(op) = ring_op {
+            self.run(&ctx, session, op);
+        }
+        if let Some(version) = self.confirm_release.clone() {
+            let m = egui::Modal::new(egui::Id::unique("admin-release")).show(&ctx, |ui| {
+                ui.heading(format!("Release {version} to everyone?"));
+                ui.label(
+                    "Every computer downloads it and installs it when nobody is connected to it. \
+                     Computers do not go back to an older version by themselves.",
+                );
+                ui.add_space(6.0);
+                let mut done = None;
+                ui.horizontal(|ui| {
+                    if ui.button("Release to everyone").clicked() {
+                        done = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = Some(false);
+                    }
+                });
+                done
+            });
+            match m.inner {
+                Some(true) => {
+                    self.confirm_release = None;
+                    self.run(&ctx, session, Op::Release { version, ring: Ring::All });
+                }
+                Some(false) => self.confirm_release = None,
+                None if m.should_close() => self.confirm_release = None,
+                None => {}
+            }
+        }
         if let Some(u) = self.confirm_remove.clone() {
             let m = egui::Modal::new(egui::Id::unique("admin-remove")).show(&ctx, |ui| {
                 ui.heading(format!("Remove {}?", u.email));
@@ -260,6 +337,100 @@ impl AdminPage {
                 None => {}
             }
         }
+    }
+}
+
+impl AdminPage {
+    /// New versions found on GitHub, and the two steps of releasing one.
+    fn versions_ui(&mut self, ui: &mut egui::Ui, session: Option<&Session>) {
+        let ctx = ui.ctx().clone();
+        let busy = self.op_job.is_some();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("rdesk versions").strong().size(16.0));
+            if ui.add_enabled(!busy, egui::Button::new("Check now")).clicked() {
+                self.run(&ctx, session, Op::Check);
+            }
+        });
+        let Some(r) = self.releases.clone() else {
+            ui.spinner();
+            return;
+        };
+        ui.label(format!(
+            "Server {} · released to everyone: {} · to the test computers: {}",
+            r.server_version,
+            r.all.as_deref().unwrap_or("none"),
+            r.test.as_deref().unwrap_or("none"),
+        ));
+        if let Some(u) = &r.server_update {
+            ui.weak(format!("Server update: {u}"));
+        }
+        match (&r.check_error, r.last_check) {
+            (Some(e), _) => {
+                ui.colored_label(ERROR, format!("Could not look for new versions: {e}"));
+            }
+            (None, Some(t)) => {
+                ui.weak(format!("Looked on GitHub {}.", rdesk_common::directory::ago(t, now())));
+            }
+            (None, None) => {
+                ui.weak("Not looked for new versions yet.");
+            }
+        }
+        if r.releases.is_empty() {
+            return;
+        }
+        let newer = |v: &str, than: &Option<String>| {
+            than.as_deref()
+                .is_none_or(|t| rdesk_proto::release::parse_version(v) > rdesk_proto::release::parse_version(t))
+        };
+        egui::Grid::new("admin-releases").num_columns(5).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+            ui.strong("Version");
+            ui.strong("Published");
+            ui.strong("Running on");
+            ui.strong("Platforms");
+            ui.strong("");
+            ui.end_row();
+            for rel in r.releases.iter().take(6) {
+                let mut label = rel.version.clone();
+                if r.all.as_deref() == Some(&rel.version) {
+                    label.push_str(" · everyone");
+                } else if r.test.as_deref() == Some(&rel.version) {
+                    label.push_str(" · test");
+                }
+                ui.label(label).on_hover_text(if rel.notes.is_empty() { "No notes" } else { &rel.notes });
+                ui.label(rdesk_common::directory::ago(rel.published_at, now()));
+                ui.label(format!("{} computer(s)", rel.running));
+                ui.label(rel.platforms.join(", "));
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if newer(&rel.version, &r.test)
+                            && newer(&rel.version, &r.all)
+                            && ui
+                                .small_button("Release to test computers")
+                                .on_hover_text("Only the computers marked as test computers below")
+                                .clicked()
+                        {
+                            self.run(&ctx, session, Op::Release { version: rel.version.clone(), ring: Ring::Test });
+                        }
+                        if newer(&rel.version, &r.all) && ui.small_button("Release to everyone…").clicked() {
+                            self.confirm_release = Some(rel.version.clone());
+                        }
+                        let server_newer = rdesk_proto::release::parse_version(&rel.version)
+                            > rdesk_proto::release::parse_version(&r.server_version);
+                        if r.server_can_update
+                            && server_newer
+                            && rel.platforms.iter().any(|p| p.starts_with("linux"))
+                            && ui
+                                .small_button("Update the server")
+                                .on_hover_text("Backs up the database, installs it and restarts; goes back if it fails")
+                                .clicked()
+                        {
+                            self.run(&ctx, session, Op::UpdateServer { version: rel.version.clone() });
+                        }
+                    });
+                });
+                ui.end_row();
+            }
+        });
     }
 }
 

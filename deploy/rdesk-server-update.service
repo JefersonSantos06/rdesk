@@ -1,0 +1,11 @@
+# /etc/systemd/system/rdesk-server-update.service — started by rdesk-server-update.path.
+# Runs the installed (root-owned) program, which checks the release signature and hash
+# again, backs up the database, swaps the program and restarts rdesk-server; if the new
+# version does not answer, the previous program and database come back.
+[Unit]
+Description=Install an rdesk-server update
+
+[Service]
+Type=oneshot
+Environment=RDESK_SERVER_DATA=/var/lib/rdesk-server
+ExecStart=/usr/local/bin/rdesk-server apply-update

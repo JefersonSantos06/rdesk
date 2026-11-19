@@ -37,6 +37,38 @@ pub fn check_file(file: &ReleaseFile, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The file of `kind` for `platform` in a release.
+pub fn file_for<'a>(
+    m: &'a ReleaseManifest,
+    kind: rdesk_proto::release::FileKind,
+    platform: &str,
+) -> Option<&'a ReleaseFile> {
+    m.files.iter().find(|f| f.kind == kind && f.platform == platform)
+}
+
+/// This build's platform as release files name it (`windows-x86_64`, `linux-aarch64`…).
+pub fn this_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Download a release file (following GitHub's redirect), refusing anything larger than
+/// `max` bytes. Check it with [`check_file`] before using it.
+pub async fn download(url: &str, max: u64) -> Result<Vec<u8>> {
+    crate::account::install_crypto();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900))
+        .user_agent(concat!("rdesk/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let mut r = client.get(url).send().await.with_context(|| format!("downloading {url}"))?;
+    ensure!(r.status().is_success(), "downloading {url}: HTTP {}", r.status());
+    let mut out = Vec::new();
+    while let Some(chunk) = r.chunk().await? {
+        out.extend_from_slice(&chunk);
+        ensure!(out.len() as u64 <= max, "{url}: larger than the release manifest says");
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +123,12 @@ mod tests {
         .unwrap();
         let key = iroh::PublicKey::from_bytes(&public.try_into().unwrap()).unwrap();
         key.verify(b"", &iroh::Signature::from_bytes(&sig.try_into().unwrap())).unwrap();
+    }
+
+    #[test]
+    fn platform_names() {
+        let p = this_platform();
+        assert!(rdesk_proto::release::PLATFORMS.contains(&p.as_str()) || p.ends_with("x86"), "{p}");
     }
 
     #[test]

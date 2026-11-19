@@ -72,6 +72,11 @@ pub struct State {
     pub machine_events: Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>,
     /// Wakes a host waiting for its approval (keyed by host ID, hex).
     pub enroll_events: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Looking for new versions on GitHub: the last result, and "check now".
+    pub update_check: Mutex<crate::updates::CheckState>,
+    pub update_wake: tokio::sync::Notify,
+    /// The data folder (set when the server starts).
+    pub data_dir: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 pub type Shared = Arc<State>;
@@ -113,6 +118,9 @@ impl State {
             codes: Mutex::new(HashMap::new()),
             machine_events: Mutex::new(HashMap::new()),
             enroll_events: Mutex::new(HashMap::new()),
+            update_check: Mutex::new(Default::default()),
+            update_wake: tokio::sync::Notify::new(),
+            data_dir: std::sync::OnceLock::new(),
         }))
     }
 

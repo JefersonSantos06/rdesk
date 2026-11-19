@@ -124,7 +124,8 @@ jobs:
         if: matrix.part == 'server'
         run: |
           mkdir dist
-          tar -czf "dist/rdesk-server-$VERSION-${{ matrix.platform }}.tar.gz"             -C target/release rdesk-server -C "$GITHUB_WORKSPACE/deploy" rdesk-server.service
+          tar -czf "dist/rdesk-server-$VERSION-${{ matrix.platform }}.tar.gz"             -C target/release rdesk-server -C "$GITHUB_WORKSPACE/deploy" rdesk-server.service \
+            rdesk-server-update.path rdesk-server-update.service
 
       - uses: actions/upload-artifact@v4
         with:

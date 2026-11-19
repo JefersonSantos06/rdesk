@@ -7,3 +7,4 @@ pub mod files;
 pub mod notice;
 pub mod proc;
 pub mod service;
+pub mod update;

@@ -155,6 +155,24 @@ const SCHEMA: &[&str] = &[
     r#"
     ALTER TABLE machines ADD COLUMN direct_access INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v6: updates. Versions found on GitHub (signed), what is released, and per computer
+    // the version it runs and whether it is a test computer.
+    r#"
+    CREATE TABLE releases (
+        version TEXT PRIMARY KEY,
+        manifest TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        published_at INTEGER NOT NULL,
+        found_at INTEGER NOT NULL
+    );
+    CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ALTER TABLE machines ADD COLUMN version TEXT NOT NULL DEFAULT '';
+    ALTER TABLE machines ADD COLUMN update_ring TEXT NOT NULL DEFAULT 'all';
+    "#,
 ];
 
 pub fn now() -> i64 {

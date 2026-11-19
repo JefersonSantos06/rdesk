@@ -417,6 +417,37 @@ impl Api {
         self.send(reqwest::Method::POST, api::PATH_ENROLL_KEYS, req).await
     }
 
+    // ---- updates (admins) -------------------------------------------------------------
+
+    pub async fn releases(&self) -> Result<api::Releases> {
+        self.get(api::PATH_ADMIN_RELEASES).await
+    }
+
+    /// Ask the server to look for new versions now (the list updates a moment later).
+    pub async fn check_releases(&self) -> Result<()> {
+        let r = self.auth(self.http.post(self.url(&format!("{}/check", api::PATH_ADMIN_RELEASES)))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    pub async fn release_version(&self, version: &str, ring: api::Ring) -> Result<()> {
+        let path = format!("{}/{version}/release", api::PATH_ADMIN_RELEASES);
+        let r = self.auth(self.http.post(self.url(&path)).json(&api::ReleaseTo { ring })).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    /// Update the server itself to `version` (it restarts a moment later).
+    pub async fn update_server(&self, version: &str) -> Result<()> {
+        let path = format!("{}/{version}/server", api::PATH_ADMIN_RELEASES);
+        let r = self.auth(self.http.post(self.url(&path))).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
+    pub async fn set_ring(&self, machine_id: i64, ring: api::Ring) -> Result<()> {
+        let path = format!("{}/{machine_id}/ring", api::PATH_ADMIN_MACHINES);
+        let r = self.auth(self.http.put(self.url(&path)).json(&api::SetRing { ring })).send().await?;
+        Self::check(r).await.map(|_| ())
+    }
+
     pub async fn revoke_enroll_key(&self, id: i64) -> Result<()> {
         let r = self.auth(self.http.delete(self.url(&format!("{}/{id}", api::PATH_ENROLL_KEYS)))).send().await?;
         Self::check(r).await.map(|_| ())

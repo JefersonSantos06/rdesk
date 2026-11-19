@@ -59,6 +59,9 @@ pub struct MachineRow {
     pub last_seen: Option<i64>,
     /// Direct access (own password/key on the LAN) is on, as the host last reported.
     pub direct: bool,
+    /// The rdesk version it last reported.
+    pub version: String,
+    pub ring: rdesk_proto::api::Ring,
 }
 
 impl MachineRow {
@@ -77,6 +80,12 @@ impl MachineRow {
             created_at: r.get("created_at")?,
             last_seen: r.get("last_seen")?,
             direct: r.get("direct_access")?,
+            version: r.get("version")?,
+            ring: if r.get::<_, String>("update_ring")? == "test" {
+                rdesk_proto::api::Ring::Test
+            } else {
+                rdesk_proto::api::Ring::All
+            },
         })
     }
 }
@@ -189,15 +198,17 @@ impl Db {
     }
 
     /// What the machine reported about itself.
-    pub fn machine_seen(&self, id: i64, addrs: &[String], os: &str, in_session: bool, direct: bool) -> Result<()> {
+    pub fn machine_seen(&self, id: i64, addrs: &[String], seen: &rdesk_proto::api::AgentSync) -> Result<()> {
+        let (os, in_session, direct) = (seen.os.as_str(), seen.in_session, seen.direct);
+        let version: String = seen.version.chars().take(32).collect();
         let addrs: Vec<&str> =
             addrs.iter().map(String::as_str).filter(|a| !a.contains(',') && a.len() < 64).take(16).collect();
         let os: String = os.chars().take(32).collect();
         self.with(|c| {
             c.execute(
-                "UPDATE machines SET addrs = ?2, os = ?3, in_session = ?4, last_seen = ?5, direct_access = ?6 \
-                 WHERE id = ?1",
-                params![id, addrs.join(","), os, in_session, now(), direct],
+                "UPDATE machines SET addrs = ?2, os = ?3, in_session = ?4, last_seen = ?5, direct_access = ?6, \
+                 version = ?7 WHERE id = ?1",
+                params![id, addrs.join(","), os, in_session, now(), direct, version],
             )
         })?;
         Ok(())

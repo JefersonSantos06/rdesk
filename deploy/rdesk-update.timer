@@ -1,0 +1,13 @@
+# /usr/lib/systemd/system/rdesk-update.timer (installed by the .deb, off until enabled):
+#   sudo systemctl enable --now rdesk-update.timer
+[Unit]
+Description=Look for a released rdesk version every hour
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
