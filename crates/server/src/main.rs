@@ -56,6 +56,10 @@ enum Cmd {
     },
     /// Show the configuration and the redirect URLs to register with Google/GitHub.
     Info,
+    /// Replace the key that signs access tickets (hosts trust the old one for 12 more hours).
+    RotateKey,
+    /// Copy the database to a file (safe while the server runs).
+    Backup { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -147,6 +151,20 @@ fn main() -> Result<()> {
             println!("Saved. Restart the server to use it.");
             Ok(())
         }
+        Cmd::RotateKey => {
+            let new = config::rotate_key(&data)?;
+            println!("New ticket key: {}", hex_short(new.as_bytes()));
+            println!("Restart the server. Hosts get the new key on their next sync and keep accepting");
+            println!("tickets signed with the old one for 12 hours.");
+            Ok(())
+        }
+        Cmd::Backup { file } => {
+            let db = Db::open(&data.join(config::DB_FILE))?;
+            db.backup(&file)?;
+            println!("Database copied to {}.", file.display());
+            println!("Also keep {} and {} safe (they are not in the database).", config::CONFIG_FILE, config::KEY_FILE);
+            Ok(())
+        }
         Cmd::Info => {
             let cfg = ServerConfig::load(&data)?;
             println!("Data: {}", data.display());
@@ -234,4 +252,8 @@ fn users(data: &std::path::Path, cmd: UsersCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn hex_short(b: &[u8]) -> String {
+    b.iter().take(8).map(|x| format!("{x:02x}")).collect()
 }

@@ -161,8 +161,60 @@ pub struct Machine {
     pub addrs: Vec<String>,
     /// The requesting user may connect.
     pub can_access: bool,
-    /// The requesting user registered it (may rename, share, unregister).
+    /// What the requesting user may do there.
+    pub access: crate::Access,
+    /// The requesting user registered it (may also unregister it and choose its managers).
     pub is_owner: bool,
+    /// The requesting user may rename it, change who sees it, share it, see its history.
+    pub can_manage: bool,
+}
+
+/// What a share grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareRole {
+    /// Screen, keyboard and mouse, clipboard, files.
+    #[default]
+    Control,
+    /// Watch the screen only.
+    View,
+    /// Files only (no screen).
+    Files,
+}
+
+impl ShareRole {
+    pub fn access(self) -> crate::Access {
+        match self {
+            ShareRole::Control => crate::Access::FULL,
+            ShareRole::View => crate::Access::VIEW,
+            ShareRole::Files => crate::Access::FILES,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShareRole::Control => "control",
+            ShareRole::View => "view",
+            ShareRole::Files => "files",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ShareRole> {
+        match s {
+            "control" => Some(ShareRole::Control),
+            "view" => Some(ShareRole::View),
+            "files" => Some(ShareRole::Files),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShareRole::Control => "full control",
+            ShareRole::View => "view only",
+            ShareRole::Files => "files only",
+        }
+    }
 }
 
 /// `POST /api/machines`.
@@ -200,14 +252,55 @@ pub struct UpdateMachine {
 /// `GET`/`PUT /api/machines/{id}/shares`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Shares {
-    pub users: Vec<UserRef>,
-    pub groups: Vec<GroupRef>,
+    pub users: Vec<(UserRef, ShareRole)>,
+    pub groups: Vec<(GroupRef, ShareRole)>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetShares {
+    /// `(user id, role)`.
+    pub users: Vec<(i64, ShareRole)>,
+    /// `(group id, role)`.
+    pub groups: Vec<(i64, ShareRole)>,
+}
+
+/// `GET`/`PUT /api/machines/{id}/managers` (owner only): who else may manage it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Managers {
+    pub users: Vec<UserRef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetManagers {
     pub users: Vec<i64>,
-    pub groups: Vec<i64>,
+}
+
+/// One session on a computer, as its host reported it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessRecord {
+    /// The host's session id (hex), to update the record when it ends.
+    pub session: String,
+    /// The server user (sessions through a ticket); `None` for a local login on the LAN.
+    pub user_id: Option<i64>,
+    /// User e-mail or the client's computer name.
+    pub who: String,
+    pub client: String,
+    /// "server ticket", "password", "key …".
+    pub method: String,
+    pub access: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}
+
+/// `GET /api/machines/{id}/history`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub who: String,
+    pub client: String,
+    pub method: String,
+    pub access: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
 }
 
 /// `POST /api/machines/{id}/ticket`.
@@ -273,6 +366,13 @@ pub struct AgentSync {
     pub os: String,
     pub version: String,
     pub in_session: bool,
+    /// Sessions that started or ended since the last sync.
+    #[serde(default)]
+    pub sessions: Vec<AccessRecord>,
+    /// The ticket key (hex) the host trusts as current; the server answers at once when
+    /// it changed (key rotation).
+    #[serde(default)]
+    pub server_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +381,10 @@ pub struct AgentSyncReply {
     /// Every revocation of the last 12 h (tickets can not be older).
     pub revocations: Vec<Revocation>,
     pub machine: Machine,
+    /// Keys (hex) whose tickets are valid: the current one first, then the previous one
+    /// for a while after a rotation.
+    #[serde(default)]
+    pub server_keys: Vec<String>,
 }
 
 /// Tickets of `user_id` issued at or before `before` are void on this machine.

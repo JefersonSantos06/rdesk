@@ -9,8 +9,9 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use base64::Engine as _;
 use rdesk_proto::api::{
-    AgentSync, AgentSyncReply, GroupRef, Machine, RegisterMachine, Registered, Revocation, SetShares, Shares,
-    TicketRequest, TicketResponse, UpdateMachine, UserRef, Visibility, register_message,
+    AgentSync, AgentSyncReply, GroupRef, HistoryEntry, Machine, Managers, RegisterMachine, Registered, Revocation,
+    SetManagers, SetShares, Shares, TicketRequest, TicketResponse, UpdateMachine, UserRef, Visibility,
+    register_message,
 };
 use rdesk_proto::ticket::{SignedTicket, TICKET_MAX_SECS, TicketClaims};
 
@@ -43,9 +44,9 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         .ok()
         .and_then(|b| iroh_base::EndpointId::from_bytes(&b).ok())
         .is_some_and(|id| st.online.contains(&id));
-    let can_access = match viewer {
-        Some(u) => st.db.can_access(u, m)?,
-        None => false,
+    let (access, can_manage) = match viewer {
+        Some(u) => (st.db.access_of(u, m)?, st.db.can_manage(u, m)?),
+        None => (rdesk_proto::Access::NONE, false),
     };
     Ok(Machine {
         id: m.id,
@@ -58,15 +59,27 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         in_session: online && m.in_session,
         last_seen: m.last_seen,
         addrs: m.addrs.clone(),
-        can_access,
+        can_access: !access.is_none(),
+        access,
         is_owner: viewer == Some(m.owner_id),
+        can_manage,
     })
 }
 
+/// Only who registered it (unregister, choose managers).
 fn owned(st: &Shared, id: i64, user: &User) -> Result<MachineRow, Error> {
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
     if m.owner_id != user.id {
-        return Err(err(StatusCode::FORBIDDEN, "only who registered this computer can change it"));
+        return Err(err(StatusCode::FORBIDDEN, "only who registered this computer can do this"));
+    }
+    Ok(m)
+}
+
+/// The owner or a co-manager (rename, visibility, sharing, history).
+fn managed(st: &Shared, id: i64, user: &User) -> Result<MachineRow, Error> {
+    let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
+    if !st.db.can_manage(user.id, &m)? {
+        return Err(err(StatusCode::FORBIDDEN, "only who registered this computer and its managers can change it"));
     }
     Ok(m)
 }
@@ -126,7 +139,7 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateMachine>,
 ) -> Result<Json<Machine>, Error> {
-    let m = owned(&st, id, &s.user)?;
+    let m = managed(&st, id, &s.user)?;
     if let Some(n) = &req.name {
         st.db.rename_machine(id, n)?;
     }
@@ -156,13 +169,13 @@ pub async fn get_shares(
     Authed(s): Authed,
     Path(id): Path<i64>,
 ) -> Result<Json<Shares>, Error> {
-    owned(&st, id, &s.user)?;
+    managed(&st, id, &s.user)?;
     let (users, groups) = st.db.shares(id)?;
-    let users = users.into_iter().filter_map(|u| st.db.user(u).ok().flatten()).map(|u| user_ref(&u)).collect();
+    let users =
+        users.into_iter().filter_map(|(u, r)| st.db.user(u).ok().flatten().map(|u| (user_ref(&u), r))).collect();
     let groups = groups
         .into_iter()
-        .filter_map(|g| st.db.group(g).ok().flatten())
-        .map(|g| GroupRef { id: g.id, name: g.name })
+        .filter_map(|(g, r)| st.db.group(g).ok().flatten().map(|g| (GroupRef { id: g.id, name: g.name }, r)))
         .collect();
     Ok(Json(Shares { users, groups }))
 }
@@ -174,11 +187,11 @@ pub async fn set_shares(
     Path(id): Path<i64>,
     Json(req): Json<SetShares>,
 ) -> Result<Json<Shares>, Error> {
-    let m = owned(&st, id, &s.user)?;
-    for u in &req.users {
+    let m = managed(&st, id, &s.user)?;
+    for (u, _) in &req.users {
         st.db.user(*u)?.ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("no user {u}")))?;
     }
-    for g in &req.groups {
+    for (g, _) in &req.groups {
         st.db.group(*g)?.ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("no group {g}")))?;
     }
     let before = st.db.snapshot(Some(&[id]))?;
@@ -193,6 +206,51 @@ pub async fn set_shares(
     get_shares(State(st), Authed(s), Path(id)).await
 }
 
+/// `GET /api/machines/{id}/managers` (owner only).
+pub async fn get_managers(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<i64>,
+) -> Result<Json<Managers>, Error> {
+    owned(&st, id, &s.user)?;
+    let users =
+        st.db.managers(id)?.into_iter().filter_map(|u| st.db.user(u).ok().flatten()).map(|u| user_ref(&u)).collect();
+    Ok(Json(Managers { users }))
+}
+
+/// `PUT /api/machines/{id}/managers` (owner only): who else may manage it.
+pub async fn set_managers(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<i64>,
+    Json(req): Json<SetManagers>,
+) -> Result<Json<Managers>, Error> {
+    let m = owned(&st, id, &s.user)?;
+    for u in &req.users {
+        st.db.user(*u)?.ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("no user {u}")))?;
+    }
+    let users: Vec<i64> = req.users.iter().copied().filter(|u| *u != m.owner_id).collect();
+    let before = st.db.snapshot(Some(&[id]))?;
+    st.db.set_managers(id, &users)?;
+    let touched = st.db.revoke_lost(before)?;
+    st.wake(&touched);
+    st.db.audit(Some(s.user.id), "machine-managers", &format!("{}: {} manager(s)", m.name, users.len()));
+    get_managers(State(st), Authed(s), Path(id)).await
+}
+
+/// `GET /api/machines/{id}/history`: the last sessions (managers, and system admins).
+pub async fn history(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<HistoryEntry>>, Error> {
+    let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
+    if !s.user.is_admin && !st.db.can_manage(s.user.id, &m)? {
+        return Err(err(StatusCode::FORBIDDEN, "only who manages this computer can see its history"));
+    }
+    Ok(Json(st.db.history(id, 200)?))
+}
+
 /// `POST /api/machines/{id}/ticket`: permission to connect, for one client endpoint.
 pub async fn ticket(
     State(st): State<Shared>,
@@ -201,12 +259,18 @@ pub async fn ticket(
     Json(req): Json<TicketRequest>,
 ) -> Result<Json<TicketResponse>, Error> {
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
-    if !st.db.can_access(s.user.id, &m)? {
+    let access = st.db.access_of(s.user.id, &m)?;
+    if access.is_none() {
         return Err(err(StatusCode::FORBIDDEN, "you do not have access to this computer"));
     }
     let client = parse_endpoint(&req.client)?;
     let machine = parse_endpoint(&m.endpoint_id)?;
-    let t = now();
+    // Hosts void tickets issued at or before a revocation (second resolution): one issued
+    // right after it, in the same second, must still count as newer.
+    let t = match st.db.last_revocation(m.id, s.user.id)? {
+        Some(r) => now().max(r + 1),
+        None => now(),
+    };
     let mut ticket_id = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut ticket_id);
     let claims = TicketClaims {
@@ -216,12 +280,13 @@ pub async fn ticket(
         user_id: s.user.id,
         user_email: s.user.email.clone(),
         user_name: s.user.name.clone(),
-        role: "control".into(),
+        role: access.to_text(),
         issued_at: t,
         expires_at: t + TICKET_MAX_SECS,
     };
     let bytes = claims.to_bytes();
     let sig = st.key.sign(&SignedTicket::signed_message(&bytes));
+    st.db.audit(Some(s.user.id), "ticket", &format!("{} ({})", m.name, access.label()));
     let signed = SignedTicket { claims: bytes, signature: sig.to_bytes() };
     Ok(Json(TicketResponse {
         ticket: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signed.to_bytes()),
@@ -257,12 +322,16 @@ pub async fn agent_sync(
     Json(req): Json<AgentSync>,
 ) -> Result<Json<AgentSyncReply>, Error> {
     st.db.machine_seen(m.id, &req.addrs, &req.os, req.in_session)?;
+    if !req.sessions.is_empty() {
+        st.db.record_sessions(m.id, &req.sessions)?;
+    }
     let notify = st.machine_notify(m.id);
     let wait = notify.notified();
     tokio::pin!(wait);
     wait.as_mut().enable();
     let (cursor, _) = st.db.revocations(m.id)?;
-    if cursor <= req.cursor {
+    let current_key = hex::encode(st.key.public().as_bytes());
+    if cursor <= req.cursor && req.server_key == current_key {
         let _ = tokio::time::timeout(Duration::from_secs(25), wait).await;
     }
     // Unregistered meanwhile: the next call gets 401.
@@ -272,6 +341,7 @@ pub async fn agent_sync(
         cursor,
         revocations: revs.into_iter().map(|(user_id, before)| Revocation { user_id, before }).collect(),
         machine: view(&st, &m, None)?,
+        server_keys: st.ticket_keys(),
     }))
 }
 

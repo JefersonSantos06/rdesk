@@ -17,7 +17,7 @@ use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfi
 use rdesk_common::transport;
 #[cfg(feature = "host")]
 use rdesk_common::transport::HostIdentity;
-use rdesk_proto::api::{GroupRole, Machine, UpdateMachine, Visibility};
+use rdesk_proto::api::{GroupRole, Machine, ShareRole, UpdateMachine, Visibility};
 #[cfg(feature = "host")]
 use ssh_key::PublicKey;
 #[cfg(feature = "host")]
@@ -212,15 +212,25 @@ enum MachinesCmd {
     /// Show whom a computer is shared with.
     Shares { machine: String },
     /// Set whom a computer is shared with (replaces the list; also sets it to "shared").
+    /// Add `:view` or `:files` for view-only or files-only (default: full control).
     Share {
         machine: String,
-        /// E-mail of a user (repeat for several).
+        /// `email[:control|view|files]` (repeat for several).
         #[arg(long = "user")]
         users: Vec<String>,
-        /// Name of a group (repeat for several).
+        /// `group[:control|view|files]` (repeat for several).
         #[arg(long = "group")]
         groups: Vec<String>,
     },
+    /// Show or set (owner only) the other managers of a computer.
+    Managers {
+        machine: String,
+        /// Replace the list with these e-mails (`--set` with none clears it).
+        #[arg(long = "set", num_args = 0..)]
+        set: Option<Vec<String>>,
+    },
+    /// The last sessions on a computer (its managers and system admins).
+    History { machine: String },
 }
 
 #[derive(Subcommand)]
@@ -695,11 +705,11 @@ async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
             let m = find_machine(&list, &machine)?;
             let sh = api.shares(m.id).await?;
             println!("{} ({}):", m.name, vis_label(m.visibility));
-            for u in sh.users {
-                println!("  user  {}", u.email);
+            for (u, r) in sh.users {
+                println!("  user  {} ({})", u.email, r.label());
             }
-            for g in sh.groups {
-                println!("  group {}", g.name);
+            for (g, r) in sh.groups {
+                println!("  group {} ({})", g.name, r.label());
             }
         }
         MachinesCmd::Share { machine, users, groups } => {
@@ -708,14 +718,16 @@ async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
             let dir = api.directory().await?;
             let all_groups = api.all_groups().await?;
             let mut uids = Vec::new();
-            for e in &users {
-                let e = e.trim().to_lowercase();
-                uids.push(dir.iter().find(|u| u.email == e).ok_or_else(|| anyhow!("no user {e}"))?.id);
+            for spec in &users {
+                let (e, role) = split_role(spec)?;
+                let e = e.to_lowercase();
+                uids.push((dir.iter().find(|u| u.email == e).ok_or_else(|| anyhow!("no user {e}"))?.id, role));
             }
             let mut gids = Vec::new();
-            for g in &groups {
-                let found = all_groups.iter().find(|x| x.name.eq_ignore_ascii_case(g.trim()));
-                gids.push(found.ok_or_else(|| anyhow!("no group {g}"))?.id);
+            for spec in &groups {
+                let (g, role) = split_role(spec)?;
+                let found = all_groups.iter().find(|x| x.name.eq_ignore_ascii_case(&g));
+                gids.push((found.ok_or_else(|| anyhow!("no group {g}"))?.id, role));
             }
             api.set_shares(m.id, uids, gids).await?;
             if m.visibility != Visibility::Shared {
@@ -724,8 +736,58 @@ async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
             }
             println!("{} is shared with {} user(s) and {} group(s).", m.name, users.len(), groups.len());
         }
+        MachinesCmd::Managers { machine, set } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let current = match set {
+                Some(emails) => {
+                    let dir = api.directory().await?;
+                    let mut ids = Vec::new();
+                    for e in emails {
+                        let e = e.trim().to_lowercase();
+                        ids.push(dir.iter().find(|u| u.email == e).ok_or_else(|| anyhow!("no user {e}"))?.id);
+                    }
+                    api.set_managers(m.id, ids).await?
+                }
+                None => api.managers(m.id).await?,
+            };
+            println!("{} is managed by {} and:", m.name, m.owner.email);
+            for u in current.users {
+                println!("  {}", u.email);
+            }
+        }
+        MachinesCmd::History { machine } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+            for h in api.history(m.id).await? {
+                let len = match h.ended_at {
+                    Some(t) => format!("{} min", ((t - h.started_at).max(0) + 59) / 60),
+                    None => "still connected".into(),
+                };
+                println!(
+                    "{}\t{} ({})\t{len}\t{}\t{}",
+                    rdesk_common::directory::ago(h.started_at, now),
+                    h.who,
+                    h.client,
+                    h.access,
+                    h.method
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// `name[:control|view|files]`.
+fn split_role(spec: &str) -> Result<(String, ShareRole)> {
+    match spec.rsplit_once(':') {
+        Some((name, role)) => match ShareRole::parse(role.trim()) {
+            Some(r) => Ok((name.trim().to_string(), r)),
+            None => bail!("{role}: use control, view or files"),
+        },
+        None => Ok((spec.trim().to_string(), ShareRole::Control)),
+    }
 }
 
 async fn groups_cmd(cmd: GroupsCmd) -> Result<()> {

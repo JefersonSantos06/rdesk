@@ -61,6 +61,8 @@ pub enum UiEvent {
     /// Something the host wants the user to know (shown briefly, e.g. input is blocked).
     Notice(String),
     Connected(HostInfo),
+    /// What this session may do (view only, files only…); sent right after `Connected`.
+    Access(rdesk_proto::Access),
     Monitors {
         monitors: Vec<MonitorInfo>,
         active: u32,
@@ -435,20 +437,35 @@ async fn once(
     notify: &Notify,
 ) -> End {
     // One endpoint for all reconnects: it keeps its relay connection and path state.
-    if endpoint.is_none() {
-        match transport::bind(None, &opts.net, &opts.transport, Role::Client).await {
+    // Registered computers also need a ticket from the server for this endpoint; the first
+    // time, both happen at once (the endpoint's ID comes from a key made beforehand).
+    let ticket_res = if let Some(ep) = endpoint.clone() {
+        match &opts.machine {
+            Some(m) => Some(get_ticket(m.id, ep.id().as_bytes(), ticket).await),
+            None => None,
+        }
+    } else {
+        let key = transport::SecretKey::generate();
+        let client_id = *key.public().as_bytes();
+        let bind = transport::bind(Some(key), &opts.net, &opts.transport, Role::Client);
+        let fetch = async {
+            match &opts.machine {
+                Some(m) => Some(get_ticket(m.id, &client_id, ticket).await),
+                None => None,
+            }
+        };
+        let (ep, t) = tokio::join!(bind, fetch);
+        match ep {
             Ok(ep) => *endpoint = Some(ep),
             Err(e) => return End::Retry(format!("{e:#}")),
         }
-    }
+        t
+    };
     let ep = endpoint.clone().unwrap();
-    // Registered computers need a ticket from the server for this endpoint.
-    let ticket_bytes = match &opts.machine {
-        Some(m) => match get_ticket(m.id, ep.id().as_bytes(), ticket).await {
-            Ok(t) => Some(t),
-            Err((true, msg)) => return End::Fatal(msg),
-            Err((false, msg)) => return End::Retry(msg),
-        },
+    let ticket_bytes = match ticket_res {
+        Some(Ok(t)) => Some(t),
+        Some(Err((true, msg))) => return End::Fatal(msg),
+        Some(Err((false, msg))) => return End::Retry(msg),
         None => None,
     };
     let mut direct: Vec<String> = opts.machine.as_ref().map(|m| m.addrs.clone()).unwrap_or_default();
@@ -520,9 +537,12 @@ async fn once(
     };
     *resume = Some((ok.session_id, ok.resume_token));
     notify(UiEvent::Connected(ok.host.clone()));
+    notify(UiEvent::Access(ok.access));
     notify(UiEvent::Status(format!("Connected to {}", ok.host.hostname)));
 
-    match run_session(&conn, ctrl_w, ctrl_r, monitor, cmd_rx, view, notify, opts.clipboard).await {
+    // The clipboard goes both ways: only with full control.
+    let clipboard = opts.clipboard && ok.access.input;
+    match run_session(&conn, ctrl_w, ctrl_r, monitor, cmd_rx, view, notify, clipboard, ok.access.input).await {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -554,6 +574,7 @@ async fn run_session(
     view: &SharedView,
     notify: &Notify,
     clipboard_on: bool,
+    input_allowed: bool,
 ) -> Result<bool> {
     let mut input = conn.open_uni().await?;
     let _ = input.set_priority(20);
@@ -708,6 +729,8 @@ async fn run_session(
                 let Some(c) = c else { break Ok(true) };
                 match c {
                     Cmd::Quit => break Ok(true),
+                    // View-only sessions: the host would drop it anyway.
+                    Cmd::Input(_) if !input_allowed => {}
                     Cmd::Input(ev) => {
                         if let Err(e) = write_msg(&mut input, &ev).await {
                             break Err(e.into());

@@ -263,7 +263,7 @@ fn ticket_for(server: &iroh::SecretKey, client: [u8; 32], user_id: i64, issued: 
         user_id,
         user_email: "ana@example.com".into(),
         user_name: "Ana".into(),
-        role: "control".into(),
+        role: "screen,input,files".into(),
         issued_at: issued,
         expires_at: issued + 3600,
     }
@@ -278,8 +278,11 @@ fn unix_now() -> i64 {
 
 fn registered(server: &iroh::SecretKey, keys: &[&PrivateKey], password: Option<&str>, local: bool) -> HostAuthConfig {
     let mut cfg = host_cfg(keys, password);
-    cfg.ticket =
-        Some(TicketPolicy { server_key: *server.public().as_bytes(), machine: HOST_FP, revoked: Default::default() });
+    cfg.ticket = Some(TicketPolicy {
+        server_keys: std::sync::Arc::new(std::sync::RwLock::new(vec![*server.public().as_bytes()])),
+        machine: HOST_FP,
+        revoked: Default::default(),
+    });
     cfg.require_local = local;
     cfg
 }

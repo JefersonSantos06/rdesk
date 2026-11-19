@@ -8,7 +8,8 @@ use rdesk_common::account::{Api, Session};
 use rdesk_common::auth::{self, ClientAuth};
 use rdesk_common::config::{self, NetworkConfig, TransportTuning};
 use rdesk_common::transport::{self, ConnectionError, Role, close};
-use rdesk_proto::api::{UpdateMachine, UserInfo, Visibility};
+use rdesk_proto::Access;
+use rdesk_proto::api::{ShareRole, UpdateMachine, UserInfo, Visibility};
 use rdesk_server::config::{ServerConfig, Tls};
 use rdesk_server::db::Db;
 
@@ -43,7 +44,8 @@ async fn sharing_controls_access_and_unsharing_kicks() {
         tls: Tls::None,
         ..Default::default()
     };
-    let server = rdesk_server::start_with(cfg, db, iroh_base::SecretKey::generate(), dir.path()).await.unwrap();
+    let old_key = iroh_base::SecretKey::generate();
+    let server = rdesk_server::start_with(cfg.clone(), db.clone(), old_key.clone(), dir.path()).await.unwrap();
     let relay = format!("{server_url}/");
 
     // Ana registers this computer (private) and starts its host: no password, no keys.
@@ -93,7 +95,7 @@ async fn sharing_controls_access_and_unsharing_kicks() {
     c.conn.close(close::NORMAL, b"");
 
     // Ana shares it with Bia.
-    ana_api.set_shares(reg.machine_id, vec![bia.id], vec![]).await.unwrap();
+    ana_api.set_shares(reg.machine_id, vec![(bia.id, ShareRole::Control)], vec![]).await.unwrap();
     ana_api
         .update_machine(reg.machine_id, &UpdateMachine { name: None, visibility: Some(Visibility::Shared) })
         .await
@@ -107,7 +109,8 @@ async fn sharing_controls_access_and_unsharing_kicks() {
     let c = transport::connect(&ep, id, None, &net, Duration::from_secs(10)).await.unwrap();
     let (mut w, mut r) = c.conn.open_bi().await.unwrap();
     let mut creds = ClientAuth { ticket: Some(ticket.clone()), ..no_ticket };
-    auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await.unwrap();
+    let ok = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await.unwrap();
+    assert_eq!(ok.access, Access::FULL);
     wait_for("the host to report the session", || async {
         bia_api.machines().await.unwrap().first().is_some_and(|m| m.in_session)
     })
@@ -133,6 +136,77 @@ async fn sharing_controls_access_and_unsharing_kicks() {
     };
     let e = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut old).await.unwrap_err();
     assert!(format!("{e:#}").contains("removed"), "{e:#}");
+
+    // The host reported the session (and its end) to the server's history.
+    wait_for("the history", || async {
+        ana_api
+            .history(reg.machine_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|h| h.who == "bia@example.com" && h.ended_at.is_some())
+    })
+    .await;
+    assert!(bia_api.history(reg.machine_id).await.is_err(), "only managers see the history");
+
+    // View only: the host is told, and says so in its answer.
+    ana_api.set_shares(reg.machine_id, vec![(bia.id, ShareRole::View)], vec![]).await.unwrap();
+    let login = async |api: &Api| -> anyhow::Result<rdesk_proto::AuthOk> {
+        let (ticket, _) = api.ticket(reg.machine_id, ep.id().as_bytes()).await?;
+        let c = transport::connect(&ep, id, None, &net, Duration::from_secs(10)).await?;
+        let (mut w, mut r) = c.conn.open_bi().await?;
+        let mut creds = ClientAuth {
+            client_name: "bia".into(),
+            resume: None,
+            ticket: Some(ticket),
+            keys: None,
+            key_filter: None,
+            password: None,
+        };
+        let ok = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await;
+        c.conn.close(close::NORMAL, b"");
+        ok
+    };
+    assert_eq!(login(&bia_api).await.unwrap().access, Access::VIEW);
+
+    // A co-manager may share it too (but not choose managers).
+    ana_api.set_managers(reg.machine_id, vec![bia.id]).await.unwrap();
+    let as_bia = &bia_api.machines().await.unwrap()[0];
+    assert!(as_bia.can_manage && !as_bia.is_owner && as_bia.access == Access::FULL);
+    bia_api.set_shares(reg.machine_id, vec![], vec![]).await.unwrap();
+    assert!(bia_api.set_managers(reg.machine_id, vec![]).await.is_err());
+    ana_api.set_managers(reg.machine_id, vec![]).await.unwrap();
+
+    // Key rotation: the server restarts with a new key; the host learns it by its sync and
+    // accepts the new tickets without being registered again.
+    ana_api.set_shares(reg.machine_id, vec![(bia.id, ShareRole::Control)], vec![]).await.unwrap();
+    server.stop().await.unwrap();
+    let new_key = iroh_base::SecretKey::generate();
+    let server = rdesk_server::start_full(cfg, db, new_key.clone(), Some(old_key.public()), dir.path()).await.unwrap();
+    // The host picks the new key up with its next sync (it retries a few seconds after the
+    // server went away).
+    let new_hex = hex::encode(new_key.public().as_bytes());
+    wait_for("the host to learn the new key", || async {
+        rdesk_common::account::Registration::load().is_some_and(|r| r.server_key == new_hex)
+    })
+    .await;
+    let mut ok = None;
+    for _ in 0..20 {
+        match login(&bia_api).await {
+            Ok(a) => {
+                ok = Some(a);
+                break;
+            }
+            // The relays reconnect after the restart; only connecting can fail meanwhile.
+            Err(e) => {
+                eprintln!("after rotation: {e:#}");
+                tokio::time::sleep(Duration::from_millis(500)).await
+            }
+        }
+    }
+    assert_eq!(ok.expect("a ticket from the new key never worked").access, Access::FULL);
+    let saved = rdesk_common::account::Registration::load().unwrap();
+    assert_eq!(saved.server_key, hex::encode(new_key.public().as_bytes()), "the new key is remembered");
 
     // Unregistering: the host's sync notices and forgets the registration.
     rdesk_host::admin::unregister(&ana_session).await.unwrap();

@@ -10,8 +10,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use rdesk_proto::api::{
     self, API_VERSION, AddMember, AddUser, AdminUser, AgentSync, AgentSyncReply, ApiError, Group, GroupRef, GroupRole,
-    Machine, NewGroup, RegisterMachine, Registered, ServerInfo, SetRole, SetShares, Shares, TicketRequest,
-    TicketResponse, TokenRequest, TokenResponse, UpdateMachine, UpdateUser, UserInfo, UserRef, Visibility,
+    HistoryEntry, Machine, Managers, NewGroup, RegisterMachine, Registered, ServerInfo, SetManagers, SetRole,
+    SetShares, ShareRole, Shares, TicketRequest, TicketResponse, TokenRequest, TokenResponse, UpdateMachine,
+    UpdateUser, UserInfo, UserRef, Visibility,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -61,12 +62,7 @@ impl Session {
     }
 
     pub fn clear() -> Result<()> {
-        let p = config::config_path(SESSION_FILE)?;
-        match std::fs::remove_file(p) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        remove_if_present(&config::config_path(SESSION_FILE)?)
     }
 
     pub fn expired(&self) -> bool {
@@ -112,11 +108,7 @@ impl Registration {
     }
 
     pub fn clear() -> Result<()> {
-        match std::fs::remove_file(config::config_path(MACHINE_FILE)?) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        remove_if_present(&config::config_path(MACHINE_FILE)?)
     }
 
     pub fn server_key(&self) -> Result<[u8; 32]> {
@@ -128,6 +120,24 @@ impl Registration {
 
     pub fn api(&self) -> Result<Api> {
         Api::new(&self.server, Some(self.token.clone()))
+    }
+}
+
+/// Delete a file; fine if it is already gone, also when someone else is deleting it at the
+/// same moment (Windows then answers "access denied" until it disappears).
+fn remove_if_present(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            for _ in 0..20 {
+                if !path.exists() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(anyhow::Error::from(e).context(format!("removing {}", path.display())))
+        }
     }
 }
 
@@ -291,9 +301,26 @@ impl Api {
         self.get(&format!("{}/{id}/shares", api::PATH_MACHINES)).await
     }
 
-    pub async fn set_shares(&self, id: i64, users: Vec<i64>, groups: Vec<i64>) -> Result<Shares> {
+    pub async fn set_shares(
+        &self,
+        id: i64,
+        users: Vec<(i64, ShareRole)>,
+        groups: Vec<(i64, ShareRole)>,
+    ) -> Result<Shares> {
         self.send(reqwest::Method::PUT, &format!("{}/{id}/shares", api::PATH_MACHINES), &SetShares { users, groups })
             .await
+    }
+
+    pub async fn managers(&self, id: i64) -> Result<Managers> {
+        self.get(&format!("{}/{id}/managers", api::PATH_MACHINES)).await
+    }
+
+    pub async fn set_managers(&self, id: i64, users: Vec<i64>) -> Result<Managers> {
+        self.send(reqwest::Method::PUT, &format!("{}/{id}/managers", api::PATH_MACHINES), &SetManagers { users }).await
+    }
+
+    pub async fn history(&self, id: i64) -> Result<Vec<HistoryEntry>> {
+        self.get(&format!("{}/{id}/history", api::PATH_MACHINES)).await
     }
 
     /// A ticket to connect to machine `id` from the endpoint `client`.

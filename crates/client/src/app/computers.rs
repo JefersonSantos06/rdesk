@@ -9,7 +9,7 @@
 //! * "Login options" keep, per computer, how to answer its optional extra lock (its own
 //!   password or SSH key).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ use egui::{Color32, RichText, Sense, Vec2};
 use rdesk_common::account::Session;
 use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, parse_host_id};
-use rdesk_proto::api::{GroupRef, Machine, UpdateMachine, UserRef, Visibility};
+use rdesk_proto::api::{GroupRef, HistoryEntry, Machine, ShareRole, UpdateMachine, UserRef, Visibility};
 use tokio::sync::mpsc;
 
 use super::account::spawn;
@@ -204,23 +204,56 @@ impl LoginOptions {
 
 /// Everyone and every group, to pick from.
 type Choices = (Vec<UserRef>, Vec<GroupRef>);
-/// The choices plus who it is shared with now (user ids, group ids).
-type ShareLoad = Result<(Vec<UserRef>, Vec<GroupRef>, Vec<i64>, Vec<i64>), String>;
+/// Who it is shared with now, with roles.
+type Current = (Vec<(i64, ShareRole)>, Vec<(i64, ShareRole)>);
+/// The choices plus the current shares.
+type ShareLoad = Result<(Choices, Current), String>;
 
 struct ShareEdit {
     machine: Machine,
-    users: HashSet<i64>,
-    groups: HashSet<i64>,
+    users: HashMap<i64, ShareRole>,
+    groups: HashMap<i64, ShareRole>,
     /// Loaded in the background.
     choices: Option<Result<Choices, String>>,
     job: Option<Receiver<ShareLoad>>,
+}
+
+/// Everyone, and the current managers' ids.
+type ManagersLoad = Result<(Vec<UserRef>, Vec<i64>), String>;
+
+struct ManagersEdit {
+    machine: Machine,
+    selected: HashSet<i64>,
+    people: Option<Result<Vec<UserRef>, String>>,
+    job: Option<Receiver<ManagersLoad>>,
+}
+
+struct History {
+    machine: Machine,
+    data: Option<Result<Vec<HistoryEntry>, String>>,
+    job: Option<Receiver<Result<Vec<HistoryEntry>, String>>>,
 }
 
 enum Dialog {
     Login(Box<LoginOptions>),
     Rename { machine: Machine, name: String },
     Share(Box<ShareEdit>),
+    Managers(Box<ManagersEdit>),
+    History(Box<History>),
     Unregister(Machine),
+}
+
+/// A share's role, as a small drop-down.
+fn role_picker(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, role: &mut ShareRole) {
+    egui::ComboBox::from_id_salt(salt).selected_text(role.label()).width(110.0).show_ui(ui, |ui| {
+        for r in [ShareRole::Control, ShareRole::View, ShareRole::Files] {
+            ui.selectable_value(role, r, r.label());
+        }
+    });
+}
+
+fn when(t: i64) -> String {
+    rdesk_common::directory::ago(t, now())
 }
 
 pub(super) struct Computers {
@@ -470,7 +503,12 @@ impl Computers {
                         ui.label(RichText::new(&m.name).strong().size(16.0));
                     });
                     let owner = if m.is_owner { "Yours".to_string() } else { format!("By {}", m.owner.email) };
-                    ui.label(RichText::new(format!("{owner} · {}", vis_label(m.visibility))).weak().small());
+                    let mine = if m.access != rdesk_proto::Access::FULL && m.can_access {
+                        format!(" · you: {}", m.access.label())
+                    } else {
+                        String::new()
+                    };
+                    ui.label(RichText::new(format!("{owner} · {}{mine}", vis_label(m.visibility))).weak().small());
                     ui.label(RichText::new(detail).color(status.color()));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -485,7 +523,7 @@ impl Computers {
                         {
                             self.open(m, true);
                         }
-                        if m.is_owner && ui.small_button("Share…").clicked() {
+                        if m.can_manage && ui.small_button("Share…").clicked() {
                             self.start_share(&ctx, m);
                         }
                     });
@@ -516,8 +554,12 @@ impl Computers {
                 ui.ctx().copy_text(m.endpoint_id.clone());
                 ui.close();
             }
-            if m.is_owner {
+            if m.can_manage {
                 ui.separator();
+                if ui.button("History…").clicked() {
+                    self.start_history(&ctx, m);
+                    ui.close();
+                }
                 if ui.button("Rename…").clicked() {
                     self.dialog = Some(Dialog::Rename { machine: m.clone(), name: m.name.clone() });
                     ui.close();
@@ -544,6 +586,13 @@ impl Computers {
                     self.start_share(&ctx, m);
                     ui.close();
                 }
+            }
+            if m.is_owner {
+                if ui.button("Managers…").on_hover_text("Others who may share, rename and see the history").clicked()
+                {
+                    self.start_managers(&ctx, m);
+                    ui.close();
+                }
                 if ui.button("Unregister…").clicked() {
                     self.dialog = Some(Dialog::Unregister(m.clone()));
                     ui.close();
@@ -562,21 +611,54 @@ impl Computers {
                 let groups = api.all_groups().await?;
                 let cur = api.shares(id).await?;
                 anyhow::Ok((
-                    users,
-                    groups,
-                    cur.users.iter().map(|u| u.id).collect(),
-                    cur.groups.iter().map(|g| g.id).collect(),
+                    (users, groups),
+                    (
+                        cur.users.iter().map(|(u, r)| (u.id, *r)).collect(),
+                        cur.groups.iter().map(|(g, r)| (g.id, *r)).collect(),
+                    ),
                 ))
             };
             f.await.map_err(|e| format!("{e:#}"))
         });
         self.dialog = Some(Dialog::Share(Box::new(ShareEdit {
             machine: m.clone(),
-            users: HashSet::new(),
-            groups: HashSet::new(),
+            users: HashMap::new(),
+            groups: HashMap::new(),
             choices: None,
             job: Some(job),
         })));
+    }
+
+    fn start_managers(&mut self, ctx: &egui::Context, m: &Machine) {
+        let Some(s) = Session::load() else { return };
+        let id = m.id;
+        let job = spawn(ctx, move || async move {
+            let api = s.api().map_err(|e| format!("{e:#}"))?;
+            let f = async {
+                let people = api.directory().await?;
+                let cur = api.managers(id).await?;
+                anyhow::Ok((people, cur.users.iter().map(|u| u.id).collect()))
+            };
+            f.await.map_err(|e| format!("{e:#}"))
+        });
+        self.dialog = Some(Dialog::Managers(Box::new(ManagersEdit {
+            machine: m.clone(),
+            selected: HashSet::new(),
+            people: None,
+            job: Some(job),
+        })));
+    }
+
+    fn start_history(&mut self, ctx: &egui::Context, m: &Machine) {
+        let Some(s) = Session::load() else { return };
+        let id = m.id;
+        let job = spawn(ctx, move || async move {
+            match s.api() {
+                Ok(api) => api.history(id).await.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("{e:#}")),
+            }
+        });
+        self.dialog = Some(Dialog::History(Box::new(History { machine: m.clone(), data: None, job: Some(job) })));
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, snap: &Snapshot) {
@@ -742,7 +824,7 @@ impl Computers {
                 {
                     sh.job = None;
                     match r {
-                        Ok((users, groups, cur_u, cur_g)) => {
+                        Ok(((users, groups), (cur_u, cur_g))) => {
                             sh.users = cur_u.into_iter().collect();
                             sh.groups = cur_g.into_iter().collect();
                             sh.choices = Some(Ok((users, groups)));
@@ -752,8 +834,9 @@ impl Computers {
                 }
                 let me = Session::load().map(|s| s.user.id);
                 let m = egui::Modal::new(egui::Id::unique("share-machine")).show(ctx, |ui| {
-                    ui.set_width(460.0);
+                    ui.set_width(520.0);
                     ui.heading(format!("Share {}", sh.machine.name));
+                    ui.weak("Full control: screen, keyboard, mouse, clipboard and files. View only: just the screen.");
                     if sh.machine.visibility == Visibility::Everyone {
                         ui.colored_label(
                             Status::Busy.color(),
@@ -776,14 +859,19 @@ impl Computers {
                                     ui.weak("No groups yet (create them on the Groups page).");
                                 }
                                 for g in &groups {
-                                    let mut on = sh.groups.contains(&g.id);
-                                    if ui.checkbox(&mut on, &g.name).changed() {
-                                        if on {
-                                            sh.groups.insert(g.id)
-                                        } else {
-                                            sh.groups.remove(&g.id)
-                                        };
-                                    }
+                                    ui.horizontal(|ui| {
+                                        let mut on = sh.groups.contains_key(&g.id);
+                                        if ui.checkbox(&mut on, &g.name).changed() {
+                                            if on {
+                                                sh.groups.insert(g.id, ShareRole::Control);
+                                            } else {
+                                                sh.groups.remove(&g.id);
+                                            }
+                                        }
+                                        if let Some(r) = sh.groups.get_mut(&g.id) {
+                                            role_picker(ui, ("g", g.id), r);
+                                        }
+                                    });
                                 }
                                 ui.add_space(6.0);
                                 ui.label(RichText::new("People").strong());
@@ -793,14 +881,19 @@ impl Computers {
                                     } else {
                                         format!("{} ({})", u.name, u.email)
                                     };
-                                    let mut on = sh.users.contains(&u.id);
-                                    if ui.checkbox(&mut on, label).changed() {
-                                        if on {
-                                            sh.users.insert(u.id)
-                                        } else {
-                                            sh.users.remove(&u.id)
-                                        };
-                                    }
+                                    ui.horizontal(|ui| {
+                                        let mut on = sh.users.contains_key(&u.id);
+                                        if ui.checkbox(&mut on, label).changed() {
+                                            if on {
+                                                sh.users.insert(u.id, ShareRole::Control);
+                                            } else {
+                                                sh.users.remove(&u.id);
+                                            }
+                                        }
+                                        if let Some(r) = sh.users.get_mut(&u.id) {
+                                            role_picker(ui, ("u", u.id), r);
+                                        }
+                                    });
                                 }
                             });
                             ui.add_space(6.0);
@@ -823,8 +916,8 @@ impl Computers {
                     Some(true) => {
                         let id = sh.machine.id;
                         let name = sh.machine.name.clone();
-                        let users: Vec<i64> = sh.users.iter().copied().collect();
-                        let groups: Vec<i64> = sh.groups.iter().copied().collect();
+                        let users: Vec<(i64, ShareRole)> = sh.users.iter().map(|(k, v)| (*k, *v)).collect();
+                        let groups: Vec<(i64, ShareRole)> = sh.groups.iter().map(|(k, v)| (*k, *v)).collect();
                         let vis = sh.machine.visibility;
                         self.run(ctx, move |api| async move {
                             api.set_shares(id, users.clone(), groups.clone()).await?;
@@ -843,6 +936,127 @@ impl Computers {
                     Some(false) => keep = false,
                     None if m.should_close() => keep = false,
                     None => {}
+                }
+            }
+            Dialog::Managers(me_) => {
+                if let Some(rx) = &me_.job
+                    && let Ok(r) = rx.try_recv()
+                {
+                    me_.job = None;
+                    match r {
+                        Ok((people, cur)) => {
+                            me_.selected = cur.into_iter().collect();
+                            me_.people = Some(Ok(people));
+                        }
+                        Err(e) => me_.people = Some(Err(e)),
+                    }
+                }
+                let owner = me_.machine.owner.id;
+                let m = egui::Modal::new(egui::Id::unique("managers")).show(ctx, |ui| {
+                    ui.set_width(440.0);
+                    ui.heading(format!("Managers of {}", me_.machine.name));
+                    ui.label("Managers have full access and may share it, rename it, change who sees it and see its history.");
+                    let mut done = None;
+                    match &me_.people {
+                        None => {
+                            ui.spinner();
+                        }
+                        Some(Err(e)) => {
+                            ui.colored_label(ERROR, e);
+                        }
+                        Some(Ok(people)) => {
+                            let people = people.clone();
+                            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                                for p in people.iter().filter(|p| p.id != owner) {
+                                    let mut on = me_.selected.contains(&p.id);
+                                    if ui.checkbox(&mut on, &p.email).changed() {
+                                        if on {
+                                            me_.selected.insert(p.id);
+                                        } else {
+                                            me_.selected.remove(&p.id);
+                                        }
+                                    }
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    done = Some(true);
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    done = Some(false);
+                                }
+                            });
+                        }
+                    }
+                    if !matches!(me_.people, Some(Ok(_))) && ui.button("Close").clicked() {
+                        done = Some(false);
+                    }
+                    done
+                });
+                match m.inner {
+                    Some(true) => {
+                        let (id, name) = (me_.machine.id, me_.machine.name.clone());
+                        let users: Vec<i64> = me_.selected.iter().copied().collect();
+                        self.run(ctx, move |api| async move {
+                            let r = api.set_managers(id, users).await?;
+                            Ok(format!("{name}: {} manager(s).", r.users.len()))
+                        });
+                        keep = false;
+                    }
+                    Some(false) => keep = false,
+                    None if m.should_close() => keep = false,
+                    None => {}
+                }
+            }
+            Dialog::History(h) => {
+                if let Some(rx) = &h.job
+                    && let Ok(r) = rx.try_recv()
+                {
+                    h.job = None;
+                    h.data = Some(r);
+                }
+                let m = egui::Modal::new(egui::Id::unique("history")).show(ctx, |ui| {
+                    ui.set_width(620.0);
+                    ui.heading(format!("History of {}", h.machine.name));
+                    match &h.data {
+                        None => {
+                            ui.spinner();
+                        }
+                        Some(Err(e)) => {
+                            ui.colored_label(ERROR, e);
+                        }
+                        Some(Ok(list)) if list.is_empty() => {
+                            ui.weak("No sessions yet.");
+                        }
+                        Some(Ok(list)) => {
+                            egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                                egui::Grid::new("hist").num_columns(4).striped(true).spacing([12.0, 6.0]).show(
+                                    ui,
+                                    |ui| {
+                                        ui.strong("Who");
+                                        ui.strong("When");
+                                        ui.strong("How long");
+                                        ui.strong("Access");
+                                        ui.end_row();
+                                        for e in list {
+                                            ui.label(format!("{} ({})", e.who, e.client)).on_hover_text(&e.method);
+                                            ui.label(when(e.started_at));
+                                            ui.label(match e.ended_at {
+                                                Some(t) => format!("{} min", ((t - e.started_at).max(0) + 59) / 60),
+                                                None => "still connected".into(),
+                                            });
+                                            ui.label(&e.access);
+                                            ui.end_row();
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    }
+                    ui.button("Close").clicked()
+                });
+                if m.inner || m.should_close() {
+                    keep = false;
                 }
             }
             Dialog::Unregister(machine) => {

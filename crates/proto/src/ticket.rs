@@ -23,7 +23,7 @@ pub struct TicketClaims {
     pub user_id: i64,
     pub user_email: String,
     pub user_name: String,
-    /// What the user may do; for now always "control".
+    /// What the user may do: [`crate::Access::to_text`] ("screen,input,files").
     pub role: String,
     pub issued_at: i64,
     pub expires_at: i64,

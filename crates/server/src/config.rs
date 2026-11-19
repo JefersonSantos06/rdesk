@@ -172,6 +172,34 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The key before the last rotation (public half) and when it was replaced.
+pub const PREV_KEY_FILE: &str = "server.key.prev";
+
+/// Replace the ticket-signing key. The old public key stays trusted by hosts for 12 h
+/// (the longest a ticket lasts), so nobody is cut off. Restart the server afterwards.
+pub fn rotate_key(data: &Path) -> Result<iroh_base::PublicKey> {
+    let old = load_or_create_key(data)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    write_private(&data.join(PREV_KEY_FILE), format!("{} {stamp}\n", hex::encode(old.public().as_bytes())).as_bytes())?;
+    let new = iroh_base::SecretKey::generate();
+    write_private(&data.join(KEY_FILE), &new.to_bytes())?;
+    Ok(new.public())
+}
+
+/// The previous key, while its tickets may still be around.
+pub fn load_prev_key(data: &Path) -> Result<Option<iroh_base::PublicKey>> {
+    let Ok(text) = std::fs::read_to_string(data.join(PREV_KEY_FILE)) else { return Ok(None) };
+    let mut it = text.split_whitespace();
+    let (Some(k), Some(t)) = (it.next(), it.next()) else { return Ok(None) };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let at: i64 = t.parse().unwrap_or(0);
+    if now - at > rdesk_proto::ticket::TICKET_MAX_SECS + rdesk_proto::ticket::CLOCK_SKEW_SECS {
+        return Ok(None);
+    }
+    let b: [u8; 32] = hex::decode(k).ok().and_then(|b| b.try_into().ok()).context("bad server.key.prev")?;
+    Ok(Some(iroh_base::PublicKey::from_bytes(&b).context("bad server.key.prev")?))
+}
+
 /// The ticket-signing key, created on first use.
 pub fn load_or_create_key(data: &Path) -> Result<iroh_base::SecretKey> {
     let path = data.join(KEY_FILE);

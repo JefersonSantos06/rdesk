@@ -86,6 +86,8 @@ struct App {
     monitors: Vec<MonitorInfo>,
     active: u32,
     stats: (u32, f32, f32, &'static str),
+    /// What this session may do (from the host's answer).
+    access: rdesk_proto::Access,
     menu_open: bool,
     /// Where the remote image is drawn, in egui points.
     image_rect: Option<egui::Rect>,
@@ -117,6 +119,7 @@ impl App {
             monitors: Vec::new(),
             active: 0,
             stats: (0, 0.0, 0.0, ""),
+            access: rdesk_proto::Access::FULL,
             menu_open: false,
             image_rect: None,
             pending_move: None,
@@ -137,7 +140,9 @@ impl App {
     }
 
     fn input(&self, ev: InputEvent) {
-        self.send(Cmd::Input(ev));
+        if self.access.input {
+            self.send(Cmd::Input(ev));
+        }
     }
 
     fn request_redraw(&self) {
@@ -606,6 +611,17 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Notice(text) => {
                 tracing::warn!("host: {text}");
                 self.notice = Some((text, Instant::now()));
+            }
+            UiEvent::Access(a) => {
+                self.access = a;
+                if !a.screen {
+                    // Files only: there is no picture; open the file panel.
+                    self.menu_open = true;
+                    self.send(Cmd::ListDir(self.remote_path.clone()));
+                }
+                if a != rdesk_proto::Access::FULL {
+                    self.notice = Some((format!("This session: {}", a.label()), Instant::now()));
+                }
             }
             UiEvent::Connected(h) => {
                 self.fatal = None;

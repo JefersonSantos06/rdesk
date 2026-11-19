@@ -99,6 +99,27 @@ const SCHEMA: &[&str] = &[
         before INTEGER NOT NULL
     );
     "#,
+    // v3: co-managers, access history.
+    r#"
+    CREATE TABLE machine_managers (
+        machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        PRIMARY KEY (machine_id, user_id)
+    );
+    CREATE TABLE access_log (
+        id INTEGER PRIMARY KEY,
+        machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+        session TEXT NOT NULL,
+        user_id INTEGER,
+        who TEXT NOT NULL,
+        client TEXT NOT NULL,
+        method TEXT NOT NULL,
+        access TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        UNIQUE (machine_id, session)
+    );
+    "#,
 ];
 
 pub fn now() -> i64 {
@@ -186,6 +207,16 @@ impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         Self::init(conn)
+    }
+
+    /// A consistent copy of the database (works while the server runs).
+    pub fn backup(&self, to: &Path) -> Result<()> {
+        if to.exists() {
+            bail!("{} already exists", to.display());
+        }
+        let target = to.to_string_lossy().to_string();
+        self.with(|c| c.execute("VACUUM INTO ?1", [target]))?;
+        Ok(())
     }
 
     pub fn memory() -> Result<Self> {

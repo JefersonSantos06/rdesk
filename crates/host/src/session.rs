@@ -44,7 +44,14 @@ pub async fn run(
     monitors: Vec<MonitorDesc>,
 ) -> Result<()> {
     let peer = transport::describe_peer(&conn);
-    tracing::info!("session {} started: {} ({:?}) from {peer}", hex(&auth.session_id), auth.client_name, auth.kind);
+    let access = auth.access;
+    tracing::info!(
+        "session {} started: {} ({:?}, {}) from {peer}",
+        hex(&auth.session_id),
+        auth.client_name,
+        auth.kind,
+        access.label()
+    );
     let _awake = KeepAwake::start();
     let injector = shared.injector.clone();
     injector.event(InputEvent::ReleaseAll);
@@ -63,7 +70,8 @@ pub async fn run(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<HostMsg>();
     let stats = Arc::new(std::sync::Mutex::new(VideoStats { frames: 0, bytes: 0 }));
 
-    let clipboard = if shared.cfg.clipboard {
+    // The clipboard goes both ways, so it needs full control.
+    let clipboard = if shared.cfg.clipboard && access.input {
         let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<String>();
         let sync = ClipboardSync::spawn(clip_tx);
         let out = out_tx.clone();
@@ -131,6 +139,10 @@ pub async fn run(
                             c.set(text);
                         }
                     }
+                    ClientMsg::ListDir { req, path } if !access.files => {
+                        let result = Err("this session may not access files".to_string());
+                        let _ = out.send(HostMsg::DirListing { req, path, result });
+                    }
                     ClientMsg::ListDir { req, path } => {
                         let out = out.clone();
                         tokio::spawn(async move {
@@ -182,7 +194,10 @@ pub async fn run(
                         match expect_msg::<_, StreamOpen>(&mut s, MAX_SMALL_MSG).await? {
                             StreamOpen::Input => {
                                 while let Some(ev) = read_msg::<_, InputEvent>(&mut s, MAX_SMALL_MSG).await? {
-                                    injector.event(ev);
+                                    // View-only sessions: everything is read and dropped.
+                                    if access.input {
+                                        injector.event(ev);
+                                    }
                                 }
                             }
                             StreamOpen::Acks => {
@@ -217,6 +232,7 @@ pub async fn run(
                 tokio::spawn(async move {
                     let res: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut r, MAX_SMALL_MSG).await? {
+                            StreamOpen::File if !access.files => Err(anyhow!("this session may not access files")),
                             StreamOpen::File => files::serve(&mut r, &mut w, &inbox).await,
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
@@ -233,8 +249,8 @@ pub async fn run(
         });
     }
 
-    // Video.
-    {
+    // Video (not for files-only sessions).
+    if access.screen {
         let conn = conn.clone();
         let capturer = shared.capturer.clone();
         let stats = stats.clone();
@@ -269,7 +285,7 @@ pub async fn run(
     }
 
     // Tell the client what it can choose from.
-    {
+    if access.screen {
         let list = monitors.lock().await;
         let _ = out_tx.send(HostMsg::Monitors { monitors: infos(&list), active: initial.info.id });
     }

@@ -27,17 +27,30 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
     let mut reported_error = false;
     loop {
         let addrs: Vec<String> = ep.addr().ip_addrs().map(|a| a.to_string()).collect();
+        let sessions: Vec<_> = std::mem::take(&mut *server.records.lock().unwrap());
         let req = AgentSync {
             cursor,
             addrs,
             os: std::env::consts::OS.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             in_session: server.in_session().await,
+            sessions,
+            server_key: policy.server_keys.read().unwrap().first().map(hex::encode).unwrap_or_default(),
+        };
+        // Sent again next time unless the server confirms them.
+        let requeue = |server: &Server, req: AgentSync| {
+            let mut q = server.records.lock().unwrap();
+            let mut back = req.sessions;
+            back.append(&mut q);
+            *q = back;
         };
         // A session starting or ending is reported right away (the poll may be waiting).
         let reply = tokio::select! {
             r = api.agent_sync(&req) => r,
-            _ = server.sync_now.notified() => continue,
+            _ = server.sync_now.notified() => {
+                requeue(&server, req);
+                continue;
+            }
         };
         match reply {
             Ok(reply) => {
@@ -45,6 +58,22 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                     let mut map = policy.revoked.write().unwrap();
                     map.clear();
                     map.extend(reply.revocations.iter().map(|r| (r.user_id, r.before)));
+                }
+                // Key rotation: trust what the server lists (current first) and remember it.
+                let keys: Vec<[u8; 32]> = reply
+                    .server_keys
+                    .iter()
+                    .filter_map(|k| hex::decode(k).ok().and_then(|b| b.try_into().ok()))
+                    .collect();
+                if !keys.is_empty() && *policy.server_keys.read().unwrap() != keys {
+                    *policy.server_keys.write().unwrap() = keys.clone();
+                    if let Some(mut r) = Registration::load()
+                        && r.server_key != hex::encode(keys[0])
+                    {
+                        r.server_key = hex::encode(keys[0]);
+                        let _ = r.save();
+                        reporter.event("The server's ticket key changed (rotation)", false);
+                    }
                 }
                 server.enforce_revocations().await;
                 if cursor == 0 || reported_error {
@@ -62,6 +91,7 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                 return;
             }
             Err(e) => {
+                requeue(&server, req);
                 // Server unreachable: tickets already issued keep working (up to 12 h).
                 if !reported_error {
                     reporter.event(format!("Cannot reach the rdesk server: {e:#}"), true);

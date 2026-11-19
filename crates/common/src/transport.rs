@@ -18,9 +18,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 pub use iroh::Endpoint;
+pub use iroh::SecretKey;
 use iroh::endpoint::{BindOpts, IdleTimeout, MtuDiscoveryConfig, QuicTransportConfig, presets};
 pub use iroh::endpoint::{Connection, ConnectionError, Incoming, IncomingAddr, RecvStream, SendStream, VarInt};
-use iroh::{EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
+use iroh::{EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl};
 
 use crate::config::{self, Congestion, NetworkConfig, TransportTuning};
 

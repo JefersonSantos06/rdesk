@@ -289,6 +289,8 @@ pub struct Authenticated {
     pub client_name: String,
     /// Who the server's ticket let in (also kept across resumes).
     pub user: Option<TicketUser>,
+    /// What the session may do (everything for logins without a ticket).
+    pub access: rdesk_proto::Access,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -442,6 +444,8 @@ where
         };
 
         let resume_token = store.issue(session_id, ticket_user.clone());
+        // Logins without a server ticket (LAN, password/key) may do everything.
+        let access = ticket_user.as_ref().map_or(rdesk_proto::Access::FULL, |u| u.access);
         write_msg(
             w,
             &HostMsg::AuthOk(AuthOk {
@@ -449,10 +453,11 @@ where
                 resume_token,
                 resume_ttl_s: RESUME_TTL.as_secs() as u32,
                 host: host_info(),
+                access,
             }),
         )
         .await?;
-        return Ok(Authenticated { session_id, kind, client_name, user: ticket_user });
+        return Ok(Authenticated { session_id, kind, client_name, user: ticket_user, access });
     }
     Err(fail(w, "too many authentication attempts").await)
 }

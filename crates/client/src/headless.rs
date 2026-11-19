@@ -33,6 +33,7 @@ pub fn run(connect: ConnectOpts, opts: HeadlessOpts) -> Result<()> {
             Ok(UiEvent::Status(s)) => eprintln!("status: {s}"),
             Ok(UiEvent::Notice(s)) => eprintln!("host: {s}"),
             Ok(UiEvent::PasswordNeeded { reply, .. }) => reply.send(None),
+            Ok(UiEvent::Access(a)) => eprintln!("access: {}", a.label()),
             Ok(UiEvent::Connected(h)) => {
                 eprintln!("connected to {} ({}), {} monitor(s)", h.hostname, h.os, h.monitors.len());
             }

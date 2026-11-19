@@ -21,6 +21,12 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Privado: outra pessoa não vê o computador. Compartilhado com ela (ou com um grupo dela): aparece em *Shared with me* e conecta.
 - [ ] Descompartilhar (ou tirar do grupo, ou desativar o usuário) com a sessão aberta: a sessão cai em segundos e não reconecta.
 - [ ] Cadeado extra ligado: depois do tíquete, pede a senha/chave do computador.
+- [ ] *View only*: a imagem aparece, mas teclado, mouse e clipboard não chegam ao host; arquivos recusados.
+- [ ] *Files only*: abre direto no painel de arquivos, sem imagem; enviar e baixar funcionam.
+- [ ] Reduzir de *full control* para *view only* com a sessão aberta: a sessão cai; ao reconectar, só vê.
+- [ ] Co-gestor: compartilha e vê o histórico; não vê *Managers…* nem *Unregister…*.
+- [ ] *History…* mostra as sessões, com duração, depois que terminam.
+- [ ] `rdesk-server rotate-key` + reinício: sessões novas funcionam sem recadastrar nada.
 - [ ] Admin do sistema vê todos os computadores na aba *Admin*, mas não conecta nos não compartilhados.
 - [ ] *Unregister*: some da lista; o host passa a aceitar só pela LAN (senha/chave).
 

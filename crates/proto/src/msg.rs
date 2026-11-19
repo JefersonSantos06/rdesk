@@ -48,12 +48,81 @@ pub struct HostInfo {
     pub active_monitor: u32,
 }
 
+/// What a session may do. Granted by the server's ticket (per share: control, view only,
+/// files only); enforced by the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Access {
+    /// See the screen.
+    pub screen: bool,
+    /// Keyboard, mouse and clipboard.
+    pub input: bool,
+    /// Send, browse and download files.
+    pub files: bool,
+}
+
+impl Access {
+    pub const FULL: Access = Access { screen: true, input: true, files: true };
+    pub const VIEW: Access = Access { screen: true, input: false, files: false };
+    pub const FILES: Access = Access { screen: false, input: false, files: true };
+    pub const NONE: Access = Access { screen: false, input: false, files: false };
+
+    pub fn union(self, o: Access) -> Access {
+        Access { screen: self.screen || o.screen, input: self.input || o.input, files: self.files || o.files }
+    }
+
+    /// Everything `o` allows is allowed here too.
+    pub fn covers(self, o: Access) -> bool {
+        (self.screen || !o.screen) && (self.input || !o.input) && (self.files || !o.files)
+    }
+
+    pub fn is_none(self) -> bool {
+        self == Access::NONE
+    }
+
+    /// `"screen,input,files"` (the ticket's form).
+    pub fn to_text(self) -> String {
+        let mut v = Vec::new();
+        if self.screen {
+            v.push("screen");
+        }
+        if self.input {
+            v.push("input");
+        }
+        if self.files {
+            v.push("files");
+        }
+        v.join(",")
+    }
+
+    pub fn from_text(s: &str) -> Access {
+        // Tickets of the first version said "control".
+        if s.trim() == "control" {
+            return Access::FULL;
+        }
+        let has = |w: &str| s.split(',').any(|p| p.trim() == w);
+        Access { screen: has("screen"), input: has("input"), files: has("files") }
+    }
+
+    /// "full control", "view only", "files only", "view + files"…
+    pub fn label(self) -> String {
+        match self {
+            Access::FULL => "full control".into(),
+            Access::VIEW => "view only".into(),
+            Access::FILES => "files only".into(),
+            Access::NONE => "no access".into(),
+            a => a.to_text().replace(',', " + "),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthOk {
     pub session_id: SessionId,
     pub resume_token: [u8; 32],
     pub resume_ttl_s: u32,
     pub host: HostInfo,
+    /// What this session may do (the host enforces it).
+    pub access: Access,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +182,8 @@ pub enum ClientMsg {
         path: String,
     },
     /// Instead of `Hello`: ask whether rdesk is running and whether it is busy, without
-    /// logging in. The host answers with [`HostMsg::ProbeInfo`] and closes the connection.
+    /// logging in. Hosts no longer answer it (they refuse with `AuthFail`): status comes
+    /// from the rdesk server.
     Probe,
     /// An access ticket (postcard of [`crate::ticket::SignedTicket`]).
     Ticket {

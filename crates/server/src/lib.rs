@@ -54,6 +54,11 @@ pub fn router(st: Shared) -> Router {
         )
         .route(&format!("{}/{{id}}/shares", paths::PATH_MACHINES), get(machines::get_shares).put(machines::set_shares))
         .route(&format!("{}/{{id}}/ticket", paths::PATH_MACHINES), post(machines::ticket))
+        .route(
+            &format!("{}/{{id}}/managers", paths::PATH_MACHINES),
+            get(machines::get_managers).put(machines::set_managers),
+        )
+        .route(&format!("{}/{{id}}/history", paths::PATH_MACHINES), get(machines::history))
         .route(paths::PATH_ADMIN_MACHINES, get(machines::admin_list))
         .route(paths::PATH_AGENT_SYNC, post(machines::agent_sync))
         .route(paths::PATH_USERS, get(machines::users))
@@ -97,6 +102,8 @@ pub struct Running {
 
 impl Running {
     pub async fn stop(self) -> Result<()> {
+        // Hosts waiting in their long poll get an answer now instead of holding the shutdown.
+        self.state.wake_all();
         let _ = self.shutdown.send(());
         let r = self.task.await?;
         let _ = self.relay.server.shutdown().await;
@@ -114,12 +121,23 @@ pub async fn start(data: &Path) -> Result<Running> {
     let cfg = ServerConfig::load(data)?;
     let db = db::Db::open(&data.join(config::DB_FILE))?;
     let key = config::load_or_create_key(data)?;
-    start_with(cfg, db, key, data).await
+    let prev = config::load_prev_key(data)?;
+    start_full(cfg, db, key, prev, data).await
 }
 
 pub async fn start_with(cfg: ServerConfig, db: db::Db, key: iroh_base::SecretKey, data: &Path) -> Result<Running> {
+    start_full(cfg, db, key, None, data).await
+}
+
+pub async fn start_full(
+    cfg: ServerConfig,
+    db: db::Db,
+    key: iroh_base::SecretKey,
+    prev_key: Option<iroh_base::PublicKey>,
+    data: &Path,
+) -> Result<Running> {
     install_crypto();
-    let st = State::new(cfg.clone(), db.clone(), key)?;
+    let st = State::with_prev(cfg.clone(), db.clone(), key, prev_key)?;
     let listen: SocketAddr = cfg.listen.parse().with_context(|| format!("listen {:?}", cfg.listen))?;
 
     // Certificates first: the relay's QUIC address discovery reuses them.

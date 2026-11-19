@@ -1,0 +1,20 @@
+# rdesk-server with Docker. First time (once):
+#   docker compose -f deploy/docker-compose.yml run --rm rdesk-server \
+#     init --public-url https://rdesk.example.com --admin you@gmail.com
+# Then:
+#   docker compose -f deploy/docker-compose.yml up -d
+services:
+  rdesk-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: rdesk-server
+    restart: unless-stopped
+    ports:
+      - "443:443/tcp"
+      - "7842:7842/udp"
+    volumes:
+      - rdesk-data:/data
+
+volumes:
+  rdesk-data: {}

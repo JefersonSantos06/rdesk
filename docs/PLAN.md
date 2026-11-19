@@ -94,12 +94,15 @@ Planejado:
   - lista local de computadores (`client.toml` `[hosts]`) e conexão manual por ID;
   - restos da era Tailscale (`host_key.der`, `host_cert.der`, `known_hosts`).
 
-### Fase 4: acabamento
-- Papéis por compartilhamento (só ver, só arquivos), histórico de acessos no app, co-gestores de máquina.
-- Guia de instalação na VPS (systemd ou Docker, portas, backup do SQLite) e rotação da chave do servidor.
-- Pendências da fase 1: o `Probe` deixa de responder antes da autenticação; primeira conexão mais rápida pelo relay.
+### Fase 4: acabamento (feita, branch `iroh-transport`)
+- Papéis por compartilhamento (*full control*, *view only*, *files only*): viram permissões no tíquete (tela, input, arquivos), aplicadas pelo host; reduzir o acesso também revoga.
+- Co-gestores de máquina (escolhidos pelo dono) e histórico de acessos (reportado pelo host no sync).
+- `rdesk-server backup` e `rotate-key` (hosts recebem a chave nova no sync e aceitam a antiga por 12 h); `Dockerfile`, `deploy/docker-compose.yml` e `deploy/rdesk-server.service`.
+- O host não responde mais ao `Probe` (nada antes do login).
+- Primeira conexão: medida em ~25 ms do bind ao login pelo relay local; o app agora cria o endpoint e pede o tíquete em paralelo.
 
 ## Ainda não verificado
+- Imagem Docker (o `Dockerfile` não foi construído aqui) e a unit do systemd numa VPS de verdade.
 - Login real com Google e GitHub (precisa das credenciais OAuth no seu domínio).
 - Passkey num navegador de verdade (precisa do servidor num domínio com HTTPS).
 - Certificado Let's Encrypt na VPS.

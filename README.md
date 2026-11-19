@@ -34,7 +34,7 @@ Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo,
 - *My computers* (os que você cadastrou) e *Shared with me* (os que compartilharam com você ou que estão visíveis para todos).
 - Status ao vivo: *Online*, *In use*, *Offline · seen 3 h ago*.
 - **Connect** (ou duplo clique) abre a sessão numa janela própria; **Files** abre já no painel de transferência de arquivos (enviar, navegar nas pastas, baixar).
-- Nos seus: **Share…** (pessoas e grupos), *Who can see it* (só eu / compartilhado / todos do servidor), *Rename…*, *Unregister…*.
+- Nos seus (e nos que você co-gerencia): **Share…** (pessoas e grupos, cada um com *full control*, *view only* ou *files only*), *Who can see it* (só eu / compartilhado / todos do servidor), *Rename…*, *History…* (quem acessou, quando, por quanto tempo). Só do dono: *Managers…* (co-gestores) e *Unregister…*.
 - *Login options…* (clique direito): como responder ao **cadeado extra** de um computador (senha ou chave SSH próprias dele): chave do 1Password, referência `op://`, senha salva no cofre do sistema.
 
 **🏠 This computer** — o host embutido (deixa este computador ser acessado):
@@ -74,7 +74,9 @@ Logado, a lista de computadores e o relay vêm do servidor. A sessão vale 10 di
 ```sh
 rdesk machines register --name "PC da sala" --visibility shared   # neste computador
 rdesk machines list
-rdesk machines share "PC da sala" --user maria@gmail.com --group Família
+rdesk machines share "PC da sala" --user maria@gmail.com:view --group Família   # :control (padrão), :view, :files
+rdesk machines managers "PC da sala" --set joao@gmail.com
+rdesk machines history "PC da sala"
 rdesk machines visibility "PC da sala" private|shared|everyone
 rdesk groups create Família && rdesk groups add Família joao@gmail.com [--admin]
 ```

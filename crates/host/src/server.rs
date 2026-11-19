@@ -13,7 +13,7 @@ use rdesk_common::auth::{self, AuthKind, FailureLimiter, HostAuthConfig, OpaqueS
 use rdesk_common::config::{self, HostConfig, format_host_id};
 use rdesk_common::ticket::{TicketPolicy, TicketUser};
 use rdesk_common::transport::{self, Connection, HostIdentity, Incoming, IncomingAddr, Role, close};
-use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, PROTOCOL_VERSION, expect_msg, write_msg};
+use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, expect_msg, write_msg};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 
@@ -50,6 +50,8 @@ pub(crate) struct Server {
     require_local: bool,
     /// Ask the sync loop to report now (a session started or ended).
     pub(crate) sync_now: tokio::sync::Notify,
+    /// Sessions that started or ended, for the server's history (sent by the sync).
+    pub(crate) records: std::sync::Mutex<Vec<rdesk_proto::api::AccessRecord>>,
     limiter: FailureLimiter,
     resume: ResumeStore,
     handshakes: Semaphore,
@@ -83,6 +85,14 @@ pub fn registration_for(host_fp: &[u8; 32]) -> Option<Registration> {
 
 fn hex_id(id: &[u8; 32]) -> String {
     format_host_id(id)
+}
+
+fn hex_bytes(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 pub fn load_auth_config(
@@ -151,7 +161,11 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
     let registration = registration_for(&host_fp);
     let net = if registration.is_some() { config::host_network() } else { config::NetworkConfig::default() };
     let ticket = match &registration {
-        Some(r) => Some(TicketPolicy { server_key: r.server_key()?, machine: host_fp, revoked: Default::default() }),
+        Some(r) => Some(TicketPolicy {
+            server_keys: std::sync::Arc::new(std::sync::RwLock::new(vec![r.server_key()?])),
+            machine: host_fp,
+            revoked: Default::default(),
+        }),
         None => None,
     };
     reporter.registration(registration.as_ref().map(|r| Ok(format!("{} on {}", r.name, r.server_name))));
@@ -195,6 +209,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
         ticket,
         require_local: cfg.require_local,
         sync_now: tokio::sync::Notify::new(),
+        records: std::sync::Mutex::new(Vec::new()),
         limiter: FailureLimiter::default(),
         resume: ResumeStore::default(),
         handshakes: Semaphore::new(4),
@@ -288,17 +303,9 @@ impl Server {
             .await
             .context("client sent nothing on the control stream")??;
         if matches!(first, ClientMsg::Probe) {
-            // Status check from a launcher: answer and hang up. Not a login attempt, so it
-            // neither counts as a failure nor replaces the current session.
-            let in_session = self.current.lock().await.as_ref().is_some_and(|c| c.conn.close_reason().is_none());
-            let info = HostMsg::ProbeInfo {
-                proto: PROTOCOL_VERSION,
-                host_name: rdesk_common::local_hostname(),
-                os: std::env::consts::OS.to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                in_session,
-            };
-            write_msg(&mut w, &info).await?;
+            // Nothing about this computer is told before login (status comes from the server).
+            let reason = "status checks are not answered; ask the rdesk server".to_string();
+            write_msg(&mut w, &HostMsg::AuthFail { reason }).await?;
             let _ = w.finish();
             let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
             return Ok(());
@@ -329,6 +336,10 @@ impl Server {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => {
                 self.limiter.failure(ip);
+                // Perhaps the server rotated its key: ask it now rather than at the next poll.
+                if format!("{e:#}").contains("not signed by this computer's rdesk server") {
+                    self.sync_now.notify_one();
+                }
                 // Let the reason (already sent) reach the client before closing; it hangs up
                 // as soon as it reads it.
                 let _ = w.finish();
@@ -368,6 +379,23 @@ impl Server {
             AuthKind::Ticket { local: Some(l) } => format!("server ticket + {l}"),
         };
         let user = authed.user.clone();
+        let access = authed.access;
+        let session_hex = hex_bytes(&authed.session_id);
+        let record = |ended: Option<i64>, started: i64| rdesk_proto::api::AccessRecord {
+            session: session_hex.clone(),
+            user_id: user.as_ref().map(|u| u.user_id),
+            who: user.as_ref().map(|u| u.email.clone()).unwrap_or_else(|| authed.client_name.clone()),
+            client: authed.client_name.clone(),
+            method: method.clone(),
+            access: access.label(),
+            started_at: started,
+            ended_at: ended,
+        };
+        let started = unix_now();
+        if !matches!(authed.kind, AuthKind::Resume) {
+            self.records.lock().unwrap().push(record(None, started));
+        }
+        let end_record = record(Some(0), started);
         let client = match &user {
             Some(u) => format!("{} ({})", u.label(), authed.client_name),
             None => authed.client_name.clone(),
@@ -386,6 +414,10 @@ impl Server {
                 tracing::warn!("session error: {e:#}");
             }
             reporter.session_ended(&info.peer, info.since);
+            me.records
+                .lock()
+                .unwrap()
+                .push(rdesk_proto::api::AccessRecord { ended_at: Some(unix_now()), ..end_record });
             me.sync_now.notify_one();
         });
         *cur = Some(Current { conn, task, user });
