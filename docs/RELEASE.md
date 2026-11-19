@@ -43,7 +43,7 @@ Para gerar chaves novas no futuro: `cargo run -p rdesk-release -- keygen --out <
 ## Publicar
 
 1. Suba a versão em `Cargo.toml` (`[workspace.package] version`, sempre `MAJOR.MINOR.PATCH`) e faça o commit.
-2. Crie a tag igual à versão e envie:
+2. Crie a tag igual à versão e envie. O commit marcado **não** pode ter `[skip ci]` na mensagem: o GitHub também deixa de rodar o Release da tag.
 
    ```sh
    git tag v0.2.0
