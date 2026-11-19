@@ -13,7 +13,7 @@ Cada versão é um GitHub Release com os binários e um `release.json` assinado.
 | `release.json` | Versão, versão do protocolo, SHA-256 e tamanho de cada arquivo |
 | `release.json.sig` | Assinatura Ed25519 do `release.json` (hex) |
 
-Os binários de Linux são compilados no Ubuntu 22.04 e rodam no Debian 12, no Raspberry Pi OS (bookworm) e no Ubuntu 22.04 ou mais novo. O instalador do Windows (Inno Setup) entra na fase 9; o macOS continua só no CI.
+O app para Linux é compilado no Ubuntu 24.04 (precisa do PipeWire 1.x, para a captura no Wayland) e roda no Ubuntu 24.04 ou mais novo, no Debian 13 e no Raspberry Pi OS atual (trixie); no Debian 12 e no Ubuntu 22.04, compile a partir do código. O servidor é compilado no Ubuntu 22.04 e também roda em VPS com Debian 12. O instalador do Windows (Inno Setup) entra na fase 9; o macOS continua só no CI.
 
 ## Configuração (uma vez)
 
