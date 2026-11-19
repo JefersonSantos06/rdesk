@@ -3,4 +3,5 @@
 pub mod conn;
 pub mod headless;
 pub mod keys;
+pub mod launcher;
 pub mod viewer;

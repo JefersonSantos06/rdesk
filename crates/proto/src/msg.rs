@@ -110,6 +110,9 @@ pub enum ClientMsg {
         req: u32,
         path: String,
     },
+    /// Instead of `Hello`: ask whether rdesk is running and whether it is busy, without
+    /// logging in. The host answers with [`HostMsg::ProbeInfo`] and closes the connection.
+    Probe,
 }
 
 /// Messages the host sends on the control stream.
@@ -153,6 +156,16 @@ pub enum HostMsg {
     Replaced,
     Notice {
         text: String,
+    },
+    /// Answer to [`ClientMsg::Probe`]. Sent before authentication, so it only carries what
+    /// any tailnet member could learn anyway.
+    ProbeInfo {
+        proto: u16,
+        host_name: String,
+        os: String,
+        version: String,
+        /// Another client is currently connected.
+        in_session: bool,
     },
 }
 

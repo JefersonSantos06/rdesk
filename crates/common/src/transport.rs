@@ -269,7 +269,7 @@ pub fn is_tailnet(ip: IpAddr) -> bool {
     }
 }
 
-fn tailscale_cli_candidates() -> Vec<String> {
+pub(crate) fn tailscale_cli_candidates() -> Vec<String> {
     let mut v = vec!["tailscale".to_string()];
     if cfg!(target_os = "macos") {
         v.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale".into());
@@ -284,7 +284,7 @@ fn tailscale_cli_candidates() -> Vec<String> {
 pub async fn tailscale_ips() -> Result<Vec<IpAddr>> {
     let mut last_err = None;
     for cli in tailscale_cli_candidates() {
-        match tokio::process::Command::new(&cli).arg("ip").output().await {
+        match crate::command(&cli).arg("ip").output().await {
             Ok(out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 let ips: Vec<IpAddr> = text.lines().filter_map(|l| l.trim().parse().ok()).collect();

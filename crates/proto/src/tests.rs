@@ -51,6 +51,7 @@ fn arb_client_msg() -> impl Strategy<Value = ClientMsg> {
         any::<u64>().prop_map(|t_us| ClientMsg::Ping { t_us }),
         ".{0,1000}".prop_map(|text| ClientMsg::Clipboard { text }),
         (any::<u32>(), ".{0,100}").prop_map(|(req, path)| ClientMsg::ListDir { req, path }),
+        Just(ClientMsg::Probe),
     ]
 }
 

@@ -119,7 +119,7 @@ pub fn canonical(key: &KeyData) -> Result<String> {
 
 /// Read a secret with the 1Password CLI (`op read op://vault/item/field`).
 pub async fn op_read(reference: &str) -> Result<Zeroizing<String>> {
-    let out = tokio::process::Command::new("op")
+    let out = crate::command("op")
         .arg("read")
         .arg("--no-newline")
         .arg(reference)

@@ -76,6 +76,20 @@ congestion = "cubic"     # ou "bbr"
 
 ## Conectar (Mac/Linux da empresa)
 
+### Launcher (janela com as máquinas)
+
+Rodar `rdesk` sem argumentos (ou dar duplo clique no executável) abre a lista de máquinas, no estilo AnyDesk/TeamViewer:
+
+- **Meus computadores**: os hosts salvos, cada um com status: *Ready* (rdesk rodando), *In use* (outra sessão aberta), *Online · rdesk not running*, *Offline · seen 3 h ago*, *Identity changed!*. A latência e o tipo de link (direto ou relay DERP) também aparecem.
+- **Tailnet**: os outros dispositivos da sua conta Tailscale. **Save** cadastra um deles com um clique.
+- **＋ Add computer** / **Edit**: nome, endereço (ou escolha da tailnet), login por chave do 1Password (botão *From 1Password…* lista as chaves do agente) e/ou senha `op://…`.
+- **Duplo clique** (ou **Connect**) abre a sessão numa janela própria. Na primeira vez, um diálogo mostra o fingerprint para conferir com `rdesk host fingerprint`.
+- O campo no topo conecta direto a um nome ou endereço qualquer.
+
+O status vem do `tailscale status` mais uma consulta rápida ao host a cada 5 s, que não faz login e não conta como tentativa falha. Os logs de cada sessão ficam em `<pasta de config>/logs/`.
+
+### Linha de comando
+
 ```sh
 rdesk hosts add casa casa-pc.seu-tailnet.ts.net --password-ref "op://Private/rdesk/password"
 rdesk connect casa

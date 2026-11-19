@@ -21,8 +21,9 @@ struct Cli {
     /// More logging (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+    /// Without a command: open the launcher window (saved computers and tailnet devices).
     #[command(subcommand)]
-    cmd: Command,
+    cmd: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -31,6 +32,9 @@ enum Command {
     #[cfg(feature = "host")]
     #[command(subcommand)]
     Host(HostCmd),
+    /// Open the launcher window: your computers, their status, one click to connect.
+    #[cfg(feature = "client")]
+    Ui,
     /// Open a viewer window to a host (alias from client.toml or address).
     #[cfg(feature = "client")]
     Connect(ConnectArgs),
@@ -239,7 +243,12 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
-    match cli.cmd {
+    let Some(cmd) = cli.cmd else {
+        return no_command();
+    };
+    match cmd {
+        #[cfg(feature = "client")]
+        Command::Ui => launcher(),
         #[cfg(feature = "host")]
         Command::Host(h) => host_cmd(h),
         #[cfg(feature = "client")]
@@ -254,6 +263,40 @@ fn main() -> Result<()> {
         Command::Ls { target, path, auth } => runtime()?.block_on(cli_ls(target, path, auth)),
     }
 }
+
+#[cfg(feature = "client")]
+fn no_command() -> Result<()> {
+    detach_console_if_owned();
+    launcher()
+}
+
+#[cfg(not(feature = "client"))]
+fn no_command() -> Result<()> {
+    use clap::CommandFactory as _;
+    Cli::command().print_help()?;
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn launcher() -> Result<()> {
+    let exe = std::env::current_exe().context("locating the rdesk binary")?;
+    rdesk_client::launcher::run(rdesk_client::launcher::LauncherOpts { exe })
+}
+
+/// Started by double-clicking rdesk.exe, Windows gives us a console window of our own;
+/// close it so only the launcher shows. Run from a terminal, the console is shared and stays.
+#[cfg(all(windows, feature = "client"))]
+fn detach_console_if_owned() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    // SAFETY: the buffer is valid for `pids.len()` entries.
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
+        unsafe { FreeConsole() };
+    }
+}
+
+#[cfg(all(not(windows), feature = "client"))]
+fn detach_console_if_owned() {}
 
 fn prompt(q: &str) -> Result<String> {
     eprint!("{q}");

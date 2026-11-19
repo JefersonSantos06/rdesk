@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use rdesk_common::auth::{self, FailureLimiter, HostAuthConfig, OpaqueServer, ResumeStore};
 use rdesk_common::config::{self, HostConfig, format_fingerprint};
 use rdesk_common::transport::{self, HostIdentity, close};
-use rdesk_proto::HostInfo;
+use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, PROTOCOL_VERSION, expect_msg, write_msg};
+use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::capture::Capturer;
@@ -213,6 +214,28 @@ impl Server {
             .await
             .context("client did not open the control stream")??;
 
+        let first: ClientMsg = tokio::time::timeout(Duration::from_secs(10), expect_msg(&mut r, MAX_CONTROL_MSG))
+            .await
+            .context("client sent nothing on the control stream")??;
+        if matches!(first, ClientMsg::Probe) {
+            // Status check from a launcher: answer and hang up. Not a login attempt, so it
+            // neither counts as a failure nor replaces the current session.
+            let in_session = self.current.lock().await.as_ref().is_some_and(|c| c.conn.close_reason().is_none());
+            let info = HostMsg::ProbeInfo {
+                proto: PROTOCOL_VERSION,
+                host_name: rdesk_common::local_hostname(),
+                os: std::env::consts::OS.to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                in_session,
+            };
+            write_msg(&mut w, &info).await?;
+            let _ = w.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+            return Ok(());
+        }
+        // Not a probe: hand the message back to the handshake as if it had not been read.
+        let replay = rdesk_proto::encode(&first)?;
+
         let auth_cfg = load_auth_config(self.host_fp)?;
         let monitors = self.shared.capturer.monitors().await.unwrap_or_default();
         let initial = session::pick_initial(&monitors).map(|m| m.info.id).unwrap_or(0);
@@ -223,11 +246,14 @@ impl Server {
             active_monitor: initial,
         };
         // 60 s leaves time for a 1Password approval / Touch ID prompt on the client.
-        let res = tokio::time::timeout(
-            Duration::from_secs(60),
-            auth::host_handshake(&auth_cfg, &self.resume, &mut r, &mut w, ek, || info),
-        )
-        .await;
+        let res = {
+            let mut r = std::io::Cursor::new(replay).chain(&mut r);
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                auth::host_handshake(&auth_cfg, &self.resume, &mut r, &mut w, ek, || info),
+            )
+            .await
+        };
         let authed = match res {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => {
