@@ -29,8 +29,8 @@ jobs:
           - os: ubuntu-24.04-arm
             platform: linux-aarch64
             part: app
-          # Apple Silicon (macOS 14).
-          - os: macos-14
+          # Apple Silicon (macos-latest is arm64; older labels get retired).
+          - os: macos-latest
             platform: macos-aarch64
             part: app
           # The server is plain Rust: Ubuntu 22.04 (glibc 2.35) also covers Debian 12 VPSs.
