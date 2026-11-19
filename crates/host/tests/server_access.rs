@@ -60,8 +60,12 @@ async fn sharing_controls_access_and_unsharing_kicks() {
     };
     let reg = rdesk_host::admin::register(&ana_session, "Sala", Visibility::Private).await.unwrap();
     assert_eq!(config::host_network().token.as_deref(), Some(reg.token.as_str()));
-    let host =
-        tokio::spawn(rdesk_host::run(rdesk_host::RunOpts { port: Some(0), fake_capture: true, fake_input: true }));
+    let host = tokio::spawn(rdesk_host::run(rdesk_host::RunOpts {
+        port: Some(0),
+        fake_capture: true,
+        fake_input: true,
+        ..Default::default()
+    }));
 
     let ana_api = Api::new(&server_url, Some(ana_token)).unwrap();
     let bia_api = Api::new(&server_url, Some(bia_token.clone())).unwrap();

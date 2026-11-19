@@ -28,6 +28,9 @@ pub struct RunOpts {
     pub port: Option<u16>,
     pub fake_capture: bool,
     pub fake_input: bool,
+    /// Started by the Windows service: stop when standard input closes, answer the app on
+    /// the control pipe.
+    pub agent: bool,
 }
 
 /// Failed-login bookkeeping is per IP; connections through the relay share one bucket
@@ -132,9 +135,51 @@ fn platform_init() {
 #[cfg(not(windows))]
 fn platform_init() {}
 
+/// Run by the service as SYSTEM: files are read and written as the signed-in user.
+fn files_as_user() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win::proc::is_system()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// The bar at the top of the screen while someone is connected.
+#[cfg(windows)]
+fn start_notice(reporter: &Reporter, ctl: mpsc::UnboundedSender<Ctl>) {
+    crate::win::notice::start(move || {
+        let _ = ctl.send(Ctl::Disconnect);
+    });
+    let reporter = reporter.clone();
+    tokio::spawn(async move {
+        let mut shown: Option<String> = None;
+        loop {
+            let text = reporter.snapshot().session.map(|s| format!("{} is connected to this computer", s.client));
+            if text != shown {
+                crate::win::notice::show(text.clone());
+                shown = text;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
+}
+
 /// Run the host until Ctrl+C (the `rdesk host run` command).
 pub async fn run(opts: RunOpts) -> Result<()> {
     let (ctl, rx) = mpsc::unbounded_channel();
+    if opts.agent {
+        // The service closes our standard input to stop us.
+        let ctl = ctl.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            while matches!(std::io::Read::read(&mut std::io::stdin(), &mut buf), Ok(n) if n > 0) {}
+            tracing::info!("the service asked the host to stop");
+            let _ = ctl.send(Ctl::Stop);
+        });
+    }
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::info!("shutting down");
@@ -145,10 +190,31 @@ pub async fn run(opts: RunOpts) -> Result<()> {
 }
 
 /// Load the config, listen, and serve clients until told to stop.
-pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedReceiver<Ctl>) -> Result<()> {
+pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::UnboundedReceiver<Ctl>) -> Result<()> {
     platform_init();
     if cfg!(windows) && !opts.fake_input && !crate::elevation::is_elevated() {
         tracing::warn!("{}", crate::elevation::NOT_ELEVATED_HINT);
+    }
+    // Commands from the caller, the control pipe and the session notice.
+    let (ctl_tx, mut ctl) = mpsc::unbounded_channel();
+    {
+        let tx = ctl_tx.clone();
+        tokio::spawn(async move {
+            while let Some(c) = outer.recv().await {
+                if tx.send(c).is_err() {
+                    return;
+                }
+            }
+            // The controller went away: stop.
+            let _ = tx.send(Ctl::Stop);
+        });
+    }
+    if opts.agent {
+        crate::ipc::serve(reporter.clone(), ctl_tx.clone());
+    }
+    #[cfg(windows)]
+    if !opts.fake_capture {
+        start_notice(&reporter, ctl_tx.clone());
     }
     // A fresh install (or a ready-made image's first boot) gets its own identity here.
     crate::admin::ensure_initialized()?;
@@ -199,6 +265,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut ctl: mpsc::UnboundedRe
         capturer: Capturer::spawn(opts.fake_capture),
         injector: Injector::spawn(opts.fake_input),
         cfg: cfg.clone(),
+        files_as_user: files_as_user(),
     });
     match shared.capturer.monitors().await {
         Ok(m) => {

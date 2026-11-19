@@ -39,6 +39,17 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Raspberry Pi com a imagem e `deploy/rdesk-host.service`: primeiro boot entra sozinho; duas placas da mesma imagem têm IDs diferentes.
 - [ ] Descadastrar uma máquina que entrou por chave: ao reiniciar ela vira pedido de aprovação, não volta sozinha.
 
+## Serviço do Windows
+- [ ] *This computer* → *Install the rdesk service*: pede permissão de administrador uma vez; o host ID continua o mesmo e a página passa a mostrar o status do serviço.
+- [ ] Reiniciar o Windows e conectar **antes** de entrar: aparece a tela de login; dá para digitar a senha e entrar.
+- [ ] Win+L (bloqueio) com a sessão aberta: a imagem mostra a tela de bloqueio e dá para desbloquear.
+- [ ] Um prompt do UAC aparece (abrir algo como administrador no host): a imagem mostra o prompt e o clique em *Sim* funciona.
+- [ ] Durante a sessão, a barra "… is connected to this computer" aparece no topo; *End session* derruba a sessão.
+- [ ] Enviar arquivo: chega em `Downloads\rdesk` de quem está logado, e o arquivo é dessa pessoa; navegar pastas mostra o que ela vê.
+- [ ] Sair da conta (sign out) e entrar com outra: o host segue para a nova sessão em segundos.
+- [ ] Sem administrador, mudar uma opção pede *Manage as administrator*; como administrador, salvar reinicia o host do serviço.
+- [ ] *Remove the service…*: os arquivos voltam para o perfil e o app volta a rodar o host.
+
 ## Autenticação
 - [ ] Chave do 1Password: aparece a aprovação/Touch ID uma vez; conecta.
 - [ ] Chave não autorizada + sem senha → mensagem clara, sem retry infinito.

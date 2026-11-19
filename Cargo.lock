@@ -6146,6 +6146,7 @@ dependencies = [
  "rdesk-host",
  "rdesk-proto",
  "rpassword",
+ "serde_json",
  "ssh-key",
  "tempfile",
  "tokio",
@@ -6247,10 +6248,12 @@ dependencies = [
  "rdesk-proto",
  "rdesk-server",
  "serde",
+ "serde_json",
  "ssh-key",
  "tempfile",
  "tokio",
  "tracing",
+ "windows-service",
  "windows-sys 0.61.2",
  "xcap",
 ]
@@ -9247,6 +9250,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44873a1ef61c85d5e2991db91fe656cfcf0731097e00dff1ac860f1cb3b752a0"
 dependencies = [
  "windows-link 0.100.0",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.2",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

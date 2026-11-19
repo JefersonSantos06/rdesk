@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
 
-pub use autostart::{Autostart, apply as apply_autostart};
+pub use autostart::{Autostart, apply as apply_autostart, current as current_autostart};
 
 pub struct AppOpts {
     /// The rdesk binary, re-run as `rdesk connect …` for each session window.

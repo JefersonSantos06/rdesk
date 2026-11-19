@@ -46,12 +46,12 @@ Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo,
 **🏠 This computer** — o host embutido (deixa este computador ser acessado):
 - **Turn on / Turn off** (lembra a escolha), **host ID** com **Copy**, estado do relay e porta UDP para conexões diretas.
 - *On your rdesk server*: **Register this computer** (nome e quem pode acessar) ou *Unregister…*. Cadastrado, o computador tem credencial própria: continua acessível mesmo sem ninguém logado no app.
-- *Not running as administrator* → **Restart as administrator** (Windows), para controlar o Gerenciador de Tarefas e outras janelas de admin.
+- Windows: **Install the rdesk service (recommended)**: o host passa a rodar como serviço do Windows (veja [Serviço do Windows](#serviço-do-windows)). Com o serviço instalado a página mostra o status dele; mudar as configurações do computador pede *Manage as administrator*.
 - Sessão atual (quem, de onde, como) com **Disconnect** — o outro lado não tenta reconectar.
 - *This computer's own password and keys* (para a LAN sem servidor, ou como cadeado extra): **Set password…** (com *Generate a strong one* e *Read from 1Password*), chaves SSH (**Add SSH key…** do agente do 1Password ou colando a chave pública), remover.
 - *Options*: porta UDP, pasta dos arquivos recebidos, fps, qualidade, clipboard, **cadeado extra** (pedir também a senha ou chave deste computador depois da permissão do servidor). *Activity*: conexões e **logins que falharam**. *Diagnostics*: o mesmo que `rdesk host check`.
 
-**⚙ Settings**: **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login / ao fazer login como administrador* — este último cria uma tarefa agendada sem o limite de 3 dias, pedindo permissão uma vez), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+**⚙ Settings**: **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login*, no tray; no Windows o host fica a cargo do serviço), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
 
 **👥 Groups**: grupos de pessoas para compartilhar computadores. Quem cria vira admin do grupo; admins adicionam e removem membros e promovem outros admins.
 
@@ -126,13 +126,26 @@ As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` f
 1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, aba *This computer*). Sem login nele: `rdesk host enroll` (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)).
 2. Execute: `rdesk host run` (ou ligue o host no app). `rdesk host check` mostra o diagnóstico.
 3. (Opcional) Cadeado extra, ou acesso pela LAN sem servidor: senha (`rdesk host set-password --op "op://Private/rdesk/password"`, guardada como registro OPAQUE) e/ou chaves SSH (`rdesk host add-key --from-agent` ou `rdesk host add-key "ssh-ed25519 AAAA…"`). Para exigir também esse fator depois da permissão do servidor: `require_local = true` no `host.toml` (ou *Options → Extra lock* no app).
-4. Iniciar com o Windows: pelo app (Settings → *Start when I log in, as administrator*) ou com `rdesk autostart login-admin` num terminal de administrador. Manualmente:
-   ```powershell
-   schtasks /Create /TN rdesk-host /SC ONLOGON /RL HIGHEST /TR "\"C:\caminho\rdesk.exe\" host run"
-   ```
-   macOS: crie um LaunchAgent; Linux: um serviço `systemd --user`. Em macOS conceda **Gravação de Tela** e **Acessibilidade** ao `rdesk` (Ajustes → Privacidade e Segurança). Em Linux use sessão **X11**.
+4. Iniciar com o sistema: no Windows, instale o serviço (abaixo). macOS: crie um LaunchAgent; Linux: um serviço `systemd --user`. Em macOS conceda **Gravação de Tela** e **Acessibilidade** ao `rdesk` (Ajustes → Privacidade e Segurança). Em Linux use sessão **X11**.
 
-Config do host: `%APPDATA%\rdesk\rdesk\config\host.toml` (Windows), `~/Library/Application Support/dev.rdesk.rdesk/` (macOS), `~/.config/rdesk/` (Linux).
+### Serviço do Windows
+
+O serviço `rdesk` roda como SYSTEM e mantém o host rodando na sessão de quem está na frente da tela:
+
+- o computador fica acessível **antes de alguém entrar no Windows**, na **tela de bloqueio** e nos prompts do **UAC** (o host acompanha a área de trabalho ativa);
+- enquanto alguém está conectado, uma barra no topo da tela mostra quem é, com o botão **End session**;
+- arquivos enviados e baixados passam pelos direitos de quem está logado (vão para a pasta Downloads dessa pessoa); sem ninguém logado, arquivos são recusados;
+- segue só a sessão do console (a tela física), não sessões de Área de Trabalho Remota.
+
+```powershell
+rdesk service install     # num terminal de administrador (ou o botão em This computer)
+rdesk service status
+rdesk service uninstall   # os arquivos do host voltam para a sua pasta
+```
+
+A instalação copia o programa para `C:\Program Files\rdesk` e move a identidade, o cadastro e as configurações do host para `C:\ProgramData\rdesk` (só SYSTEM e Administradores leem); o host ID não muda. Logs: `C:\ProgramData\rdesk\logs\service.log` e `host.log`. Reinstalar (para atualizar o programa) é rodar `rdesk service install` de novo.
+
+Config do host: `%APPDATA%\rdesk\rdesk\config\host.toml` (Windows, ou `C:\ProgramData\rdesk` com o serviço), `~/Library/Application Support/dev.rdesk.rdesk/` (macOS), `~/.config/rdesk/` (Linux).
 
 ```toml
 port = 7420              # UDP, para conexões diretas (LAN / porta redirecionada)
@@ -183,8 +196,8 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 
 ## Limitações conhecidas
 
-- Com o app rodando como administrador no Windows, as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Send files…* no menu da sessão.
-- Tela de bloqueio/UAC do Windows não aparece (é o "secure desktop"); exige um serviço SYSTEM (futuro).
+- Com o app rodando como administrador no Windows (*Manage as administrator*), as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Send files…* no menu da sessão.
+- Tela de bloqueio/UAC do Windows: só com o serviço instalado. Ctrl+Alt+Del não é enviado (não é preciso para entrar no Windows 10/11).
 - Wayland: captura/input dependem de portais — use X11 no host Linux por enquanto.
 - O cursor remoto não é desenhado na imagem; use o cursor local (posição é absoluta e sincronizada).
 - Sem áudio. Captura via `xcap` (GDI/CGWindowList/X11): ~20–40 ms por frame em 1080p; DXGI/ScreenCaptureKit/H.264 são o próximo passo.

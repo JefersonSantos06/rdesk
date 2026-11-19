@@ -140,7 +140,17 @@ Planejado:
 - O macOS continua sendo testado no CI, mas fica fora dos releases.
 - Windows sem certificado de assinatura de código: o SmartScreen avisa só na primeira instalação (o que o app baixa sozinho não passa por ele).
 
-### Fase 7: serviço do Windows
+### Fase 7: serviço do Windows (feita, branch `main`)
+Como ficou:
+- `rdesk service install|uninstall|status` (ou o botão em *This computer*): copia o programa para `C:\Program Files\rdesk`, move os arquivos do host para `C:\ProgramData\rdesk` (ACL só SYSTEM e Administradores) e cria o serviço `rdesk` (início automático, reinicia em falha).
+- O serviço só supervisiona: lança `rdesk host run --agent` como SYSTEM na sessão do console, acompanha troca de sessão e reinicia o host quando ele sai (com espera crescente em falhas). Fechar o stdin do agente é o pedido de parar.
+- O agente segue a área de trabalho de entrada nas threads de captura e input (login, bloqueio, UAC).
+- Arquivos: um auxiliar (`rdesk host file-helper`) roda como o usuário logado, via token da sessão; o agente só repassa o stream.
+- Barra no topo da tela durante a sessão, com *End session* (em qualquer host no Windows).
+- Pipe `\\.\pipe\rdesk-host` (JSON): status, encerrar sessão (qualquer usuário local) e reiniciar (só administrador). O app usa o pipe no modo serviço; *Restart as administrator* virou *Manage as administrator*, e a opção de iniciar como administrador saiu.
+- Diferença em relação ao previsto: a migração acontece no `rdesk service install` (o instalador da fase 9 vai chamá-lo).
+
+Planejado:
 - Serviço `rdesk` (SYSTEM), instalado em `C:\Program Files\rdesk`:
   - guarda a identidade da máquina, o cadastro, o endpoint iroh, o sync e as atualizações;
   - dados em `C:\ProgramData\rdesk`, legíveis só por SYSTEM e Administradores;

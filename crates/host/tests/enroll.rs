@@ -51,8 +51,12 @@ async fn hosts_join_by_approval_or_key() {
     let bia_api = Api::new(&server_url, Some(bia_token)).unwrap();
 
     // A brand-new host (no identity yet, nobody signed in) asks to join.
-    let host =
-        tokio::spawn(rdesk_host::run(rdesk_host::RunOpts { port: Some(0), fake_capture: true, fake_input: true }));
+    let host = tokio::spawn(rdesk_host::run(rdesk_host::RunOpts {
+        port: Some(0),
+        fake_capture: true,
+        fake_input: true,
+        ..Default::default()
+    }));
     wait_for("Bia to see the request", || async { !bia_api.machine_requests().await.unwrap().is_empty() }).await;
     let requests = bia_api.machine_requests().await.unwrap();
     let host_id = rdesk_host::admin::fingerprint().unwrap();

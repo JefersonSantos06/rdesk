@@ -63,6 +63,13 @@ pub fn apply_with_elevation(mode: Autostart, exe: &Path) -> Result<Autostart> {
     Ok(now)
 }
 
+/// Install (`true`) or remove the rdesk Windows service, asking for administrator
+/// permission when needed.
+#[cfg(all(windows, feature = "host"))]
+pub fn service_action(exe: &Path, install: bool) -> Result<String> {
+    imp::service_action(exe, install)
+}
+
 /// Start a new elevated copy of the app that takes over from this one.
 #[cfg_attr(not(feature = "host"), allow(dead_code))]
 pub fn restart_as_admin(exe: &Path) -> Result<()> {
@@ -288,6 +295,23 @@ mod imp {
     #[cfg_attr(not(feature = "host"), allow(dead_code))]
     pub fn restart_as_admin(exe: &Path) -> Result<()> {
         run_elevated(exe, "ui --takeover", true, false).map(|_| ())
+    }
+
+    #[cfg(feature = "host")]
+    pub fn service_action(exe: &Path, install: bool) -> Result<String> {
+        use rdesk_host::win::service;
+        if elevated() {
+            let msg = if install { service::install()? } else { service::uninstall()? };
+            if install && current() == Autostart::LoginAdmin {
+                apply(Autostart::Login, exe)?;
+            }
+            return Ok(msg);
+        }
+        let code = run_elevated(exe, if install { "service install" } else { "service uninstall" }, false, true)?;
+        if code != 0 {
+            bail!("the elevated helper failed (exit code {code}); `rdesk service status` in a terminal says more");
+        }
+        Ok(if install { "The rdesk service is installed and running." } else { "The rdesk service is removed." }.into())
     }
 }
 

@@ -51,6 +51,9 @@ impl Injector {
                 let mut backend = make();
                 let mut state = State::default();
                 while let Ok(cmd) = rx.recv() {
+                    // Started by the service: type into the sign-in, lock and UAC screens too.
+                    #[cfg(windows)]
+                    crate::win::desktop::follow_input_desktop();
                     let blocked_by =
                         if watch_uipi && is_press(&cmd) { elevation::foreground_blocks_input() } else { None };
                     match state.handle(backend.as_mut(), cmd) {

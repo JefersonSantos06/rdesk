@@ -6,6 +6,11 @@
 //! * Windows: `%APPDATA%\rdesk\rdesk\config\`
 //!
 //! `RDESK_CONFIG_DIR` overrides it (tests, running several instances).
+//!
+//! The host's own files (identity, registration, `host.toml`, password, keys) belong to
+//! the computer, not to whoever uses the app. They live in the same directory, except
+//! when the Windows service runs the host: then in `%ProgramData%\rdesk`, readable only
+//! by SYSTEM and Administrators. `RDESK_HOST_DIR` overrides it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,8 +35,42 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dirs.config_dir().to_path_buf())
 }
 
+/// The host's files (see the module docs); `machine.json` is `account::MACHINE_FILE`.
+pub const HOST_FILES: [&str; 6] =
+    [HOST_CONFIG, AUTHORIZED_KEYS, HOST_KEY, OPAQUE_SETUP, OPAQUE_PASSWORD, "machine.json"];
+
+/// Where the Windows service keeps the host's files: `%ProgramData%\rdesk`.
+pub fn service_dir() -> Option<PathBuf> {
+    if cfg!(windows) { std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join("rdesk")) } else { None }
+}
+
+/// The host is run by the Windows service (`rdesk service install`), not by this app.
+pub fn service_mode() -> bool {
+    std::env::var_os("RDESK_CONFIG_DIR").is_none() && service_dir().is_some_and(|d| d.is_dir())
+}
+
+/// Where the host's files are.
+pub fn host_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("RDESK_HOST_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    match service_dir() {
+        Some(dir) if service_mode() => Ok(dir),
+        _ => config_dir(),
+    }
+}
+
 pub fn config_path(name: &str) -> Result<PathBuf> {
+    if HOST_FILES.contains(&name) {
+        return Ok(host_dir()?.join(name));
+    }
     Ok(config_dir()?.join(name))
+}
+
+pub fn ensure_host_dir() -> Result<PathBuf> {
+    let dir = host_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
 }
 
 pub fn ensure_config_dir() -> Result<PathBuf> {

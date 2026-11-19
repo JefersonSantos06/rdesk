@@ -12,7 +12,7 @@ use ssh_key::PublicKey;
 /// Create whatever is missing (identity, host.toml, OPAQUE setup) and return the fingerprint.
 /// Safe to call every time the host starts.
 pub fn ensure_initialized() -> Result<[u8; 32]> {
-    config::ensure_config_dir()?;
+    config::ensure_host_dir()?;
     remove_legacy_files();
     let id = match HostIdentity::load() {
         Ok(id) => id,
@@ -48,7 +48,7 @@ fn remove_legacy_files() {
 
 /// New identity, so a new host ID: every client must be given the new ID.
 pub fn regenerate_identity() -> Result<[u8; 32]> {
-    config::ensure_config_dir()?;
+    config::ensure_host_dir()?;
     let id = HostIdentity::generate();
     id.save()?;
     Ok(id.fingerprint())
@@ -121,7 +121,7 @@ pub fn load_keys() -> Result<Vec<PublicKey>> {
 }
 
 fn save_keys(keys: &[PublicKey]) -> Result<()> {
-    config::ensure_config_dir()?;
+    config::ensure_host_dir()?;
     let mut out = String::from("# rdesk authorized keys (OpenSSH format)\n");
     for k in keys {
         out.push_str(k.to_openssh()?.trim());
@@ -199,7 +199,7 @@ pub fn load_config() -> Result<HostConfig> {
 }
 
 pub fn save_config(cfg: &HostConfig) -> Result<()> {
-    config::ensure_config_dir()?;
+    config::ensure_host_dir()?;
     config::save_toml(config::HOST_CONFIG, cfg)
 }
 
@@ -220,9 +220,9 @@ fn line(label: &str, value: impl Into<String>, ok: bool) -> CheckLine {
 /// What `rdesk host check` prints, as data.
 pub async fn diagnose() -> Vec<CheckLine> {
     let mut out = Vec::new();
-    match config::config_dir() {
-        Ok(d) => out.push(line("Config folder", d.display().to_string(), true)),
-        Err(e) => out.push(line("Config folder", format!("{e:#}"), false)),
+    match config::host_dir() {
+        Ok(d) => out.push(line("Host folder", d.display().to_string(), true)),
+        Err(e) => out.push(line("Host folder", format!("{e:#}"), false)),
     }
     match HostIdentity::load() {
         Ok(id) => out.push(line("Host ID", config::format_host_id(&id.fingerprint()), true)),

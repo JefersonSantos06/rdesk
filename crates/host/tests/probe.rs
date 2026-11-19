@@ -24,8 +24,12 @@ async fn probes_learn_nothing_and_are_not_logins() {
 
     let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let addr = format!("127.0.0.1:{port}");
-    let host =
-        tokio::spawn(rdesk_host::run(rdesk_host::RunOpts { port: Some(port), fake_capture: true, fake_input: true }));
+    let host = tokio::spawn(rdesk_host::run(rdesk_host::RunOpts {
+        port: Some(port),
+        fake_capture: true,
+        fake_input: true,
+        ..Default::default()
+    }));
 
     let net = NetworkConfig::default();
     let ep = transport::bind(None, &net, &TransportTuning::default(), Role::Client).await.unwrap();

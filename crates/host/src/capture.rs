@@ -47,6 +47,11 @@ impl Capturer {
                 let mut backend: Box<dyn Backend> =
                     if fake { Box::new(Synthetic::new()) } else { Box::new(XcapBackend::default()) };
                 while let Ok(req) = rx.recv() {
+                    // Started by the service: the sign-in, lock and UAC screens are another desktop.
+                    #[cfg(windows)]
+                    if !fake && let Some(d) = crate::win::desktop::follow_input_desktop() {
+                        tracing::info!("capturing the {d} desktop");
+                    }
                     match req {
                         Req::List(reply) => {
                             let _ = reply.send(backend.list());

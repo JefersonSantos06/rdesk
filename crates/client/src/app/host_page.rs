@@ -1,5 +1,9 @@
 //! "This computer": the built-in host. Turn it on/off, see who is connected and what
 //! happened, manage how people log in (password, SSH keys), options and diagnostics.
+//!
+//! On Windows the host can instead be run by the rdesk service (as SYSTEM, so it also
+//! works on the sign-in and lock screens and through UAC). Then this page shows that host's
+//! status through its control pipe, and changing its settings needs administrator rights.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +16,7 @@ use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, HostConfig, format_host_id};
 use rdesk_common::directory;
 use rdesk_host::admin::{self, CheckLine};
+use rdesk_host::ipc::RemoteHost;
 use rdesk_host::{HostHandle, HostState, HostStatus, Reporter, RunOpts};
 use rdesk_proto::api::Visibility;
 use ssh_key::PublicKey;
@@ -62,6 +67,10 @@ pub(super) struct HostPage {
     rt: Arc<tokio::runtime::Runtime>,
     reporter: Reporter,
     handle: Option<HostHandle>,
+    /// The host run by the Windows service, when it is installed (then `handle` stays empty).
+    service: Option<RemoteHost>,
+    service_job: Option<Receiver<Result<String, String>>>,
+    service_checked: Instant,
     cfg: HostConfig,
     keys: Vec<PublicKey>,
     has_password: bool,
@@ -98,6 +107,9 @@ impl HostPage {
             rt,
             reporter,
             handle: None,
+            service: None,
+            service_job: None,
+            service_checked: Instant::now(),
             cfg: HostConfig::default(),
             keys: Vec::new(),
             has_password: false,
@@ -109,8 +121,52 @@ impl HostPage {
             toast: None,
             quit_requested: false,
         };
+        if config::service_mode() {
+            p.service = Some(RemoteHost::start(p.rt.handle(), p.reporter.clone()));
+        }
         p.reload();
         p
+    }
+
+    /// Follow `rdesk service install|uninstall`, from this app or from a terminal.
+    fn check_service_mode(&mut self) {
+        let installed = config::service_mode();
+        if installed && self.service.is_none() {
+            // The service now runs the host, with the same identity: stop ours.
+            if let Some(h) = self.handle.take() {
+                self.rt.block_on(h.shutdown());
+            }
+            self.service = Some(RemoteHost::start(self.rt.handle(), self.reporter.clone()));
+            self.reload();
+        } else if !installed && self.service.is_some() {
+            self.service = None;
+            self.reporter.replace(HostStatus::default());
+            self.reload();
+            if remembered_enabled() {
+                self.start();
+            }
+        }
+    }
+
+    /// Install or remove the service (asks for administrator permission).
+    fn service_action(&mut self, ctx: &egui::Context, install: bool) {
+        let (tx, rx) = channel();
+        let (exe, ctx) = (self.exe.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(autostart::service_action(&exe, install).map_err(|e| format!("{e:#}")));
+            ctx.request_repaint();
+        });
+        self.service_job = Some(rx);
+    }
+
+    /// Applying a change to the service's host: it restarts with the new settings.
+    fn restart_service_host(&mut self) {
+        if let Some(remote) = &self.service {
+            match self.rt.block_on(remote.restart()) {
+                Ok(()) => self.notify("Applied: the service's host is restarting.", false),
+                Err(e) => self.notify(format!("Saved, but the host could not be restarted: {e:#}"), true),
+            }
+        }
     }
 
     fn reload(&mut self) {
@@ -129,6 +185,9 @@ impl HostPage {
     }
 
     pub(super) fn running(&self) -> bool {
+        if self.service.is_some() {
+            return matches!(self.status().state, HostState::Listening(_) | HostState::Starting);
+        }
         self.handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 
@@ -151,7 +210,7 @@ impl HostPage {
     }
 
     pub(super) fn start(&mut self) {
-        if self.running() {
+        if self.service.is_some() || self.running() {
             return;
         }
         match admin::ensure_initialized() {
@@ -166,6 +225,10 @@ impl HostPage {
     }
 
     pub(super) fn stop(&mut self) {
+        if self.service.is_some() {
+            self.notify("The rdesk service runs this computer's host: it is always on.", false);
+            return;
+        }
         if let Some(h) = self.handle.take() {
             self.rt.block_on(h.shutdown());
         }
@@ -181,6 +244,10 @@ impl HostPage {
 
     /// Restart if running (after a settings change).
     pub(super) fn restart(&mut self) {
+        if self.service.is_some() {
+            self.restart_service_host();
+            return;
+        }
         if let Some(h) = self.handle.take() {
             self.rt.block_on(h.shutdown());
             self.start();
@@ -223,6 +290,20 @@ impl HostPage {
     }
 
     pub(super) fn tick(&mut self) {
+        if self.service_checked.elapsed().as_secs() >= 2 {
+            self.service_checked = Instant::now();
+            self.check_service_mode();
+        }
+        if let Some(rx) = &self.service_job
+            && let Ok(r) = rx.try_recv()
+        {
+            self.service_job = None;
+            match r {
+                Ok(msg) => self.notify(msg, false),
+                Err(e) => self.notify(e, true),
+            }
+            self.check_service_mode();
+        }
         if let Some(rx) = &self.reg_job
             && let Ok(r) = rx.try_recv()
         {
@@ -244,7 +325,9 @@ impl HostPage {
                     self.dialog = None;
                     self.notify("Password saved.", false);
                     // A host waiting for a first login method can start now.
-                    if matches!(self.status().state, HostState::Failed(_)) && remembered_enabled() {
+                    if self.service.is_some() {
+                        self.restart_service_host();
+                    } else if matches!(self.status().state, HostState::Failed(_)) && remembered_enabled() {
                         self.handle = None;
                         self.start();
                     }
@@ -302,10 +385,16 @@ impl HostPage {
         let ctx = ui.ctx().clone();
         ui.label(RichText::new("On your rdesk server").strong().size(16.0));
         let busy = self.reg_job.is_some();
-        match Registration::load() {
-            Some(r) => {
+        // The service's files are for administrators only: its status says it instead.
+        let registered = match (&self.service, &st.registration) {
+            (Some(_), Some(Ok(name))) => Some(name.clone()),
+            (Some(_), _) => None,
+            (None, _) => Registration::load().map(|r| format!("{} on {}", r.name, r.server_name)),
+        };
+        match registered {
+            Some(name) => {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Registered as {} on {}.", r.name, r.server_name));
+                    ui.label(format!("Registered as {name}."));
                     match &st.registration {
                         Some(Ok(_)) if self.running() => {
                             ui.colored_label(GREEN, "✔ in touch with the server");
@@ -378,6 +467,11 @@ impl HostPage {
         ui.separator();
         ui.add_space(8.0);
         let st = self.status();
+        if self.service.is_some() {
+            ui.label(RichText::new("This computer").strong());
+            ui.label(format!("Run by the rdesk service · host {}.", self.summary()));
+            return;
+        }
         if let Some(r) = Registration::load() {
             ui.label(RichText::new("This computer").strong());
             ui.label(format!("Reachable as {} on {} · host {}.", r.name, r.server_name, self.summary()));
@@ -467,12 +561,14 @@ impl HostPage {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 8.0, color);
                 ui.label(RichText::new(text).size(17.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if running { "Turn off" } else { "Turn on" };
-                    if ui.button(RichText::new(label).size(15.0)).clicked() {
-                        self.toggle();
-                    }
-                });
+                if self.service.is_none() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if running { "Turn off" } else { "Turn on" };
+                        if ui.button(RichText::new(label).size(15.0)).clicked() {
+                            self.toggle();
+                        }
+                    });
+                }
             });
             if let Some(fp) = self.fingerprint_text() {
                 ui.horizontal(|ui| {
@@ -502,22 +598,63 @@ impl HostPage {
                 }
             }
             if cfg!(windows) {
-                ui.horizontal(|ui| {
-                    if rdesk_host::elevation::is_elevated() {
-                        ui.colored_label(GREEN, "✔ Running as administrator: admin windows can be controlled.");
-                    } else {
-                        ui.colored_label(
-                            ORANGE,
-                            "⚠ Not running as administrator: Task Manager, installers and admin windows ignore remote input.",
-                        );
-                        if ui.button("Restart as administrator").clicked() {
-                            match autostart::restart_as_admin(&self.exe) {
-                                Ok(()) => self.quit_requested = true,
-                                Err(e) => self.notify(format!("{e:#}"), true),
-                            }
+                self.service_row(ui);
+            }
+        });
+    }
+
+    /// Windows: the rdesk service (recommended), or how this app's host runs.
+    fn service_row(&mut self, ui: &mut egui::Ui) {
+        let elevated = rdesk_host::elevation::is_elevated();
+        let busy = self.service_job.is_some();
+        if self.service.is_some() {
+            ui.colored_label(
+                GREEN,
+                "✔ Run by the rdesk service: reachable before sign-in, on the lock screen and through UAC prompts.",
+            );
+            ui.horizontal(|ui| {
+                if elevated {
+                    ui.weak("You can change this computer's settings below.");
+                } else {
+                    ui.weak("Changing this computer's settings needs administrator rights.");
+                    if ui.button("Manage as administrator").clicked() {
+                        match autostart::restart_as_admin(&self.exe) {
+                            Ok(()) => self.quit_requested = true,
+                            Err(e) => self.notify(format!("{e:#}"), true),
                         }
                     }
-                });
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Remove the service…"))
+                    .on_hover_text("This app runs the host again (only while it is open and you are signed in)")
+                    .clicked()
+                {
+                    self.service_action(ui.ctx(), false);
+                }
+                if busy {
+                    ui.spinner();
+                }
+            });
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                ORANGE,
+                "⚠ Run by this app: not reachable before you sign in, and the lock screen and UAC prompts \
+                 cannot be controlled.",
+            );
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Install the rdesk service (recommended)"))
+                .on_hover_text("Windows asks for administrator permission once")
+                .clicked()
+            {
+                self.service_action(ui.ctx(), true);
+            }
+            if busy {
+                ui.spinner();
+                ui.label("Windows may ask for administrator permission…");
             }
         });
     }
@@ -534,10 +671,14 @@ impl HostPage {
                         s.method,
                         directory::ago(unix(s.since), unix(SystemTime::now()))
                     ));
-                    if ui.button("Disconnect").on_hover_text("End it; the other side will not reconnect").clicked()
-                        && let Some(h) = &self.handle
-                    {
-                        h.disconnect();
+                    if ui.button("Disconnect").on_hover_text("End it; the other side will not reconnect").clicked() {
+                        if let Some(remote) = &self.service {
+                            if let Err(e) = self.rt.block_on(remote.disconnect()) {
+                                self.notify(format!("{e:#}"), true);
+                            }
+                        } else if let Some(h) = &self.handle {
+                            h.disconnect();
+                        }
                     }
                 });
             }
@@ -870,7 +1011,11 @@ impl HostPage {
                         Err(e) => self.notify(format!("{e:#}"), true),
                     }
                     self.keys = admin::load_keys().unwrap_or_default();
-                    if matches!(self.status().state, HostState::Failed(_)) && remembered_enabled() {
+                    if self.service.is_some() {
+                        if matches!(self.status().state, HostState::Failed(_)) {
+                            self.restart_service_host();
+                        }
+                    } else if matches!(self.status().state, HostState::Failed(_)) && remembered_enabled() {
                         self.handle = None;
                         self.start();
                     }

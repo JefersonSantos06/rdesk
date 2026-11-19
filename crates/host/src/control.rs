@@ -6,11 +6,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::server::{self, RunOpts};
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum HostState {
     #[default]
     Stopped,
@@ -20,7 +21,7 @@ pub enum HostState {
     Failed(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub client: String,
     /// Where it came from: an IP for direct connections, "relay (…)" otherwise.
@@ -30,14 +31,14 @@ pub struct SessionInfo {
     pub since: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostEvent {
     pub at: SystemTime,
     pub text: String,
     pub warning: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostStatus {
     pub state: HostState,
     /// The host ID.
@@ -75,6 +76,19 @@ impl Reporter {
 
     pub fn snapshot(&self) -> HostStatus {
         self.cell.lock().unwrap().clone()
+    }
+
+    /// Take a whole status from elsewhere (the host run by the service); notifies only on change.
+    pub fn replace(&self, status: HostStatus) {
+        let changed = {
+            let mut cell = self.cell.lock().unwrap();
+            let changed = *cell != status;
+            *cell = status;
+            changed
+        };
+        if changed {
+            (self.notify)();
+        }
     }
 
     fn update(&self, f: impl FnOnce(&mut HostStatus)) {

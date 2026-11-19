@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive"] }
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
 rpassword = "7"
 zeroize = "1"
+serde_json = "1"
 directories = "6"
 
 [target.'cfg(windows)'.dependencies]

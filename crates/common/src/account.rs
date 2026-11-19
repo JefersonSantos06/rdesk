@@ -570,6 +570,14 @@ pub fn open_browser(url: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The registration belongs to the computer: with the Windows service it lives in the
+    /// machine folder, next to the host's identity.
+    #[test]
+    fn registration_is_a_host_file() {
+        assert!(config::HOST_FILES.contains(&MACHINE_FILE));
+        assert!(!config::HOST_FILES.contains(&SESSION_FILE), "the sign-in belongs to the person");
+    }
+
     #[test]
     fn server_addresses() {
         assert_eq!(normalize_server("rdesk.example.com").unwrap(), "https://rdesk.example.com");

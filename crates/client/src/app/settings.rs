@@ -91,7 +91,8 @@ impl SettingsPage {
             ui.add_enabled_ui(self.autostart_job.is_none(), |ui| {
                 ui.radio_value(&mut mode, Autostart::Off, "Don't start automatically");
                 ui.radio_value(&mut mode, Autostart::Login, "Start when I log in (in the tray)");
-                if autostart::supports_admin() {
+                // Replaced by the rdesk service (This computer); kept only to be turned off.
+                if autostart::supports_admin() && self.autostart == Autostart::LoginAdmin {
                     ui.radio_value(
                         &mut mode,
                         Autostart::LoginAdmin,

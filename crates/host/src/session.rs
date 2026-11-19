@@ -25,6 +25,9 @@ pub struct Shared {
     pub cfg: HostConfig,
     pub capturer: Capturer,
     pub injector: Injector,
+    /// Run by the Windows service (as SYSTEM): files go through a helper started as the
+    /// signed-in user (see `win::files`).
+    pub files_as_user: bool,
 }
 
 pub fn pick_initial(monitors: &[MonitorDesc]) -> Option<&MonitorDesc> {
@@ -45,6 +48,7 @@ pub async fn run(
 ) -> Result<()> {
     let peer = transport::describe_peer(&conn);
     let access = auth.access;
+    let files_as_user = shared.files_as_user;
     tracing::info!(
         "session {} started: {} ({:?}, {}) from {peer}",
         hex(&auth.session_id),
@@ -146,7 +150,9 @@ pub async fn run(
                     ClientMsg::ListDir { req, path } => {
                         let out = out.clone();
                         tokio::spawn(async move {
-                            let (path, result) = match files::list_dir(&path).await {
+                            let listed =
+                                if files_as_user { list_as_user(&path).await } else { files::list_dir(&path).await };
+                            let (path, result) = match listed {
                                 Ok((p, entries)) => (p, Ok(entries)),
                                 Err(e) => (path, Err(e)),
                             };
@@ -222,17 +228,21 @@ pub async fn run(
     {
         let conn = conn.clone();
         let inbox = shared.cfg.inbox_dir();
+        let chosen_inbox = shared.cfg.inbox_dir.clone();
         tasks.spawn(async move {
             loop {
                 let (mut w, mut r) = match conn.accept_bi().await {
                     Ok(s) => s,
                     Err(_) => return Ok("bi acceptor"),
                 };
-                let inbox = inbox.clone();
+                let (inbox, chosen_inbox) = (inbox.clone(), chosen_inbox.clone());
                 tokio::spawn(async move {
                     let res: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut r, MAX_SMALL_MSG).await? {
                             StreamOpen::File if !access.files => Err(anyhow!("this session may not access files")),
+                            StreamOpen::File if files_as_user => {
+                                serve_as_user(&mut r, &mut w, chosen_inbox.as_deref()).await
+                            }
                             StreamOpen::File => files::serve(&mut r, &mut w, &inbox).await,
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
@@ -304,6 +314,19 @@ pub async fn run(
     injector.event(InputEvent::ReleaseAll);
     tracing::info!("session {} ended ({reason})", hex(&auth.session_id));
     Ok(())
+}
+
+#[cfg(windows)]
+use crate::win::files::{list_as_user, serve_as_user};
+
+#[cfg(not(windows))]
+async fn list_as_user(_: &str) -> Result<(String, Vec<rdesk_proto::DirEntry>), String> {
+    Err("not available".into())
+}
+
+#[cfg(not(windows))]
+async fn serve_as_user<R, W>(_: &mut R, _: &mut W, _: Option<&std::path::Path>) -> Result<()> {
+    Err(anyhow!("not available"))
 }
 
 pub fn hex(b: &[u8]) -> String {

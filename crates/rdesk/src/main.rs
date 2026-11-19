@@ -42,6 +42,11 @@ enum Command {
     #[cfg(feature = "host")]
     #[command(subcommand)]
     Host(HostCmd),
+    /// The Windows service: this computer reachable before sign-in, on the lock screen and
+    /// through UAC (install, uninstall, status).
+    #[cfg(all(windows, feature = "host"))]
+    #[command(subcommand)]
+    Service(ServiceCmd),
     /// Open the app window: your computers, this computer's host, settings (also the default).
     #[cfg(feature = "client")]
     Ui {
@@ -117,6 +122,32 @@ enum Command {
 
 #[cfg(feature = "host")]
 #[derive(Subcommand)]
+enum FileHelperCmd {
+    /// One file stream on standard input and output.
+    Serve {
+        #[arg(long)]
+        inbox: Option<PathBuf>,
+    },
+    /// A folder listing, as JSON on standard output.
+    List { path: String },
+}
+
+#[cfg(all(windows, feature = "host"))]
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Install (or update) and start the service; needs an elevated terminal.
+    Install,
+    /// Stop and remove the service; this computer's host settings come back to you.
+    Uninstall,
+    /// Is it installed and running?
+    Status,
+    /// Run by Windows (not by hand).
+    #[command(hide = true)]
+    Run,
+}
+
+#[cfg(feature = "host")]
+#[derive(Subcommand)]
 enum HostCmd {
     /// Create the host identity and default config.
     Init {
@@ -135,7 +166,13 @@ enum HostCmd {
         /// Log input instead of injecting it.
         #[arg(long, hide = true)]
         fake_input: bool,
+        /// Started by the Windows service (stops when standard input closes).
+        #[arg(long, hide = true)]
+        agent: bool,
     },
+    /// Files for the host started by the service, run as the signed-in user.
+    #[command(hide = true, subcommand)]
+    FileHelper(FileHelperCmd),
     /// Print this host's ID (clients add the host with it).
     #[command(alias = "fingerprint")]
     Id,
@@ -426,6 +463,66 @@ struct ConnectArgs {
     files: bool,
 }
 
+/// The file helper of the service's host: one file stream, or one folder listing.
+#[cfg(feature = "host")]
+fn file_helper(cmd: FileHelperCmd) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    match cmd {
+        FileHelperCmd::Serve { inbox } => {
+            let inbox = inbox.unwrap_or_else(|| rdesk_common::config::HostConfig::default().inbox_dir());
+            rt.block_on(async {
+                let (mut r, mut w) = (tokio::io::stdin(), tokio::io::stdout());
+                rdesk_common::files::serve(&mut r, &mut w, &inbox).await?;
+                tokio::io::AsyncWriteExt::flush(&mut w).await?;
+                Ok(())
+            })
+        }
+        FileHelperCmd::List { path } => {
+            let listing = rt.block_on(rdesk_common::files::list_dir(&path));
+            let mut out = std::io::stdout();
+            serde_json::to_writer(&mut out, &listing)?;
+            out.flush()?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(windows, feature = "host"))]
+fn service_cmd(cmd: ServiceCmd) -> Result<()> {
+    use rdesk_host::win::service::{self, State};
+    match cmd {
+        ServiceCmd::Install => {
+            println!("{}", service::install()?);
+            // The service replaces "start as administrator at login" (a scheduled task).
+            #[cfg(feature = "client")]
+            if rdesk_client::app::current_autostart() == rdesk_client::app::Autostart::LoginAdmin {
+                let exe = std::env::current_exe()?;
+                rdesk_client::app::apply_autostart(rdesk_client::app::Autostart::Login, &exe)?;
+                println!("The app now starts normally at login (the service does the administrator part).");
+            }
+            Ok(())
+        }
+        ServiceCmd::Uninstall => {
+            println!("{}", service::uninstall()?);
+            Ok(())
+        }
+        ServiceCmd::Status => {
+            let text = match service::state()? {
+                State::NotInstalled => "not installed (`rdesk service install` in an elevated terminal)",
+                State::Stopped => "installed, stopped",
+                State::Running => "installed, running",
+                State::Changing => "installed, starting or stopping",
+            };
+            println!("rdesk service: {text}");
+            if let Some(dir) = config::service_dir().filter(|d| d.is_dir()) {
+                println!("Host files: {}", dir.display());
+            }
+            Ok(())
+        }
+        ServiceCmd::Run => service::run(),
+    }
+}
+
 fn init_logging(verbose: u8) {
     use tracing_subscriber::EnvFilter;
     let default = match verbose {
@@ -437,15 +534,16 @@ fn init_logging(verbose: u8) {
     tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
 }
 
-/// The desktop app usually has no console: log to `<config>/logs/app.log` instead.
-fn init_app_logging(verbose: u8) {
+/// No console (the desktop app, the service and the host it starts): log to
+/// `<dir>/logs/<name>` instead.
+fn init_file_logging(verbose: u8, dir: Result<PathBuf>, name: &str) {
     use tracing_subscriber::EnvFilter;
-    let file = config::ensure_config_dir()
+    let file = dir
         .map(|d| d.join("logs"))
         .and_then(|d| std::fs::create_dir_all(&d).map(|_| d).map_err(Into::into))
         .and_then(|d| {
             // Append: a second launch (which only wakes the running app) must not clobber it.
-            let path = d.join("app.log");
+            let path = d.join(name);
             if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
                 let _ = std::fs::remove_file(&path);
             }
@@ -473,8 +571,20 @@ fn main() -> Result<()> {
     let app = matches!(cli.cmd, None | Some(Command::Ui { .. }));
     #[cfg(not(feature = "client"))]
     let app = false;
+    #[cfg(feature = "host")]
+    let agent = matches!(cli.cmd, Some(Command::Host(HostCmd::Run { agent: true, .. })));
+    #[cfg(not(feature = "host"))]
+    let agent = false;
+    #[cfg(all(windows, feature = "host"))]
+    let service = matches!(cli.cmd, Some(Command::Service(ServiceCmd::Run)));
+    #[cfg(not(all(windows, feature = "host")))]
+    let service = false;
     if app {
-        init_app_logging(cli.verbose)
+        init_file_logging(cli.verbose, config::ensure_config_dir(), "app.log")
+    } else if agent {
+        init_file_logging(cli.verbose, config::ensure_host_dir(), "host.log")
+    } else if service {
+        init_file_logging(cli.verbose, config::ensure_host_dir(), "service.log")
     } else {
         init_logging(cli.verbose)
     }
@@ -494,6 +604,8 @@ fn main() -> Result<()> {
         }
         #[cfg(feature = "host")]
         Command::Host(h) => host_cmd(h),
+        #[cfg(all(windows, feature = "host"))]
+        Command::Service(s) => service_cmd(s),
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
         Command::Machines(m) => runtime()?.block_on(machines_cmd(m)),
@@ -582,11 +694,15 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             println!("  rdesk host run                       # or just `rdesk` for the app");
             Ok(())
         }
-        HostCmd::Run { port, fake_capture, fake_input } => runtime()?.block_on(rdesk_host::run(rdesk_host::RunOpts {
-            port,
-            fake_capture: fake_capture || std::env::var_os("RDESK_FAKE_CAPTURE").is_some(),
-            fake_input: fake_input || std::env::var_os("RDESK_FAKE_INPUT").is_some(),
-        })),
+        HostCmd::Run { port, fake_capture, fake_input, agent } => {
+            runtime()?.block_on(rdesk_host::run(rdesk_host::RunOpts {
+                port,
+                fake_capture: fake_capture || std::env::var_os("RDESK_FAKE_CAPTURE").is_some(),
+                fake_input: fake_input || std::env::var_os("RDESK_FAKE_INPUT").is_some(),
+                agent,
+            }))
+        }
+        HostCmd::FileHelper(cmd) => file_helper(cmd),
         HostCmd::Id => {
             println!("{}", format_host_id(&HostIdentity::load()?.fingerprint()));
             Ok(())
