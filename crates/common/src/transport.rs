@@ -213,6 +213,20 @@ pub async fn connect(
 }
 
 /// Like [`connect`], trying several direct addresses (what a machine reported).
+/// Find hosts on the local network by mDNS and, with `advertise`, announce this one (as
+/// a host with direct access and `[direct] mdns` on). Only IP addresses are announced,
+/// never the relay; the service name keeps it apart from other iroh programs.
+pub fn local_discovery(endpoint: &Endpoint, advertise: bool) -> Result<iroh_mdns_address_lookup::MdnsAddressLookup> {
+    let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+        .advertise(advertise)
+        .service_name("rdesk")
+        .addr_filter(iroh::address_lookup::AddrFilter::ip_only())
+        .build(endpoint.id())
+        .map_err(|e| anyhow!("starting mDNS: {e}"))?;
+    endpoint.address_lookup().map_err(|e| anyhow!("{e}"))?.add(mdns.clone());
+    Ok(mdns)
+}
+
 pub async fn connect_with(
     endpoint: &Endpoint,
     id: [u8; 32],
@@ -239,7 +253,8 @@ pub async fn connect_with(
             Err(e) => return Err(e),
         }
     }
-    if addr.is_empty() {
+    // No address and no relay: only a local-network lookup (mDNS) can still find it.
+    if addr.is_empty() && endpoint.address_lookup().map(|l| l.is_empty()).unwrap_or(true) {
         bail!("no way to reach this computer: sign in to your rdesk server (rdesk login), or give its address");
     }
     let conn = match tokio::time::timeout(timeout, endpoint.connect(addr, rdesk_proto::ALPN)).await {

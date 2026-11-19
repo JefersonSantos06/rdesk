@@ -39,6 +39,15 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Raspberry Pi com a imagem e `deploy/rdesk-host.service`: primeiro boot entra sozinho; duas placas da mesma imagem têm IDs diferentes.
 - [ ] Descadastrar uma máquina que entrou por chave: ao reiniciar ela vira pedido de aprovação, não volta sozinha.
 
+## Sem servidor (acesso direto)
+- [ ] Tela de login → *Use on this network, without a server*: abre só a aba Computers com *On this network*; Groups e Admin somem.
+- [ ] *＋ Add…* com IP da LAN: conecta com a senha ou a chave do computador; *Files* abre os arquivos.
+- [ ] Pelo nome do Tailscale (`pc.tailnet.ts.net`) de outra rede: conecta.
+- [ ] Host com `mdns` ligado e endereço vazio no cliente: conecta só pelo host ID.
+- [ ] Host cadastrado com acesso direto ligado: o app de quem vê o computador mostra *⚠ direct access on*; a sessão direta aparece no *History…*.
+- [ ] De um IP público fora da sua rede (4G sem Tailscale): o host recusa antes do login (aparece em *Activity*/log).
+- [ ] Entrar no servidor depois do modo local: as listas do servidor aparecem, e *On this network* continua embaixo.
+
 ## Serviço do Windows
 - [ ] *This computer* → *Install the rdesk service*: pede permissão de administrador uma vez; o host ID continua o mesmo e a página passa a mostrar o status do serviço.
 - [ ] Reiniciar o Windows e conectar **antes** de entrar: aparece a tela de login; dá para digitar a senha e entrar.

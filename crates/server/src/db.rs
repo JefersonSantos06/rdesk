@@ -151,6 +151,10 @@ const SCHEMA: &[&str] = &[
         removed_at INTEGER NOT NULL
     );
     "#,
+    // v5: the host reports whether its own password/key also open it on the LAN.
+    r#"
+    ALTER TABLE machines ADD COLUMN direct_access INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn now() -> i64 {

@@ -122,7 +122,20 @@ struct App {
     cmds: Receiver<AppCmd>,
     quitting: bool,
     visible: bool,
+    /// Used without a server (only computers on this network), until someone signs in.
+    local_mode: bool,
     _instance: instance::Guard,
+}
+
+/// Remember the choice of using the app without a server.
+fn set_local_only(on: bool) {
+    let mut cfg: rdesk_common::config::ClientConfig =
+        rdesk_common::config::load_toml(rdesk_common::config::CLIENT_CONFIG).unwrap_or_default();
+    if cfg.app.local_only != on {
+        cfg.app.local_only = on;
+        let _ = rdesk_common::config::ensure_config_dir()
+            .and_then(|_| rdesk_common::config::save_toml(rdesk_common::config::CLIENT_CONFIG, &cfg));
+    }
 }
 
 impl App {
@@ -138,12 +151,19 @@ impl App {
         let (wtx, wrx) = tokio::sync::mpsc::unbounded_channel();
         computers::spawn_worker(shared.clone(), wrx, ctx.clone());
         let account = account::Account::new(&ctx);
+        let local_mode = !account.signed_in()
+            && rdesk_common::config::load_toml::<rdesk_common::config::ClientConfig>(
+                rdesk_common::config::CLIENT_CONFIG,
+            )
+            .map(|c| c.app.local_only)
+            .unwrap_or(false);
         #[cfg(feature = "host")]
         let host = {
             let mut h = host_page::HostPage::new(exe.clone(), ctx.clone());
             // A registered computer has its own credential: it stays reachable with nobody signed in
-            // (and one asking a server to add it keeps asking).
-            if (account.signed_in() || host_page::runs_signed_out()) && host_page::remembered_enabled() {
+            // (and one asking a server to add it keeps asking). Without a server, the host
+            // serves the local network.
+            if (account.signed_in() || local_mode || host_page::runs_signed_out()) && host_page::remembered_enabled() {
                 h.start();
             }
             h
@@ -158,6 +178,7 @@ impl App {
             host,
             settings: settings::SettingsPage::new(exe),
             visible: !hidden || tray.is_none(),
+            local_mode,
             tray,
             cmds,
             quitting: false,
@@ -186,7 +207,7 @@ impl App {
             AppCmd::ToggleHost =>
             {
                 #[cfg(feature = "host")]
-                if self.account.signed_in() || host_page::runs_signed_out() {
+                if self.account.signed_in() || self.local_mode || host_page::runs_signed_out() {
                     self.host.toggle();
                 } else {
                     self.show_window(ctx);
@@ -231,7 +252,9 @@ impl App {
             tab(ui, Page::Computers, "🖥  Computers");
             #[cfg(feature = "host")]
             tab(ui, Page::ThisComputer, "🏠  This computer");
-            tab(ui, Page::Groups, "👥  Groups");
+            if self.account.signed_in() {
+                tab(ui, Page::Groups, "👥  Groups");
+            }
             tab(ui, Page::Settings, "⚙  Settings");
             if self.account.is_admin() {
                 tab(ui, Page::Admin, "🛡  Admin");
@@ -278,13 +301,21 @@ impl eframe::App for App {
         if std::mem::take(&mut self.account.changed) {
             // A different user (or none): their list, not the previous one's.
             self.computers.refresh();
+            // Signing in ends the local-network-only mode (signing out shows the sign-in page).
+            if self.account.signed_in() && self.local_mode {
+                self.local_mode = false;
+                set_local_only(false);
+            }
+            if !self.account.signed_in() && self.page == Page::Groups {
+                self.page = Page::Computers;
+            }
             if !self.account.is_admin() && self.page == Page::Admin {
                 self.page = Page::Computers;
             }
             // An unregistered host depends on someone being signed in; a registered one does not.
             #[cfg(feature = "host")]
             {
-                if self.account.signed_in() {
+                if self.account.signed_in() || self.local_mode {
                     if host_page::remembered_enabled() && !self.host.running() {
                         self.host.start();
                     }
@@ -321,15 +352,36 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if !self.account.signed_in() {
+        if !self.account.signed_in() && !self.local_mode {
             #[cfg(feature = "host")]
             let host = &mut self.host;
+            let mut go_local = false;
             egui::CentralPanel::default().show(ui, |ui| {
-                self.account.login_screen(ui, |_ui, _server| {
+                self.account.login_screen(ui, |ui, _server| {
+                    ui.add_space(10.0);
+                    if ui
+                        .button("Use on this network, without a server")
+                        .on_hover_text(
+                            "Only computers on the local network or Tailscale that let you in with their own \
+                             password or SSH key",
+                        )
+                        .clicked()
+                    {
+                        go_local = true;
+                    }
                     #[cfg(feature = "host")]
-                    host.join_section(_ui, _server);
+                    host.join_section(ui, _server);
                 })
             });
+            if go_local {
+                self.local_mode = true;
+                set_local_only(true);
+                self.page = Page::Computers;
+                #[cfg(feature = "host")]
+                if host_page::remembered_enabled() && !self.host.running() {
+                    self.host.start();
+                }
+            }
             #[cfg(feature = "host")]
             if let Some((text, true, at)) = &self.host.toast
                 && at.elapsed() < Duration::from_secs(12)
@@ -373,11 +425,23 @@ impl eframe::App for App {
             });
         });
         egui::CentralPanel::default().show(ui, |ui| match self.page {
-            Page::Computers => self.computers.show(ui),
+            Page::Computers => self.computers.show(ui, self.account.signed_in()),
             #[cfg(feature = "host")]
             Page::ThisComputer => self.host.show(ui),
             Page::Settings => {
-                self.account.settings_section(ui);
+                if self.local_mode && !self.account.signed_in() {
+                    ui.label(RichText::new("Account").strong().size(16.0));
+                    ui.horizontal(|ui| {
+                        ui.label("Used without a server: only computers on this network.");
+                        if ui.button("Sign in to a server…").clicked() {
+                            self.local_mode = false;
+                            set_local_only(false);
+                        }
+                    });
+                    ui.add_space(14.0);
+                } else {
+                    self.account.settings_section(ui);
+                }
                 self.settings.show(ui);
             }
             Page::Admin => self.admin.show(ui, self.account.session()),

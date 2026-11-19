@@ -1327,15 +1327,26 @@ struct Target {
 /// `ID@address` for an unregistered computer on the LAN.
 #[cfg(feature = "client")]
 async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
-    // Using rdesk needs an account on your server.
-    let s = session()?;
     let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
+    // Saved on this device to reach without the server (by name, or the start of its ID).
+    let wanted = target.trim().to_lowercase();
+    let local = cfg.hosts.values().find(|e| {
+        !e.name.is_empty() && (e.name.to_lowercase() == wanted || (wanted.len() >= 8 && e.id.starts_with(&wanted)))
+    });
     let (name, id_hex, addr, machine) = match target.split_once('@') {
+        // Direct, without the server (the computer must allow it: local network, own login).
         Some((id, addr)) => {
             parse_host_id(id).with_context(|| format!("{target}: expected ID@address"))?;
             (id.chars().take(12).collect::<String>(), id.to_string(), addr.to_string(), None)
         }
+        None if let Some(e) = local => (e.name.clone(), e.id.clone(), e.addr.clone(), None),
+        // A whole host ID, not signed in: look for it on the local network (mDNS).
+        None if Session::load().is_none() && parse_host_id(target.trim()).is_ok() => {
+            (target.trim().chars().take(12).collect(), target.trim().to_string(), String::new(), None)
+        }
         None => {
+            // A computer on your server: needs you signed in there.
+            let s = session()?;
             let list = s.api()?.machines().await?;
             let m = find_machine(&list, target)?;
             if !m.can_access {
@@ -1367,7 +1378,9 @@ async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     if a.identity.is_some() {
         entry.identity = a.identity.clone();
     }
-    Ok(Target { name, entry, id, machine, cfg, net: config::load_network() })
+    // Without the server: no relay, the address or the local network (mDNS) only.
+    let net = if machine.is_some() { config::load_network() } else { NetworkConfig::default() };
+    Ok(Target { name, entry, id, machine, cfg, net })
 }
 
 #[cfg(feature = "client")]
@@ -1428,6 +1441,11 @@ impl CliSession {
 #[cfg(feature = "client")]
 async fn cli_session(t: &Target) -> Result<CliSession> {
     let ep = transport::bind(None, &t.net, &t.cfg.transport, transport::Role::Client).await?;
+    if t.machine.is_none()
+        && let Err(e) = transport::local_discovery(&ep, false)
+    {
+        tracing::debug!("{e:#}");
+    }
     match cli_login(t, &ep).await {
         Ok((conn, w, r)) => Ok(CliSession { ep, conn, w, r }),
         Err(e) => {

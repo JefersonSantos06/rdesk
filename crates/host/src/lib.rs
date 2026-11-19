@@ -8,6 +8,7 @@ pub mod enroll;
 pub mod input;
 pub mod ipc;
 pub mod keymap;
+pub mod localnet;
 pub mod power;
 pub mod server;
 pub mod session;

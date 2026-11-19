@@ -167,6 +167,10 @@ pub struct Machine {
     pub is_owner: bool,
     /// The requesting user may rename it, change who sees it, share it, see its history.
     pub can_manage: bool,
+    /// It also lets people in with its own password or SSH key on the local network (or
+    /// Tailscale), without the server's permission.
+    #[serde(default)]
+    pub direct: bool,
 }
 
 /// What a share grants.
@@ -373,6 +377,9 @@ pub struct AgentSync {
     /// it changed (key rotation).
     #[serde(default)]
     pub server_key: String,
+    /// Direct access is on: its own password or key also open it on the local network.
+    #[serde(default)]
+    pub direct: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

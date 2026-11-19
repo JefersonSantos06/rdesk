@@ -36,6 +36,7 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
             in_session: server.in_session().await,
             sessions,
             server_key: policy.server_keys.read().unwrap().first().map(hex::encode).unwrap_or_default(),
+            direct: server.direct_on(),
         };
         // Sent again next time unless the server confirms them.
         let requeue = |server: &Server, req: AgentSync| {

@@ -253,6 +253,9 @@ pub struct HostAuthConfig {
     pub ticket: Option<TicketPolicy>,
     /// With a ticket, also ask for this computer's own password or SSH key.
     pub require_local: bool,
+    /// This connection came straight from the local network (or Tailscale) and direct
+    /// access is on: this computer's own password or SSH key are enough, ticket or not.
+    pub direct: bool,
 }
 
 /// Parse an OpenSSH `authorized_keys` file (options are not supported and rejected).
@@ -331,7 +334,7 @@ where
     if cfg.ticket.is_some() {
         methods.push(AuthMethod::Ticket);
     }
-    if cfg.ticket.is_none() || cfg.require_local {
+    if cfg.ticket.is_none() || cfg.require_local || cfg.direct {
         methods.push(AuthMethod::PublicKey);
         if cfg.opaque.is_some() {
             methods.push(AuthMethod::Password);
@@ -346,7 +349,8 @@ where
     let authorized = |k: &KeyData| cfg.authorized_keys.iter().any(|a| a == k);
     // A registered computer needs a ticket before its own password/key counts.
     let mut ticket_user: Option<TicketUser> = None;
-    let local_allowed = |t: &Option<TicketUser>| cfg.ticket.is_none() || (cfg.require_local && t.is_some());
+    let local_allowed =
+        |t: &Option<TicketUser>| cfg.ticket.is_none() || cfg.direct || (cfg.require_local && t.is_some());
     const NEED_TICKET: &str =
         "this computer is reached through its rdesk server: sign in there and connect from the app";
 
@@ -607,7 +611,10 @@ where
     }
 
     // 2. Ticket (registered computers). Done unless the computer also wants its own factor.
-    if methods.contains(&AuthMethod::Ticket) {
+    // Without a ticket, a computer that also offers its own password or key (direct access
+    // on the local network) is tried with those instead.
+    let local_offered = methods.contains(&AuthMethod::PublicKey) || methods.contains(&AuthMethod::Password);
+    if methods.contains(&AuthMethod::Ticket) && (auth.ticket.is_some() || !local_offered) {
         let Some(ticket) = auth.ticket.take() else {
             bail!(AuthFailed("this computer is reached through its rdesk server: connect from the app".into()));
         };

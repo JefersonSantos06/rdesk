@@ -769,6 +769,44 @@ impl HostPage {
                 ui.checkbox(&mut self.cfg.require_local, "also ask for this computer's password or SSH key")
                     .on_hover_text("Besides the permission from the server (needs a password or key set above)");
                 ui.end_row();
+                ui.label("Direct access");
+                ui.vertical(|ui| {
+                    let registered = self.status().registration.is_some() || Registration::load().is_some();
+                    let mut on = self.cfg.direct.is_on(registered);
+                    let text = "this computer's own password or SSH key open it without the server";
+                    if ui.checkbox(&mut on, text).changed() {
+                        // Back to the default when it matches it (on only while unregistered).
+                        self.cfg.direct.enabled = (on == registered).then_some(on);
+                    }
+                    if on {
+                        ui.horizontal(|ui| {
+                            ui.label("from");
+                            for (class, label) in [("lan", "local network"), ("tailscale", "Tailscale")] {
+                                let mut has = self.cfg.direct.from.iter().any(|c| c == class);
+                                if ui.checkbox(&mut has, label).changed() {
+                                    self.cfg.direct.from.retain(|c| c != class);
+                                    if has {
+                                        self.cfg.direct.from.push(class.to_string());
+                                    }
+                                }
+                            }
+                        });
+                        ui.checkbox(&mut self.cfg.direct.mdns, "announce it on the local network (mDNS)")
+                            .on_hover_text(
+                                "Others connect with the host ID alone; anyone on the network sees it is here",
+                            );
+                        if registered {
+                            ui.colored_label(
+                                ORANGE,
+                                "Registered: this is a second way in, besides the server's sharing. The owner sees it \
+                                 is on, and these sessions appear in the history.",
+                            );
+                        }
+                    } else if !registered {
+                        ui.colored_label(ORANGE, "Not registered and direct access off: nobody can reach it.");
+                    }
+                });
+                ui.end_row();
             });
             ui.horizontal(|ui| {
                 if ui.button("Save options").clicked() {

@@ -13,6 +13,7 @@
 //! by SYSTEM and Administrators. `RDESK_HOST_DIR` overrides it.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -148,6 +149,72 @@ pub struct HostConfig {
     /// Join a server without anyone signing in on this computer.
     #[serde(skip_serializing_if = "EnrollConfig::is_empty")]
     pub enroll: EnrollConfig,
+    /// Logging in with this computer's own password or key, without the server.
+    pub direct: DirectConfig,
+}
+
+/// `[direct]` in host.toml: this computer's own password or SSH key open it without the
+/// server's permission, only for connections from the local network or Tailscale, never
+/// through the relay. Other addresses are turned away before any login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DirectConfig {
+    /// `None`: on while the computer is not registered with a server, off once it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Where such connections may come from: `"lan"` (private, link-local and loopback
+    /// addresses) and `"tailscale"` (100.64.0.0/10, fd7a:115c:a1e0::/48).
+    pub from: Vec<String>,
+    /// Announce this computer on the local network (mDNS), so others connect with its
+    /// host ID alone. Anyone on the network then sees that an rdesk host is here.
+    pub mdns: bool,
+}
+
+impl Default for DirectConfig {
+    fn default() -> Self {
+        Self { enabled: None, from: vec!["lan".into(), "tailscale".into()], mdns: false }
+    }
+}
+
+impl DirectConfig {
+    pub fn is_on(&self, registered: bool) -> bool {
+        self.enabled.unwrap_or(!registered)
+    }
+
+    /// May a direct connection from `ip` log in this way?
+    pub fn allows(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        self.from.iter().any(|class| match class.as_str() {
+            "lan" => is_lan(ip),
+            "tailscale" => is_tailscale(ip),
+            _ => false,
+        })
+    }
+}
+
+/// Private, link-local or loopback: reachable only from the local network.
+pub fn is_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        // fc00::/7 (unique local), fe80::/10 (link-local).
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Tailscale's address ranges.
+pub fn is_tailscale(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+        }
+    }
 }
 
 /// `[enroll]` in host.toml: how an unregistered host asks a server to add it. The
@@ -182,6 +249,7 @@ impl Default for HostConfig {
             require_local: false,
             transport: TransportTuning::default(),
             enroll: EnrollConfig::default(),
+            direct: DirectConfig::default(),
         }
     }
 }
@@ -215,6 +283,10 @@ pub struct HostEntry {
     /// The host's ID (`rdesk host id` on that machine). Connections are authenticated
     /// against it, so it is also what makes the host trusted.
     pub id: String,
+    /// Saved on this device to reach without the server (local network or Tailscale): the
+    /// name shown in the list. Empty for entries that only hold login options.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Optional direct address, `host:port` or `host` (default port): LAN or port forwarding.
     /// Not needed when a relay is configured.
     pub addr: String,
@@ -251,11 +323,13 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     /// Start hidden in the tray.
     pub start_minimized: bool,
+    /// Used without a server: only computers on this network (chosen on the sign-in page).
+    pub local_only: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { host_enabled: false, close_to_tray: true, start_minimized: false }
+        Self { host_enabled: false, close_to_tray: true, start_minimized: false, local_only: false }
     }
 }
 
@@ -315,6 +389,27 @@ pub fn parse_host_id(s: &str) -> Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn direct_sources() {
+        let d = DirectConfig::default();
+        let ok = |a: &str| d.allows(a.parse().unwrap());
+        for a in ["192.168.0.10", "10.1.2.3", "172.20.0.1", "169.254.1.1", "127.0.0.1", "::1", "fe80::1", "fd00::5"] {
+            assert!(ok(a), "{a} is local");
+        }
+        for a in ["100.97.96.81", "100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1", "::ffff:192.168.1.2"] {
+            assert!(ok(a), "{a} is allowed");
+        }
+        for a in ["8.8.8.8", "100.128.0.1", "100.63.255.255", "2001:db8::1", "2804:14c::1", "::ffff:8.8.8.8"] {
+            assert!(!ok(a), "{a} is the internet");
+        }
+        let lan_only = DirectConfig { from: vec!["lan".into()], ..Default::default() };
+        assert!(!lan_only.allows("100.97.96.81".parse().unwrap()));
+        assert!(DirectConfig::default().is_on(false) && !DirectConfig::default().is_on(true));
+        let forced = DirectConfig { enabled: Some(true), ..Default::default() };
+        assert!(forced.is_on(true));
+    }
+
     use super::*;
 
     #[test]

@@ -70,6 +70,11 @@ pub fn service_action(exe: &Path, install: bool) -> Result<String> {
     imp::service_action(exe, install)
 }
 
+#[cfg(all(not(windows), feature = "host"))]
+pub fn service_action(_exe: &Path, _install: bool) -> Result<String> {
+    bail!("the rdesk service exists only on Windows")
+}
+
 /// Start a new elevated copy of the app that takes over from this one.
 #[cfg_attr(not(feature = "host"), allow(dead_code))]
 pub fn restart_as_admin(exe: &Path) -> Result<()> {

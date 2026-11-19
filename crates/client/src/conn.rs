@@ -456,7 +456,15 @@ async fn once(
         };
         let (ep, t) = tokio::join!(bind, fetch);
         match ep {
-            Ok(ep) => *endpoint = Some(ep),
+            Ok(ep) => {
+                // Not through the server: also look for it on the local network (mDNS).
+                if opts.machine.is_none()
+                    && let Err(e) = transport::local_discovery(&ep, false)
+                {
+                    tracing::debug!("{e:#}");
+                }
+                *endpoint = Some(ep)
+            }
             Err(e) => return End::Retry(format!("{e:#}")),
         }
         t

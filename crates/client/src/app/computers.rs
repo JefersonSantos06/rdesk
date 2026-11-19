@@ -191,9 +191,39 @@ struct LoginOptions {
     saved_password: bool,
     new_password: zeroize::Zeroizing<String>,
     forget_password: bool,
+    /// A computer saved on this device, reached without the server: its name and ID are
+    /// edited here too.
+    local: Option<LocalFields>,
+    error: Option<String>,
+}
+
+struct LocalFields {
+    name: String,
+    id: String,
+    /// The ID it was saved under (editing), to replace that entry.
+    original_id: Option<String>,
 }
 
 impl LoginOptions {
+    /// A computer saved on this device (`None`: a new one).
+    fn load_local(e: Option<&HostEntry>) -> Self {
+        let mut o = Self::empty();
+        if let Some(e) = e {
+            o.endpoint_id = e.id.clone();
+            o.name = e.name.clone();
+            o.addr = e.addr.clone();
+            o.auth = e.auth;
+            o.key = e.key.clone().unwrap_or_default();
+            o.password_ref = e.password_ref.clone().unwrap_or_default();
+            o.identity = e.identity.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+            o.agent_socket = e.agent_socket.clone().unwrap_or_default();
+            o.saved_password = crate::secrets::has(&e.name);
+        }
+        o.local =
+            Some(LocalFields { name: o.name.clone(), id: o.endpoint_id.clone(), original_id: e.map(|e| e.id.clone()) });
+        o
+    }
+
     fn load(m: &Machine) -> Self {
         let e = load_client_config().hosts.get(&m.endpoint_id).cloned().unwrap_or_default();
         Self {
@@ -209,8 +239,22 @@ impl LoginOptions {
             saved_password: crate::secrets::has(&m.name),
             new_password: Default::default(),
             forget_password: false,
+            local: None,
+            error: None,
         }
     }
+}
+
+/// Computers saved on this device to reach without the server, by name.
+pub(super) fn local_computers() -> Vec<HostEntry> {
+    let mut list: Vec<HostEntry> = load_client_config().hosts.into_values().filter(|e| !e.name.is_empty()).collect();
+    list.sort_by_key(|e| e.name.to_lowercase());
+    list
+}
+
+/// What `rdesk connect` is given for a computer saved on this device.
+fn local_target(e: &HostEntry) -> String {
+    if e.addr.trim().is_empty() { e.id.clone() } else { format!("{}@{}", e.id, e.addr.trim()) }
 }
 
 /// Everyone and every group, to pick from.
@@ -454,11 +498,41 @@ impl Computers {
         }
     }
 
+    /// Check a computer saved on this device before saving it; fills in its name and ID.
+    fn check_local(o: &mut LoginOptions) -> Result<(), String> {
+        let Some(l) = &o.local else { return Ok(()) };
+        let name = l.name.trim().to_string();
+        if name.is_empty() {
+            return Err("Give it a name.".into());
+        }
+        let id = config::parse_host_id(l.id.trim())
+            .map_err(|_| "The host ID is the 64 characters shown on that computer's This computer page.".to_string())?;
+        let id = config::format_host_id(&id);
+        let taken = local_computers()
+            .into_iter()
+            .any(|e| e.name.eq_ignore_ascii_case(&name) && Some(&e.id) != l.original_id.as_ref());
+        if taken {
+            return Err(format!("Another computer here is already called {name}."));
+        }
+        o.name = name;
+        o.endpoint_id = id;
+        Ok(())
+    }
+
     fn save_login(&mut self, o: &LoginOptions) {
         let mut cfg = load_client_config();
         let opt = |s: &str| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) };
+        let name = match &o.local {
+            Some(_) => o.name.clone(),
+            // Login options of a server computer keep the name it may also be saved under here.
+            None => cfg.hosts.get(&o.endpoint_id).map(|e| e.name.clone()).unwrap_or_default(),
+        };
+        if let Some(old) = o.local.as_ref().and_then(|l| l.original_id.as_ref()).filter(|old| **old != o.endpoint_id) {
+            cfg.hosts.remove(old);
+        }
         let entry = HostEntry {
             id: o.endpoint_id.clone(),
+            name,
             addr: o.addr.trim().to_string(),
             auth: o.auth,
             key: opt(&o.key),
@@ -554,6 +628,16 @@ impl Computers {
                         String::new()
                     };
                     ui.label(RichText::new(format!("{owner} · {}{mine}", vis_label(m.visibility))).weak().small());
+                    if m.direct {
+                        ui.label(
+                            RichText::new("⚠ direct access on: its own password/key also open it on its network")
+                                .color(Color32::from_rgb(240, 160, 40))
+                                .small(),
+                        )
+                        .on_hover_text(
+                            "Turned on at that computer (This computer → Options): a second way in, besides sharing",
+                        );
+                    }
                     ui.label(RichText::new(detail).color(status.color()));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -713,11 +797,43 @@ impl Computers {
             Dialog::Login(o) => {
                 let m = egui::Modal::new(egui::Id::unique("login-opts")).show(ctx, |ui| {
                     ui.set_width(480.0);
-                    ui.heading(format!("Login options · {}", o.name));
-                    ui.label(
-                        "Only for computers whose owner turned on the extra lock (their own password or \
-                         SSH key, asked after the server's permission).",
-                    );
+                    if let Some(l) = &mut o.local {
+                        ui.heading(if l.original_id.is_some() {
+                            "Computer on this network"
+                        } else {
+                            "Add a computer on this network"
+                        });
+                        ui.label(
+                            "Reached without the server: on the local network or Tailscale, with that computer's \
+                             own password or SSH key (its owner allows this on its This computer page).",
+                        );
+                        ui.add_space(6.0);
+                        egui::Grid::new("local-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                            ui.label("Name");
+                            ui.add(egui::TextEdit::singleline(&mut l.name).hint_text("e.g. PC da sala"));
+                            ui.end_row();
+                            ui.label("Host ID");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut l.id)
+                                    .hint_text("64 characters, from its This computer page")
+                                    .desired_width(330.0),
+                            );
+                            ui.end_row();
+                            ui.label("Address");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut o.addr)
+                                    .hint_text("192.168.0.10, pc.tailnet.ts.net… (empty: find it by mDNS)")
+                                    .desired_width(330.0),
+                            );
+                            ui.end_row();
+                        });
+                    } else {
+                        ui.heading(format!("Login options · {}", o.name));
+                        ui.label(
+                            "Only for computers whose owner turned on the extra lock (their own password or \
+                             SSH key, asked after the server's permission).",
+                        );
+                    }
                     ui.add_space(6.0);
                     egui::Grid::new("login-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                         ui.label("Login");
@@ -810,6 +926,9 @@ impl Computers {
                         });
                     });
                     ui.add_space(6.0);
+                    if let Some(e) = &o.error {
+                        ui.colored_label(ERROR, e);
+                    }
                     let mut done = None;
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
@@ -822,11 +941,14 @@ impl Computers {
                     done
                 });
                 match m.inner {
-                    Some(true) => {
-                        let o = std::mem::replace(o, Box::new(LoginOptions::empty()));
-                        self.save_login(&o);
-                        keep = false;
-                    }
+                    Some(true) => match Self::check_local(o) {
+                        Ok(()) => {
+                            let o = std::mem::replace(o, Box::new(LoginOptions::empty()));
+                            self.save_login(&o);
+                            keep = false;
+                        }
+                        Err(e) => o.error = Some(e),
+                    },
                     Some(false) => keep = false,
                     None if m.should_close() => keep = false,
                     None => {}
@@ -1212,6 +1334,8 @@ impl LoginOptions {
             saved_password: false,
             new_password: Default::default(),
             forget_password: false,
+            local: None,
+            error: None,
         }
     }
 }
@@ -1236,9 +1360,20 @@ impl Computers {
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut egui::Ui) {
+    /// `signed_in`: the server's computers are shown too (not in the local-network mode).
+    pub(super) fn show(&mut self, ui: &mut egui::Ui, signed_in: bool) {
         let ctx = ui.ctx().clone();
         let snap = self.shared.lock().unwrap().clone();
+        if !signed_in {
+            ui.colored_label(
+                Color32::from_rgb(240, 160, 40),
+                "Not signed in to a server: only computers on this network (local network or Tailscale).",
+            );
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.local_ui(ui));
+            self.dialogs(&ctx, &snap);
+            return;
+        }
         let list: Vec<Machine> = match &snap.machines {
             Some(Ok(l)) => l.clone(),
             _ => Vec::new(),
@@ -1278,8 +1413,60 @@ impl Computers {
                 });
             }
             self.grid(ui, &others);
+            ui.add_space(18.0);
+            self.local_ui(ui);
         });
         self.dialogs(&ctx, &snap);
+    }
+
+    /// Computers saved on this device, reached without the server.
+    fn local_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("On this network").strong().size(17.0));
+            if ui.button("＋ Add…").on_hover_text("A computer on the local network or Tailscale").clicked() {
+                self.dialog = Some(Dialog::Login(Box::new(LoginOptions::load_local(None))));
+            }
+        });
+        ui.weak("Saved on this device; reached directly with the computer's own password or SSH key.");
+        ui.add_space(4.0);
+        let list = local_computers();
+        if list.is_empty() {
+            ui.weak("None yet.");
+        }
+        let mut remove = None;
+        for e in &list {
+            egui::Frame::group(ui.style()).corner_radius(8.0).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&e.name).strong());
+                    let where_ = if e.addr.trim().is_empty() { "found by mDNS".to_string() } else { e.addr.clone() };
+                    ui.weak(format!("{} · {}", &e.id[..12.min(e.id.len())], where_));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Remove").clicked() {
+                            remove = Some(e.clone());
+                        }
+                        if ui.small_button("Edit…").clicked() {
+                            self.dialog = Some(Dialog::Login(Box::new(LoginOptions::load_local(Some(e)))));
+                        }
+                        if ui.button("Files").clicked() {
+                            self.spawn_session(&local_target(e), &e.name, true);
+                        }
+                        if ui.button("Connect").clicked() {
+                            self.spawn_session(&local_target(e), &e.name, false);
+                        }
+                    });
+                });
+            });
+        }
+        if let Some(e) = remove {
+            let mut cfg = load_client_config();
+            cfg.hosts.remove(&e.id);
+            let _ = crate::secrets::forget(&e.name);
+            match config::ensure_config_dir().and_then(|_| config::save_toml(config::CLIENT_CONFIG, &cfg)) {
+                Ok(()) => self.notify(format!("Removed {} from this device.", e.name), false),
+                Err(err) => self.notify(format!("Saving: {err:#}"), true),
+            }
+        }
     }
 
     /// Computers that asked to be added, with Approve / Refuse.

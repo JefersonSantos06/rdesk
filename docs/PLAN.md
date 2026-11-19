@@ -117,6 +117,14 @@ Planejado:
 - Configuração por `rdesk host enroll`, `[enroll]` no `host.toml` ou variáveis de ambiente (`RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY`, `RDESK_NAME`); o host cria o próprio ID no primeiro boot.
 - App: *Only share this computer* na tela de login; *Waiting for your approval* e *Add a computer…* (chaves) na aba Computers. CLI: `rdesk machines requests|approve|refuse|keys`.
 
+### Fase 7.5: acesso direto sem servidor (feita, branch `main`)
+- `[direct]` no host: senha/chave próprias abrem o computador só a partir da rede local (privados, link-local, loopback e as redes das interfaces, incluindo o IPv6 global da mesma /64) e do Tailscale; o resto é recusado antes do login, e o relay nunca entra por aí. Ligado por padrão sem cadastro, desligado depois.
+- Computador cadastrado: o admin dele pode ligar; o host avisa no sync, o app mostra *⚠ direct access on* e as sessões vão para o histórico.
+- mDNS opcional (`iroh-mdns-address-lookup`, só IPs): conectar só pelo host ID.
+- App: *Use on this network, without a server* na tela de login; lista *On this network* (nome, host ID, endereço, login) também quando logado. CLI: `ID@endereço`, nome salvo ou host ID sem login.
+- Serviço do Windows: regra do firewall que só aceita conexões da rede local e do Tailscale (o resto, só como resposta).
+- Senha sem tamanho mínimo exigido (decisão).
+
 ### Ordem das próximas fases
 6 → 7 → 8 → 9, porque tudo usa os arquivos que a fase 6 publica e o atualizador do Windows mora no serviço (fase 7). A fase 10 (terminal) depende só da fase 7 e pode vir logo depois dela.
 

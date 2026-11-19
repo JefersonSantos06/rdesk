@@ -32,7 +32,7 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
 
 ## O app (tudo pela interface)
 
-Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login o app não faz nada. A exceção é um computador que só vai **ser acessado**: na mesma tela, *Only share this computer (no sign-in)* pede o e-mail de quem vai ser o dono (ou uma chave de cadastro) e o computador espera a aprovação (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)). Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
+Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login, só o modo **Use on this network, without a server** (veja [Sem servidor](#sem-servidor-rede-local-e-tailscale)). A outra exceção é um computador que só vai **ser acessado**: na mesma tela, *Only share this computer (no sign-in)* pede o e-mail de quem vai ser o dono (ou uma chave de cadastro) e o computador espera a aprovação (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)). Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
 
 **🖥 Computers** — os computadores que você pode acessar, vindos do servidor (como no TeamViewer):
 - *My computers* (os que você cadastrou) e *Shared with me* (os que compartilharam com você ou que estão visíveis para todos).
@@ -159,6 +159,27 @@ idle_timeout_ms = 6000
 congestion = "cubic"     # ou "bbr"
 ```
 
+### Sem servidor (rede local e Tailscale)
+
+Para usar antes de ter a VPS, ou entre computadores da mesma casa: cada computador entra com a **própria senha ou chave SSH** (*This computer → This computer's own password and keys*), e só a partir da **rede local** ou do **Tailscale**.
+
+- No app, na tela de login: **Use on this network, without a server**. A aba Computers mostra *On this network*: **＋ Add…** pede nome, host ID e endereço (IP, nome ou nome do Tailscale; vazio = achar pelo mDNS). Conectado ao servidor, essa lista aparece também, abaixo das outras.
+- Linha de comando, sem login: `rdesk connect <host ID>@192.168.0.20` (ou `@pc.tailnet.ts.net`), ou `rdesk connect <host ID>` com o mDNS ligado no host.
+
+No host (*This computer → Options → Direct access*, ou `[direct]` no `host.toml`):
+
+```toml
+[direct]
+enabled = true                 # padrão: ligado sem servidor, desligado depois de cadastrado
+from = ["lan", "tailscale"]    # de onde aceita
+mdns = false                   # anunciar na rede local (conectar só pelo host ID)
+```
+
+- **lan**: endereços privados, link-local, loopback e qualquer endereço numa rede das interfaces do computador (inclui o IPv6 global da mesma /64, comum no Brasil). **tailscale**: 100.64.0.0/10 e fd7a:115c:a1e0::/48.
+- Qualquer outra origem é recusada **antes** do login, e o relay nunca entra por aqui. Com o serviço do Windows, uma regra do firewall também só deixa chegar conexões da rede local e do Tailscale (as abertas pelo próprio host, como o hole punching, continuam funcionando).
+- Num computador **cadastrado**, ligar o acesso direto abre uma segunda porta além do compartilhamento do servidor: o app de quem vê o computador mostra *⚠ direct access on*, e essas sessões entram no histórico.
+- O mDNS anuncia só os IPs (nunca o relay); quem está na rede vê que há um host rdesk ali.
+
 ### Conectar (Mac/Linux da empresa)
 
 #### Linha de comando
@@ -191,7 +212,7 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 - Senha via **OPAQUE** (`opaque-ke`, Ristretto255 + Argon2id 64 MiB).
 - **Tíquetes**: para conectar a um computador cadastrado, o servidor emite um tíquete assinado (Ed25519) dizendo *usuário U pode controlar a máquina M a partir do endpoint E até T* (no máximo 12 h). O host confere sozinho, com a chave do servidor guardada no cadastro: assinatura, máquina, endpoint do outro lado da conexão, validade e revogações. Tirar o acesso de alguém (descompartilhar, mudar a visibilidade, tirar de um grupo, desativar o usuário) revoga na hora: o host recebe pelo sync e derruba a sessão. Com o servidor fora do ar, tíquetes já emitidos valem até expirar.
 - **Cadastro com prova de posse**: o pedido de cadastro é assinado com a chave do host, então ninguém cadastra o ID de outra máquina como seu.
-- Um computador cadastrado só aceita quem traz tíquete (a senha/chave dele viram cadeado extra opcional). No máximo 4 handshakes simultâneos, backoff exponencial após falhas (por IP; conexões via relay compartilham um contador), nenhum stream extra antes do login.
+- Um computador cadastrado só aceita quem traz tíquete (a senha/chave dele viram cadeado extra opcional), a não ser que o acesso direto esteja ligado nele: aí a senha/chave dele também abrem, só da rede local ou do Tailscale. Sem servidor, conexões de fora da rede local e do Tailscale são recusadas antes do login. No máximo 4 handshakes simultâneos, backoff exponencial após falhas (por IP; conexões via relay compartilham um contador), nenhum stream extra antes do login.
 - Uma sessão por vez: uma nova sessão autenticada derruba a anterior. Ao desconectar, o host solta todas as teclas/botões.
 
 ## Limitações conhecidas

@@ -63,6 +63,7 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         access,
         is_owner: viewer == Some(m.owner_id),
         can_manage,
+        direct: m.direct,
     })
 }
 
@@ -325,7 +326,7 @@ pub async fn agent_sync(
     MachineAuth(m): MachineAuth,
     Json(req): Json<AgentSync>,
 ) -> Result<Json<AgentSyncReply>, Error> {
-    st.db.machine_seen(m.id, &req.addrs, &req.os, req.in_session)?;
+    st.db.machine_seen(m.id, &req.addrs, &req.os, req.in_session, req.direct)?;
     if !req.sessions.is_empty() {
         st.db.record_sessions(m.id, &req.sessions)?;
     }

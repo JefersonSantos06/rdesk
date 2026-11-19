@@ -28,6 +28,7 @@ fn host_cfg(keys: &[&PrivateKey], password: Option<&str>) -> HostAuthConfig {
         host_name: "host".into(),
         ticket: None,
         require_local: false,
+        direct: false,
     }
 }
 
@@ -333,6 +334,32 @@ async fn registered_hosts_need_a_ticket() {
     auth.ticket = Some(ticket_for(&server, PEER, 7, unix_now() - 5));
     let (h, _) = run(&cfg2, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
     assert!(format!("{:#}", h.unwrap_err()).contains("removed"));
+}
+
+/// Direct access (local network, turned on by an administrator): a registered computer's
+/// own key or password are enough there, without a ticket.
+#[tokio::test]
+async fn direct_access_lets_local_logins_in() {
+    let server = iroh::SecretKey::generate();
+    let key = ed25519();
+    let mut cfg = registered(&server, &[&key], Some("pw"), false);
+    cfg.direct = true;
+    let store = ResumeStore::default();
+
+    let mut auth = client(vec![key.clone()], None);
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(matches!(h.unwrap().kind, AuthKind::PublicKey { .. }));
+    c.unwrap();
+
+    let mut auth = client(vec![], Some("pw"));
+    let (h, _) = run(&cfg, &store, [2; 32], [2; 32], HOST_FP, &mut auth).await;
+    assert_eq!(h.unwrap().kind, AuthKind::Password);
+
+    // Off (or from elsewhere): the ticket is required again.
+    cfg.direct = false;
+    let mut auth = client(vec![key.clone()], Some("pw"));
+    let (h, _) = run(&cfg, &store, [3; 32], [3; 32], HOST_FP, &mut auth).await;
+    assert!(h.is_err());
 }
 
 #[tokio::test]

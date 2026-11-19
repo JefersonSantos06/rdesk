@@ -140,6 +140,35 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const FIREWALL_RULE: &str = "rdesk host";
+
+fn netsh(args: &str) -> Result<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("netsh").raw_arg(args).creation_flags(0x0800_0000).output()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        bail!("netsh {args}: {text}");
+    }
+    Ok(text)
+}
+
+/// Let the host be reached on its UDP port, unasked, only from the local network and
+/// Tailscale. Connections it opens itself (hole punching with the relay's help) are
+/// answered by Windows as replies, from any address.
+fn firewall_allow(exe: &Path) -> Result<()> {
+    firewall_remove();
+    netsh(&format!(
+        "advfirewall firewall add rule name=\"{FIREWALL_RULE}\" dir=in action=allow protocol=UDP \
+         program=\"{}\" remoteip=localsubnet,100.64.0.0/10,fd7a:115c:a1e0::/48 profile=any enable=yes",
+        exe.display()
+    ))?;
+    Ok(())
+}
+
+fn firewall_remove() {
+    let _ = netsh(&format!("advfirewall firewall delete rule name=\"{FIREWALL_RULE}\""));
+}
+
 /// Install (or update) and start the service. Run elevated, by the person whose host
 /// settings should move to the service.
 pub fn install() -> Result<String> {
@@ -202,10 +231,15 @@ pub fn install() -> Result<String> {
         command: None,
         actions: Some(vec![restart.clone(), restart.clone(), restart]),
     })?;
+    let firewall = firewall_allow(&exe);
     service.start::<&str>(&[])?;
     wait_for(&service, ServiceState::Running, Duration::from_secs(20))?;
 
     let mut msg = format!("The rdesk service is installed and running ({}).", exe.display());
+    match firewall {
+        Ok(()) => msg.push_str(" Firewall: reachable from the local network and Tailscale."),
+        Err(e) => msg.push_str(&format!(" Firewall rule not created ({e:#}): other computers may not reach it.")),
+    }
     if !moved.is_empty() {
         msg.push_str(&format!(" Moved this computer's {} to {}.", moved.join(", "), machine.display()));
     }
@@ -235,6 +269,7 @@ pub fn uninstall() -> Result<String> {
         Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => {}
         Err(e) => return Err(e.into()),
     }
+    firewall_remove();
     let mut msg = "The rdesk service is removed.".to_string();
     if let Some(machine) = config::service_dir().filter(|d| d.is_dir()) {
         let back = config::config_dir()?;

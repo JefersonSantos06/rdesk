@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use rdesk_common::account::Registration;
 use rdesk_common::auth::{self, AuthKind, FailureLimiter, HostAuthConfig, OpaqueServer, ResumeStore};
-use rdesk_common::config::{self, HostConfig, format_host_id};
+use rdesk_common::config::{self, DirectConfig, HostConfig, format_host_id};
 use rdesk_common::ticket::{TicketPolicy, TicketUser};
 use rdesk_common::transport::{self, Connection, HostIdentity, Incoming, IncomingAddr, Role, close};
 use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, expect_msg, write_msg};
@@ -51,6 +51,10 @@ pub(crate) struct Server {
     /// Registered with a server: tickets are required (and checked against revocations).
     pub(crate) ticket: Option<TicketPolicy>,
     require_local: bool,
+    /// Direct access is on: who may log in with this computer's own password or key alone.
+    direct: Option<DirectConfig>,
+    /// The networks this computer is on ("local network" includes them).
+    local_nets: crate::localnet::LocalNets,
     /// Ask the sync loop to report now (a session started or ended).
     pub(crate) sync_now: tokio::sync::Notify,
     /// Sessions that started or ended, for the server's history (sent by the sync).
@@ -62,6 +66,11 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    /// Direct access is on (the sync tells the server, so the owner sees it).
+    pub(crate) fn direct_on(&self) -> bool {
+        self.direct.is_some()
+    }
+
     pub(crate) async fn in_session(&self) -> bool {
         self.current.lock().await.as_ref().is_some_and(|c| c.conn.close_reason().is_none())
     }
@@ -122,6 +131,7 @@ pub fn load_auth_config(
         host_name: rdesk_common::local_hostname(),
         ticket,
         require_local,
+        direct: false,
     })
 }
 
@@ -252,6 +262,19 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
 
     let auth_cfg = load_auth_config(host_fp, ticket.clone(), cfg.require_local)?;
     let local = !auth_cfg.authorized_keys.is_empty() || auth_cfg.opaque.is_some();
+    let direct = cfg.direct.is_on(ticket.is_some());
+    if ticket.is_none() && !direct {
+        bail!("direct access is off and this computer is not registered with a server: nobody could reach it");
+    }
+    if direct && ticket.is_some() {
+        reporter.event(
+            format!(
+                "Direct access is on: this computer's own password or key also open it from {}",
+                cfg.direct.from.join(" and ")
+            ),
+            false,
+        );
+    }
     if ticket.is_none() && !local {
         bail!(
             "no way to log in yet: add this computer to your rdesk server (`rdesk host enroll`, or register it              in the app), or set a password"
@@ -291,6 +314,8 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         host_fp,
         ticket,
         require_local: cfg.require_local,
+        direct: direct.then(|| cfg.direct.clone()),
+        local_nets: if direct { crate::localnet::LocalNets::watch() } else { Default::default() },
         sync_now: tokio::sync::Notify::new(),
         records: std::sync::Mutex::new(Vec::new()),
         limiter: FailureLimiter::default(),
@@ -301,6 +326,13 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
     });
 
     let ep = transport::bind(Some(identity.secret_key()), &net, &cfg.transport, Role::Host { port: cfg.port }).await?;
+    // Announced on the local network (opt-in): others connect with the host ID alone.
+    if server.direct.as_ref().is_some_and(|d| d.mdns) {
+        match transport::local_discovery(&ep, true) {
+            Ok(_) => reporter.event("Announced on the local network (mDNS)", false),
+            Err(e) => reporter.event(format!("Could not announce on the local network: {e:#}"), true),
+        }
+    }
     let bound = ep.bound_sockets();
     tracing::info!("host {} listening on {:?}", format_host_id(&host_fp), bound);
     reporter.state(HostState::Listening(bound.clone()));
@@ -362,11 +394,21 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
 
 impl Server {
     async fn handle(self: Arc<Self>, incoming: Incoming) -> Result<()> {
-        let (ip, peer) = match incoming.remote_addr() {
-            IncomingAddr::Ip(sa) => (sa.ip().to_canonical(), sa.ip().to_canonical().to_string()),
-            IncomingAddr::Relay { endpoint_id, .. } => (RELAYED, format!("relay ({})", endpoint_id.fmt_short())),
-            other => (RELAYED, format!("{other:?}")),
+        let (ip, peer, straight) = match incoming.remote_addr() {
+            IncomingAddr::Ip(sa) => (sa.ip().to_canonical(), sa.ip().to_canonical().to_string(), true),
+            IncomingAddr::Relay { endpoint_id, .. } => (RELAYED, format!("relay ({})", endpoint_id.fmt_short()), false),
+            other => (RELAYED, format!("{other:?}"), false),
         };
+        // Its own password or key alone: only straight from the local network or Tailscale.
+        let direct = straight
+            && self
+                .direct
+                .as_ref()
+                .is_some_and(|d| d.allows(ip) || (d.from.iter().any(|c| c == "lan") && self.local_nets.contains(ip)));
+        if self.ticket.is_none() && !direct {
+            incoming.refuse();
+            bail!("refused {peer}: without a server, only the local network or Tailscale may connect");
+        }
         if let Err(wait) = self.limiter.check(ip) {
             incoming.refuse();
             bail!("refused {peer}: too many failed logins, retry in {}s", wait.as_secs() + 1);
@@ -396,7 +438,8 @@ impl Server {
         // Not a probe: hand the message back to the handshake as if it had not been read.
         let replay = rdesk_proto::encode(&first)?;
 
-        let auth_cfg = load_auth_config(self.host_fp, self.ticket.clone(), self.require_local)?;
+        let mut auth_cfg = load_auth_config(self.host_fp, self.ticket.clone(), self.require_local)?;
+        auth_cfg.direct = direct;
         let peer_id = *conn.remote_id().as_bytes();
         let monitors = self.shared.capturer.monitors().await.unwrap_or_default();
         let initial = session::pick_initial(&monitors).map(|m| m.info.id).unwrap_or(0);

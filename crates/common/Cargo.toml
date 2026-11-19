@@ -17,6 +17,8 @@ tracing.workspace = true
 # QUIC with hole punching and relays; `noq-proto` (iroh's QUIC) for the congestion controllers.
 iroh = { version = "1.5", default-features = false, features = ["tls-ring", "portmapper", "fast-apple-datapath"] }
 noq-proto = { version = "1.5", default-features = false }
+# Optional: find hosts on the local network by mDNS (direct access without a server).
+iroh-mdns-address-lookup = "0.6"
 ring = "0.17"
 sha2 = "0.10"
 hmac = "0.12"
