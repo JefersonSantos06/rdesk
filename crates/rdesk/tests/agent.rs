@@ -13,6 +13,11 @@ use ssh_key::{Algorithm, PrivateKey};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_pipe_and_stop() {
+    // The pipe has one name per computer: with the real service installed, it is taken.
+    if request(&Request::Status).await.is_ok() {
+        eprintln!("skipped: the rdesk service's host already owns the control pipe on this computer");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     // Some login method, or the host refuses to start.
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
@@ -82,4 +87,28 @@ fn file_helper_lists_a_folder() {
     let mut names: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.is_dir)).collect();
     names.sort();
     assert_eq!(names, [("hello.txt", false), ("sub", true)]);
+}
+
+/// The helper answers each step at once (a reply stuck in a buffer hangs the transfer).
+#[tokio::test]
+async fn file_helper_answers_a_push_at_once() {
+    use rdesk_proto::{FileReq, FileResp, MAX_CONTROL_MSG, expect_msg, write_msg};
+    let inbox = tempfile::tempdir().unwrap();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rdesk"))
+        .args(["host", "file-helper", "serve", "--inbox"])
+        .arg(inbox.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (mut w, mut r) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    write_msg(&mut w, &FileReq::Push { name: "a.txt".into(), size: 3 }).await.unwrap();
+    // The request side stays open, as a client's stream does while it waits.
+    let answer = tokio::time::timeout(Duration::from_secs(10), expect_msg::<_, FileResp>(&mut r, MAX_CONTROL_MSG))
+        .await
+        .expect("the helper did not answer")
+        .unwrap();
+    assert!(matches!(answer, FileResp::Accept { offset: 0 }), "{answer:?}");
 }

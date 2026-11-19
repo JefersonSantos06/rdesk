@@ -470,8 +470,26 @@ fn file_helper(cmd: FileHelperCmd) -> Result<()> {
     match cmd {
         FileHelperCmd::Serve { inbox } => {
             let inbox = inbox.unwrap_or_else(|| rdesk_common::config::HostConfig::default().inbox_dir());
+            // The raw pipe handles: std's stdout is line-buffered, so binary replies (with no
+            // newline) would sit in its buffer while the other side waits for them.
+            #[cfg(windows)]
+            let (stdin, stdout) = {
+                use std::os::windows::io::AsHandle;
+                (
+                    std::fs::File::from(std::io::stdin().as_handle().try_clone_to_owned()?),
+                    std::fs::File::from(std::io::stdout().as_handle().try_clone_to_owned()?),
+                )
+            };
+            #[cfg(unix)]
+            let (stdin, stdout) = {
+                use std::os::fd::AsFd;
+                (
+                    std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?),
+                    std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?),
+                )
+            };
             rt.block_on(async {
-                let (mut r, mut w) = (tokio::io::stdin(), tokio::io::stdout());
+                let (mut r, mut w) = (tokio::fs::File::from_std(stdin), tokio::fs::File::from_std(stdout));
                 rdesk_common::files::serve(&mut r, &mut w, &inbox).await?;
                 tokio::io::AsyncWriteExt::flush(&mut w).await?;
                 Ok(())
@@ -516,6 +534,31 @@ fn service_cmd(cmd: ServiceCmd) -> Result<()> {
             println!("rdesk service: {text}");
             if let Some(dir) = config::service_dir().filter(|d| d.is_dir()) {
                 println!("Host files: {}", dir.display());
+            }
+            if service::state()? == State::Running {
+                use rdesk_host::ipc::{Request, Response, request};
+                match runtime()?.block_on(request(&Request::Status)) {
+                    Ok(Response::Status(s)) => {
+                        println!("Host: {:?}", s.state);
+                        if let Some(fp) = s.fingerprint {
+                            println!("Host ID: {}", format_host_id(&fp));
+                        }
+                        if let Some(r) = &s.registration {
+                            println!("Server: {}", r.as_ref().unwrap_or_else(|e| e));
+                        }
+                        if let Some(r) = &s.relay {
+                            println!("Relay: {}", r.as_ref().unwrap_or_else(|e| e));
+                        }
+                        if let Some(sess) = &s.session {
+                            println!("In use by {} from {}", sess.client, sess.peer);
+                        }
+                        for e in s.events.iter().rev().take(5).rev() {
+                            println!("  {}{}", if e.warning { "! " } else { "" }, e.text);
+                        }
+                    }
+                    Ok(other) => println!("Host: unexpected answer {other:?}"),
+                    Err(e) => println!("Host: not answering on its control pipe ({e:#})"),
+                }
             }
             Ok(())
         }
