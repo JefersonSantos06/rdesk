@@ -1,8 +1,18 @@
 name: CI
 
+# Branches only: a tag runs the Release workflow, which already tests what it builds.
+# Changes to documentation alone run nothing.
 on:
   push:
+    branches: ["**"]
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+
+# A newer push to the same branch (or PR) cancels the run still going for the older one.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
