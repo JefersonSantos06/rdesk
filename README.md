@@ -26,7 +26,35 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
 
 > **Antivírus (Kaspersky etc.)**: o build executa pequenos programas (build scripts) recém-compilados e sem assinatura, e o próprio `rdesk` captura tela/injeta input/escuta na rede — o mesmo comportamento de um trojan de acesso remoto. Heurísticas podem bloquear. Adicione exclusões para a pasta `target/` do projeto e para o `rdesk.exe` instalado.
 
-## Configurar o host (PC de casa)
+## O app (tudo pela interface)
+
+Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Abre uma janela com três abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
+
+**🖥 Computers** — suas máquinas:
+- *My computers* (salvas) e *Tailnet* (os outros dispositivos da sua conta Tailscale, aparecem sozinhos; **Save** cadastra).
+- Status ao vivo: *Ready*, *In use*, *Online · rdesk not running*, *Offline · seen 3 h ago*, *Identity changed!*, com latência e link direto/relay.
+- **Connect** (ou duplo clique) abre a sessão numa janela própria; **Files** abre já no painel de transferência de arquivos (enviar, navegar nas pastas, baixar).
+- **＋ Add computer / Edit**: endereço (ou escolha da tailnet), chave SSH (*From 1Password…*), e a senha de três jeitos, nesta ordem: referência `op://` do 1Password → senha salva no cofre do sistema (Gerenciador de Credenciais / Keychain) → um diálogo ao conectar, com a opção **Remember**.
+- Na primeira conexão um diálogo mostra o fingerprint para conferir. Clique direito: copiar endereço/fingerprint, *Forget trusted fingerprint*, editar, remover.
+
+**🏠 This computer** — o host embutido (deixa este computador ser acessado):
+- **Turn on / Turn off** (lembra a escolha), endereços, fingerprint com **Copy**.
+- *Not running as administrator* → **Restart as administrator** (Windows), para controlar o Gerenciador de Tarefas e outras janelas de admin.
+- Sessão atual (quem, de onde, como) com **Disconnect** — o outro lado não tenta reconectar.
+- *Who can log in*: **Set password…** (com *Generate a strong one* e *Read from 1Password*), chaves SSH (**Add SSH key…** do agente do 1Password ou colando a chave pública), remover.
+- *Options*: endereços de escuta, porta, aceitar fora da tailnet, pasta dos arquivos recebidos, fps, qualidade, clipboard. *Activity*: conexões e **logins que falharam**. *Diagnostics*: o mesmo que `rdesk host check`.
+
+**⚙ Settings**: iniciar com o sistema (*off / ao fazer login / ao fazer login como administrador* — este último cria uma tarefa agendada sem o limite de 3 dias, pedindo permissão uma vez), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+
+Tray: *Open rdesk*, estado do host, *Turn host on/off*, *Copy host fingerprint*, *Quit rdesk*.
+
+Logs do app: `<pasta de config>/logs/app.log`; de cada sessão: `logs/session-<nome>.log`.
+
+## Configurar pela linha de comando (opcional)
+
+Tudo o que o app faz também existe como comando; use o que preferir.
+
+### Host (PC de casa)
 
 1. Instale o [Tailscale](https://tailscale.com/download) e faça login.
 2. Inicialize:
@@ -53,7 +81,7 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
    rdesk host check
    rdesk host run
    ```
-6. Iniciar com o Windows (sessão do usuário, com privilégios elevados para controlar janelas de administrador):
+6. Iniciar com o Windows: pelo app (Settings → *Start when I log in, as administrator*) ou com `rdesk autostart login-admin` num terminal de administrador. Manualmente:
    ```powershell
    schtasks /Create /TN rdesk-host /SC ONLOGON /RL HIGHEST /TR "\"C:\caminho\rdesk.exe\" host run"
    ```
@@ -74,21 +102,9 @@ idle_timeout_ms = 6000
 congestion = "cubic"     # ou "bbr"
 ```
 
-## Conectar (Mac/Linux da empresa)
+### Conectar (Mac/Linux da empresa)
 
-### Launcher (janela com as máquinas)
-
-Rodar `rdesk` sem argumentos (ou dar duplo clique no executável) abre a lista de máquinas, no estilo AnyDesk/TeamViewer:
-
-- **Meus computadores**: os hosts salvos, cada um com status: *Ready* (rdesk rodando), *In use* (outra sessão aberta), *Online · rdesk not running*, *Offline · seen 3 h ago*, *Identity changed!*. A latência e o tipo de link (direto ou relay DERP) também aparecem.
-- **Tailnet**: os outros dispositivos da sua conta Tailscale. **Save** cadastra um deles com um clique.
-- **＋ Add computer** / **Edit**: nome, endereço (ou escolha da tailnet), login por chave do 1Password (botão *From 1Password…* lista as chaves do agente) e/ou senha `op://…`.
-- **Duplo clique** (ou **Connect**) abre a sessão numa janela própria. Na primeira vez, um diálogo mostra o fingerprint para conferir com `rdesk host fingerprint`.
-- O campo no topo conecta direto a um nome ou endereço qualquer.
-
-O status vem do `tailscale status` mais uma consulta rápida ao host a cada 5 s, que não faz login e não conta como tentativa falha. Os logs de cada sessão ficam em `<pasta de config>/logs/`.
-
-### Linha de comando
+#### Linha de comando
 
 ```sh
 rdesk hosts add casa casa-pc.seu-tailnet.ts.net --password-ref "op://Private/rdesk/password"
@@ -123,6 +139,7 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 
 ## Limitações conhecidas
 
+- Com o app rodando como administrador no Windows, as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Send files…* no menu da sessão.
 - Tela de bloqueio/UAC do Windows não aparece (é o "secure desktop"); exige um serviço SYSTEM (futuro).
 - Wayland: captura/input dependem de portais — use X11 no host Linux por enquanto.
 - O cursor remoto não é desenhado na imagem; use o cursor local (posição é absoluta e sincronizada).

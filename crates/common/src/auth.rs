@@ -456,13 +456,27 @@ impl KeySource {
     }
 }
 
+/// Produces the password when (and only when) the handshake needs it. Gets the host name.
+pub type AskPassword = std::sync::Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Zeroizing<String>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub enum PasswordSource {
     Fixed(Zeroizing<String>),
     /// 1Password secret reference, read with `op read`.
     OnePassword(String),
     /// Ask on the terminal.
     Prompt,
+    /// Anything else: a dialog, the system keychain…
+    Ask(AskPassword),
 }
+
+/// The user closed the password dialog.
+#[derive(Debug, thiserror::Error)]
+#[error("login cancelled")]
+pub struct PasswordCancelled;
 
 impl PasswordSource {
     async fn get(&self, host: &str) -> Result<Zeroizing<String>> {
@@ -474,6 +488,7 @@ impl PasswordSource {
                 let p = tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt)).await??;
                 Ok(Zeroizing::new(p))
             }
+            PasswordSource::Ask(f) => f(host.to_string()).await,
         }
     }
 }

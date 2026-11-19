@@ -18,11 +18,15 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::conn::{self, Cmd, ConnectOpts, Handle, UiEvent, Update};
+use crate::conn::{self, Cmd, ConnectOpts, Handle, PasswordAnswer, PasswordReply, UiEvent, Update};
 use crate::keys;
+
+const NOTICE_FOR: Duration = Duration::from_secs(12);
 
 pub struct ViewerOpts {
     pub connect: ConnectOpts,
+    /// Start with the menu open on the file-transfer panel.
+    pub open_files: bool,
     pub swap_cmd_ctrl: bool,
     pub download_dir: PathBuf,
 }
@@ -35,6 +39,10 @@ pub fn run(opts: ViewerOpts) -> Result<()> {
         let _ = proxy.send_event(ev);
     });
     let mut app = App::new(handle, name, opts.swap_cmd_ctrl, opts.download_dir);
+    if opts.open_files {
+        app.menu_open = true;
+        app.send(Cmd::ListDir(app.remote_path.clone()));
+    }
     event_loop.run_app(&mut app)?;
     let _ = app.handle.cmd.send(Cmd::Quit);
     Ok(())
@@ -44,6 +52,16 @@ struct Gfx {
     window: Arc<Window>,
     state: egui_winit::State,
     painter: Painter,
+}
+
+struct PasswordPrompt {
+    host: String,
+    error: Option<String>,
+    can_remember: bool,
+    reply: PasswordReply,
+    text: zeroize::Zeroizing<String>,
+    remember: bool,
+    focused: bool,
 }
 
 struct Transfer {
@@ -60,6 +78,9 @@ struct App {
     gfx: Option<Gfx>,
     tex: Option<TextureHandle>,
     status: String,
+    /// Latest host notice and when it arrived (shown for [`NOTICE_FOR`]).
+    notice: Option<(String, Instant)>,
+    password: Option<PasswordPrompt>,
     fatal: Option<String>,
     host: Option<HostInfo>,
     monitors: Vec<MonitorInfo>,
@@ -89,6 +110,8 @@ impl App {
             gfx: None,
             tex: None,
             status: "Connecting…".into(),
+            notice: None,
+            password: None,
             fatal: None,
             host: None,
             monitors: Vec::new(),
@@ -234,6 +257,23 @@ impl App {
                 });
         }
 
+        self.password_dialog(&ctx);
+
+        // Host notice, e.g. "Windows is blocking remote clicks…".
+        if let Some((text, at)) = &self.notice {
+            if at.elapsed() < NOTICE_FOR {
+                egui::Area::new(egui::Id::unique("notice")).anchor(Align2::CENTER_TOP, [0.0, 34.0]).show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).fill(Color32::from_rgb(120, 70, 10)).show(ui, |ui| {
+                        ui.set_max_width(560.0);
+                        ui.label(egui::RichText::new(format!("⚠ {text}")).color(Color32::WHITE));
+                    });
+                });
+                ctx.request_repaint_after(NOTICE_FOR.saturating_sub(at.elapsed()));
+            } else {
+                self.notice = None;
+            }
+        }
+
         // Menu button.
         egui::Area::new(egui::Id::unique("menu_button")).anchor(Align2::CENTER_TOP, [0.0, 2.0]).show(&ctx, |ui| {
             let label = if self.menu_open { "▲ rdesk" } else { "▼ rdesk" };
@@ -248,6 +288,42 @@ impl App {
                 self.menu(ui);
             });
             self.menu_open = open;
+        }
+    }
+
+    fn password_dialog(&mut self, ctx: &egui::Context) {
+        let Some(p) = &mut self.password else { return };
+        let mut answer: Option<Option<PasswordAnswer>> = None;
+        egui::Modal::new(egui::Id::unique("password")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading(format!("Password for {}", p.host));
+            if let Some(e) = &p.error {
+                ui.colored_label(Color32::LIGHT_RED, e);
+            }
+            let resp = ui.add(egui::TextEdit::singleline(&mut *p.text).password(true).desired_width(f32::INFINITY));
+            if !p.focused {
+                resp.request_focus();
+                p.focused = true;
+            }
+            if p.can_remember {
+                ui.checkbox(&mut p.remember, format!("Remember in {}", crate::secrets::store_name()));
+            }
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                if (ui.button("Log in").clicked() || enter) && !p.text.is_empty() {
+                    answer = Some(Some(PasswordAnswer {
+                        password: zeroize::Zeroizing::new(std::mem::take(&mut *p.text)),
+                        remember: p.remember,
+                    }));
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(None);
+                }
+            });
+        });
+        if let Some(a) = answer {
+            p.reply.send(a);
+            self.password = None;
         }
     }
 
@@ -452,7 +528,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             WindowEvent::KeyboardInput { event: kev, is_synthetic, .. } => {
                 // Synthetic events are winit replaying held keys on focus changes.
-                if !wants_kb && !is_synthetic && self.handle_key(kev) {
+                if !wants_kb && self.password.is_none() && !is_synthetic && self.handle_key(kev) {
                     return;
                 }
             }
@@ -504,6 +580,28 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Status(s) => {
                 self.status = s;
                 self.update_title();
+            }
+            UiEvent::PasswordNeeded { host, error, can_remember, reply } => {
+                // A newer request replaces an unanswered one (that login attempt is gone).
+                if let Some(old) = self.password.take() {
+                    old.reply.send(None);
+                }
+                self.password = Some(PasswordPrompt {
+                    host,
+                    error,
+                    can_remember,
+                    reply,
+                    text: zeroize::Zeroizing::new(String::new()),
+                    remember: false,
+                    focused: false,
+                });
+                if let Some(g) = &self.gfx {
+                    g.window.focus_window();
+                }
+            }
+            UiEvent::Notice(text) => {
+                tracing::warn!("host: {text}");
+                self.notice = Some((text, Instant::now()));
             }
             UiEvent::Connected(h) => {
                 self.fatal = None;

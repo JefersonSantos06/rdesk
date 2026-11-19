@@ -10,11 +10,17 @@
 
 use std::collections::BTreeSet;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rdesk_proto::{InputEvent, Key, MouseButton};
+use tokio::sync::broadcast;
 
 use crate::capture::InputRect;
+use crate::elevation;
+
+/// At most one "your input is being blocked" notice per this interval.
+const NOTICE_EVERY: Duration = Duration::from_secs(10);
 
 pub enum InputCmd {
     /// Map normalized coordinates onto this rectangle from now on.
@@ -25,25 +31,49 @@ pub enum InputCmd {
 #[derive(Clone)]
 pub struct Injector {
     tx: mpsc::Sender<InputCmd>,
+    problems: broadcast::Sender<String>,
 }
 
 impl Injector {
     pub fn spawn(fake: bool) -> Self {
+        // Only a non-elevated Windows host can be locked out by an elevated window (UIPI).
+        let watch_uipi = cfg!(windows) && !fake && !elevation::is_elevated();
+        Self::spawn_with(move || make_backend(fake), watch_uipi)
+    }
+
+    fn spawn_with(make: impl FnOnce() -> Box<dyn Backend> + Send + 'static, watch_uipi: bool) -> Self {
         let (tx, rx) = mpsc::channel::<InputCmd>();
+        let (problems, _) = broadcast::channel(8);
+        let mut reporter = Reporter { tx: problems.clone(), last: None };
         std::thread::Builder::new()
             .name("rdesk-input".into())
             .spawn(move || {
-                let mut backend = make_backend(fake);
+                let mut backend = make();
                 let mut state = State::default();
                 while let Ok(cmd) = rx.recv() {
-                    if let Err(e) = state.handle(backend.as_mut(), cmd) {
-                        tracing::warn!("input injection failed: {e:#}");
+                    let blocked_by =
+                        if watch_uipi && is_press(&cmd) { elevation::foreground_blocks_input() } else { None };
+                    match state.handle(backend.as_mut(), cmd) {
+                        // SendInput may "succeed" while UIPI silently drops the event.
+                        Ok(()) => {
+                            if let Some(app) = blocked_by {
+                                reporter.report(elevation::blocked_message(Some(&app)), None);
+                            }
+                        }
+                        Err(e) => {
+                            let msg = match (&blocked_by, watch_uipi) {
+                                (Some(app), _) => elevation::blocked_message(Some(app)),
+                                (None, true) => elevation::blocked_message(None),
+                                (None, false) => format!("Remote input failed on the host: {e:#}"),
+                            };
+                            reporter.report(msg, Some(&e));
+                        }
                     }
                 }
                 state.release_all(backend.as_mut());
             })
             .expect("spawn input thread");
-        Self { tx }
+        Self { tx, problems }
     }
 
     pub fn send(&self, cmd: InputCmd) {
@@ -52,6 +82,44 @@ impl Injector {
 
     pub fn event(&self, ev: InputEvent) {
         self.send(InputCmd::Event(ev));
+    }
+
+    /// Human-readable problems worth telling the remote user (rate-limited).
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.problems.subscribe()
+    }
+}
+
+/// A click, key press or typed text: the moments the user expects something to happen.
+fn is_press(cmd: &InputCmd) -> bool {
+    matches!(
+        cmd,
+        InputCmd::Event(
+            InputEvent::MouseButton { down: true, .. } | InputEvent::Key { down: true, .. } | InputEvent::Text { .. }
+        )
+    )
+}
+
+struct Reporter {
+    tx: broadcast::Sender<String>,
+    last: Option<Instant>,
+}
+
+impl Reporter {
+    fn report(&mut self, msg: String, err: Option<&anyhow::Error>) {
+        if self.last.is_some_and(|t| t.elapsed() < NOTICE_EVERY) {
+            if let Some(e) = err {
+                tracing::debug!("input injection failed: {e:#}");
+            }
+            return;
+        }
+        self.last = Some(Instant::now());
+        match err {
+            Some(e) => tracing::warn!("input injection failed: {e:#}"),
+            None => tracing::warn!("{msg}"),
+        }
+        // Nobody listening (no session) is fine.
+        let _ = self.tx.send(msg);
     }
 }
 
@@ -385,6 +453,59 @@ mod tests {
             self.0.lock().unwrap().push(format!("text {s}"));
             Ok(())
         }
+    }
+
+    struct Failing(Arc<Mutex<u32>>);
+
+    impl Backend for Failing {
+        fn key(&mut self, _: Key, _: bool) -> Result<()> {
+            *self.0.lock().unwrap() += 1;
+            anyhow::bail!("SendInput injected 0/1 events")
+        }
+        fn mouse_abs(&mut self, _: i32, _: i32) -> Result<()> {
+            Ok(())
+        }
+        fn button(&mut self, _: MouseButton, _: bool) -> Result<()> {
+            *self.0.lock().unwrap() += 1;
+            anyhow::bail!("SendInput injected 0/1 events")
+        }
+        fn scroll(&mut self, _: i32, _: i32) -> Result<()> {
+            Ok(())
+        }
+        fn text(&mut self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failures_are_reported_once_per_interval_and_input_keeps_flowing() {
+        let calls = Arc::new(Mutex::new(0));
+        let c2 = calls.clone();
+        let inj = Injector::spawn_with(move || Box::new(Failing(c2)), false);
+        let mut rx = inj.subscribe();
+        for _ in 0..3 {
+            inj.event(InputEvent::MouseButton { button: MouseButton::Left, down: true });
+            inj.event(InputEvent::MouseButton { button: MouseButton::Left, down: false });
+        }
+        inj.event(InputEvent::Key { key: Key::KeyA, down: true });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while *calls.lock().unwrap() < 7 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The thread survived every failure and handled all seven events…
+        assert_eq!(*calls.lock().unwrap(), 7);
+        // …but told the user only once.
+        let first = rx.try_recv().unwrap();
+        assert!(first.contains("Remote input failed on the host"), "{first}");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn presses_are_what_we_check() {
+        assert!(is_press(&InputCmd::Event(InputEvent::MouseButton { button: MouseButton::Left, down: true })));
+        assert!(!is_press(&InputCmd::Event(InputEvent::MouseButton { button: MouseButton::Left, down: false })));
+        assert!(is_press(&InputCmd::Event(InputEvent::Key { key: Key::KeyA, down: true })));
+        assert!(!is_press(&InputCmd::Event(InputEvent::MouseMove { x: 1, y: 1 })));
     }
 
     #[test]

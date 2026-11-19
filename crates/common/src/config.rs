@@ -169,6 +169,25 @@ pub struct ClientConfig {
     pub transport: TransportTuning,
     /// Swap Cmd and Ctrl when the client is a Mac (so Cmd+C sends Ctrl+C).
     pub swap_cmd_ctrl: bool,
+    /// Desktop app behaviour.
+    pub app: AppSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    /// Let others connect to this computer while the app runs (the built-in host).
+    pub host_enabled: bool,
+    /// The window's close button hides it to the tray instead of quitting.
+    pub close_to_tray: bool,
+    /// Start hidden in the tray.
+    pub start_minimized: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { host_enabled: false, close_to_tray: true, start_minimized: false }
+    }
 }
 
 pub fn load_toml<T: for<'de> Deserialize<'de> + Default>(name: &str) -> Result<T> {

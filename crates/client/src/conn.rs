@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use rdesk_common::agent::Agent;
-use rdesk_common::auth::{self, AuthFailed, ClientAuth, KeySource, PasswordSource};
+use rdesk_common::auth::{self, AskPassword, AuthFailed, ClientAuth, KeySource, PasswordCancelled, PasswordSource};
 use rdesk_common::clipboard::ClipboardSync;
 use rdesk_common::config::{AuthPref, HostEntry, TransportTuning};
 use rdesk_common::files;
@@ -20,10 +20,45 @@ use rdesk_proto::{
     MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg, write_msg,
 };
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
+
+/// What the user typed in the password dialog.
+pub struct PasswordAnswer {
+    pub password: Zeroizing<String>,
+    /// Save it in the system credential store if the login succeeds.
+    pub remember: bool,
+}
+
+impl std::fmt::Debug for PasswordAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordAnswer").field("remember", &self.remember).finish_non_exhaustive()
+    }
+}
+
+/// Where the dialog's answer goes (answer once; `None` = cancelled).
+#[derive(Clone, Debug)]
+pub struct PasswordReply(Arc<Mutex<Option<tokio::sync::oneshot::Sender<Option<PasswordAnswer>>>>>);
+
+impl PasswordReply {
+    pub fn send(&self, answer: Option<PasswordAnswer>) {
+        if let Some(tx) = self.0.lock().unwrap().take() {
+            let _ = tx.send(answer);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Status(String),
+    /// Show a password dialog for `host`; `error` explains a previous failed attempt.
+    PasswordNeeded {
+        host: String,
+        error: Option<String>,
+        can_remember: bool,
+        reply: PasswordReply,
+    },
+    /// Something the host wants the user to know (shown briefly, e.g. input is blocked).
+    Notice(String),
     Connected(HostInfo),
     Monitors {
         monitors: Vec<MonitorInfo>,
@@ -93,8 +128,10 @@ impl View {
 pub type SharedView = Arc<Mutex<View>>;
 
 pub struct ConnectOpts {
-    /// Display name (alias or address) used in prompts.
+    /// Display name (alias or address) used in prompts; also the key for a remembered password.
     pub name: String,
+    /// Ask for passwords with [`UiEvent::PasswordNeeded`] (the viewer) instead of the terminal.
+    pub ask_password_in_ui: bool,
     pub entry: HostEntry,
     pub pin: [u8; 32],
     pub monitor: Option<u32>,
@@ -131,7 +168,7 @@ enum End {
     Retry(String),
 }
 
-type Notify = Arc<dyn Fn(UiEvent) + Send + Sync>;
+pub type Notify = Arc<dyn Fn(UiEvent) + Send + Sync>;
 
 type ClientEndpoint = Option<(std::net::SocketAddr, quinn::Endpoint)>;
 
@@ -155,10 +192,12 @@ async fn reconnect_loop(
     let mut resume: Option<(SessionId, [u8; 32])> = None;
     let mut monitor = opts.monitor;
     let mut failures = 0u32;
+    let mut password_hint: Option<String> = None;
     loop {
         notify(UiEvent::Status(if failures == 0 { "Connecting…".into() } else { "Reconnecting…".into() }));
         let started = Instant::now();
-        let end = once(&opts, endpoint, &mut resume, &mut monitor, &mut cmd_rx, &view, &notify).await;
+        let end =
+            once(&opts, endpoint, &mut resume, &mut monitor, &mut password_hint, &mut cmd_rx, &view, &notify).await;
         match end {
             End::Quit => return,
             End::Fatal(msg) => {
@@ -197,8 +236,75 @@ async fn reconnect_loop(
     }
 }
 
-/// Build the credential set for a host entry: SSH agent and/or password source.
-pub async fn credentials(e: &HostEntry, resume: Option<(SessionId, [u8; 32])>) -> ClientAuth {
+/// Which password ended up being used, so the outcome can be acted on (remember it,
+/// or forget a stored one that no longer works).
+pub enum PasswordUse {
+    OnePassword,
+    Keychain,
+    Typed { password: Zeroizing<String>, remember: bool },
+}
+
+pub type PasswordUsed = Arc<Mutex<Option<PasswordUse>>>;
+
+/// 1Password could not provide the password (not signed in, wrong reference...).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct PasswordUnavailable(String);
+
+/// Find the password lazily, only if key login did not work:
+/// the entry's 1Password reference, then the system credential store, then ask the user
+/// (dialog when `ui` is given, terminal otherwise).
+pub fn password_asker(
+    target: &str,
+    entry: &HostEntry,
+    used: PasswordUsed,
+    ui: Option<(Notify, Option<String>)>,
+) -> AskPassword {
+    let reference = entry.password_ref.clone().filter(|r| !r.trim().is_empty());
+    let target = target.to_string();
+    Arc::new(move |host: String| {
+        let (reference, target, used, ui) = (reference.clone(), target.clone(), used.clone(), ui.clone());
+        Box::pin(async move {
+            if let Some(r) = reference {
+                let p = rdesk_common::agent::op_read(&r)
+                    .await
+                    .map_err(|e| PasswordUnavailable(format!("1Password: {e:#}")))?;
+                *used.lock().unwrap() = Some(PasswordUse::OnePassword);
+                return Ok(p);
+            }
+            let t = target.clone();
+            if let Ok(Some(p)) = tokio::task::spawn_blocking(move || crate::secrets::get(&t)).await {
+                *used.lock().unwrap() = Some(PasswordUse::Keychain);
+                return Ok(p);
+            }
+            let (password, remember) = match ui {
+                Some((notify, error)) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    notify(UiEvent::PasswordNeeded {
+                        host: if host.is_empty() { target.clone() } else { host },
+                        error,
+                        can_remember: crate::secrets::available(),
+                        reply: PasswordReply(Arc::new(Mutex::new(Some(tx)))),
+                    });
+                    match rx.await {
+                        Ok(Some(a)) => (a.password, a.remember),
+                        _ => return Err(PasswordCancelled.into()),
+                    }
+                }
+                None => {
+                    let prompt = format!("rdesk password for {target}: ");
+                    let p = tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt)).await??;
+                    (Zeroizing::new(p), false)
+                }
+            };
+            *used.lock().unwrap() = Some(PasswordUse::Typed { password: password.clone(), remember });
+            Ok(password)
+        })
+    })
+}
+
+/// Build the credential set for a host entry: SSH key (file or agent) and/or a password.
+pub async fn credentials(e: &HostEntry, resume: Option<(SessionId, [u8; 32])>, password: AskPassword) -> ClientAuth {
     let keys = if let Some(path) = &e.identity {
         match std::fs::read_to_string(path)
             .map_err(anyhow::Error::from)
@@ -225,15 +331,29 @@ pub async fn credentials(e: &HostEntry, resume: Option<(SessionId, [u8; 32])>) -
     } else {
         None
     };
-    let password = if matches!(e.auth, AuthPref::Auto | AuthPref::Password) {
-        Some(match &e.password_ref {
-            Some(r) if !r.is_empty() => PasswordSource::OnePassword(r.clone()),
-            _ => PasswordSource::Prompt,
-        })
-    } else {
-        None
-    };
+    let password = matches!(e.auth, AuthPref::Auto | AuthPref::Password).then_some(PasswordSource::Ask(password));
     ClientAuth { client_name: rdesk_common::local_hostname(), resume, keys, key_filter: e.key.clone(), password }
+}
+
+/// After a login attempt: remember a typed password, or drop a stored one that failed.
+/// Returns the hint for the next password dialog when the password was the problem.
+pub async fn settle_password(target: &str, used: Option<PasswordUse>, ok: bool) -> Result<Option<String>, String> {
+    let t = target.to_string();
+    match (used, ok) {
+        (Some(PasswordUse::Typed { password, remember: true }), true) => {
+            tokio::task::spawn_blocking(move || crate::secrets::set(&t, &password))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("{e:#}"))?;
+            Ok(None)
+        }
+        (Some(PasswordUse::Keychain), false) => {
+            let _ = tokio::task::spawn_blocking(move || crate::secrets::forget(&t)).await;
+            Ok(Some("The saved password was not accepted. Type it again.".into()))
+        }
+        (Some(PasswordUse::Typed { .. }), false) => Ok(Some("Wrong password, try again.".into())),
+        _ => Ok(None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,6 +362,7 @@ async fn once(
     endpoint: &mut ClientEndpoint,
     resume: &mut Option<(SessionId, [u8; 32])>,
     monitor: &mut Option<u32>,
+    password_hint: &mut Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
     notify: &Notify,
@@ -271,22 +392,47 @@ async fn once(
         Err(e) => return End::Retry(e.to_string()),
     };
     notify(UiEvent::Status("Authenticating…".into()));
-    let mut creds = credentials(&opts.entry, resume.take()).await;
-    let ok = match tokio::time::timeout(
-        Duration::from_secs(90),
+    let used: PasswordUsed = Arc::new(Mutex::new(None));
+    let ui = opts.ask_password_in_ui.then(|| (notify.clone(), password_hint.take()));
+    let asker = password_asker(&opts.name, &opts.entry, used.clone(), ui);
+    let mut creds = credentials(&opts.entry, resume.take(), asker).await;
+    // Generous: the user may be typing a password or approving 1Password.
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
         auth::client_handshake(&mut ctrl_r, &mut ctrl_w, c.ek, c.host_fingerprint, &mut creds),
     )
-    .await
-    {
-        Ok(Ok(ok)) => ok,
+    .await;
+    let use_ = used.lock().unwrap().take();
+    let ok = match result {
+        Ok(Ok(ok)) => {
+            if let Err(e) = settle_password(&opts.name, use_, true).await {
+                notify(UiEvent::Notice(format!("Could not remember the password: {e}")));
+            }
+            ok
+        }
         Ok(Err(e)) => {
             conn.close(close::NORMAL, b"");
-            return if e.downcast_ref::<AuthFailed>().is_some() || format!("{e:#}").contains("no usable authentication")
-            {
-                End::Fatal(format!("{e:#}"))
-            } else {
-                End::Retry(format!("{e:#}"))
-            };
+            if e.downcast_ref::<PasswordCancelled>().is_some() {
+                return End::Fatal("Login cancelled.".into());
+            }
+            if e.downcast_ref::<PasswordUnavailable>().is_some() {
+                return End::Fatal(format!("{e:#}"));
+            }
+            if e.downcast_ref::<AuthFailed>().is_some() {
+                let retry =
+                    opts.ask_password_in_ui && matches!(use_, Some(PasswordUse::Typed { .. } | PasswordUse::Keychain));
+                let hint = settle_password(&opts.name, use_, false).await.ok().flatten();
+                if retry {
+                    // Ask again; the host's per-IP backoff keeps this from becoming a guessing loop.
+                    *password_hint = hint;
+                    return End::Retry("wrong password".into());
+                }
+                return End::Fatal(format!("{e:#}"));
+            }
+            if format!("{e:#}").contains("no usable authentication") {
+                return End::Fatal(format!("{e:#}"));
+            }
+            return End::Retry(format!("{e:#}"));
         }
         Err(_) => {
             conn.close(close::NORMAL, b"");
@@ -305,6 +451,9 @@ async fn once(
         Ok(false) | Err(_) => match conn.close_reason() {
             Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::REPLACED => {
                 End::Fatal("Another rdesk client connected to this host; this session was closed.".into())
+            }
+            Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::KICKED => {
+                End::Fatal("The session was ended from the host computer.".into())
             }
             Some(quinn::ConnectionError::ApplicationClosed(a)) if a.error_code == close::SHUTDOWN => {
                 End::Retry("host restarting".into())
@@ -424,7 +573,7 @@ async fn run_session(
                         }
                     }
                     HostMsg::DirListing { path, result, .. } => notify(UiEvent::DirListing { path, result }),
-                    HostMsg::Notice { text } => notify(UiEvent::Status(text)),
+                    HostMsg::Notice { text } => notify(UiEvent::Notice(text)),
                     HostMsg::Replaced => return Ok(()),
                     other => tracing::debug!("ignoring {other:?}"),
                 }

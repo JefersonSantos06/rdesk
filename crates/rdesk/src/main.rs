@@ -2,17 +2,24 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
+#[cfg(feature = "client")]
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use rdesk_common::agent::{self, Agent};
+#[cfg(feature = "client")]
 use rdesk_common::auth;
 use rdesk_common::config::{
     self, AuthPref, ClientConfig, HostEntry, KnownHosts, format_fingerprint, parse_fingerprint,
 };
-use rdesk_common::transport::{self, HostIdentity};
+#[cfg(feature = "client")]
+use rdesk_common::transport;
+#[cfg(feature = "host")]
+use rdesk_common::transport::HostIdentity;
+#[cfg(feature = "host")]
 use ssh_key::PublicKey;
+#[cfg(feature = "host")]
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -32,9 +39,22 @@ enum Command {
     #[cfg(feature = "host")]
     #[command(subcommand)]
     Host(HostCmd),
-    /// Open the launcher window: your computers, their status, one click to connect.
+    /// Open the app window: your computers, this computer's host, settings (also the default).
     #[cfg(feature = "client")]
-    Ui,
+    Ui {
+        /// Start hidden in the tray.
+        #[arg(long)]
+        minimized: bool,
+        /// Replace a running copy of the app (used by "Restart as administrator").
+        #[arg(long, hide = true)]
+        takeover: bool,
+    },
+    /// Start the app with the system: off, login, or login-admin (Windows, elevated).
+    #[cfg(feature = "client")]
+    Autostart {
+        #[arg(value_parser = ["off", "login", "login-admin"])]
+        mode: String,
+    },
     /// Open a viewer window to a host (alias from client.toml or address).
     #[cfg(feature = "client")]
     Connect(ConnectArgs),
@@ -223,6 +243,9 @@ struct ConnectArgs {
     /// With --headless: write the last picture to this .ppm file.
     #[arg(long)]
     dump: Option<PathBuf>,
+    /// Open with the file-transfer panel showing.
+    #[arg(long)]
+    files: bool,
 }
 
 fn init_logging(verbose: u8) {
@@ -236,19 +259,61 @@ fn init_logging(verbose: u8) {
     tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
 }
 
+/// The desktop app usually has no console: log to `<config>/logs/app.log` instead.
+fn init_app_logging(verbose: u8) {
+    use tracing_subscriber::EnvFilter;
+    let file = config::ensure_config_dir()
+        .map(|d| d.join("logs"))
+        .and_then(|d| std::fs::create_dir_all(&d).map(|_| d).map_err(Into::into))
+        .and_then(|d| {
+            // Append: a second launch (which only wakes the running app) must not clobber it.
+            let path = d.join("app.log");
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+                let _ = std::fs::remove_file(&path);
+            }
+            std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(Into::into)
+        });
+    let Ok(file) = file else {
+        return init_logging(verbose);
+    };
+    let default = if verbose == 0 {
+        "warn,rdesk=info,rdesk_host=info,rdesk_client=info,rdesk_common=info"
+    } else {
+        "info,rdesk=debug,rdesk_host=debug,rdesk_client=debug,rdesk_common=debug"
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread().enable_all().build()?)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+    #[cfg(feature = "client")]
+    let app = matches!(cli.cmd, None | Some(Command::Ui { .. }));
+    #[cfg(not(feature = "client"))]
+    let app = false;
+    if app {
+        init_app_logging(cli.verbose)
+    } else {
+        init_logging(cli.verbose)
+    }
     let Some(cmd) = cli.cmd else {
         return no_command();
     };
     match cmd {
         #[cfg(feature = "client")]
-        Command::Ui => launcher(),
+        Command::Ui { minimized, takeover } => launcher(minimized, takeover),
+        #[cfg(feature = "client")]
+        Command::Autostart { mode } => {
+            let mode = rdesk_client::app::Autostart::parse(&mode).ok_or_else(|| anyhow!("unknown mode {mode}"))?;
+            let exe = std::env::current_exe()?;
+            rdesk_client::app::apply_autostart(mode, &exe)?;
+            println!("Start with the system: {}", mode.arg());
+            Ok(())
+        }
         #[cfg(feature = "host")]
         Command::Host(h) => host_cmd(h),
         #[cfg(feature = "client")]
@@ -267,7 +332,7 @@ fn main() -> Result<()> {
 #[cfg(feature = "client")]
 fn no_command() -> Result<()> {
     detach_console_if_owned();
-    launcher()
+    launcher(false, false)
 }
 
 #[cfg(not(feature = "client"))]
@@ -278,9 +343,9 @@ fn no_command() -> Result<()> {
 }
 
 #[cfg(feature = "client")]
-fn launcher() -> Result<()> {
+fn launcher(minimized: bool, takeover: bool) -> Result<()> {
     let exe = std::env::current_exe().context("locating the rdesk binary")?;
-    rdesk_client::launcher::run(rdesk_client::launcher::LauncherOpts { exe })
+    rdesk_client::app::run(rdesk_client::app::AppOpts { exe, minimized, takeover })
 }
 
 /// Started by double-clicking rdesk.exe, Windows gives us a console window of our own;
@@ -314,34 +379,23 @@ fn prompt(q: &str) -> Result<String> {
 fn host_cmd(cmd: HostCmd) -> Result<()> {
     match cmd {
         HostCmd::Init { force } => {
-            let dir = config::ensure_config_dir()?;
-            let id = match HostIdentity::load() {
-                Ok(id) if !force => {
-                    println!("Host identity already exists.");
-                    id
-                }
-                _ => {
-                    let id = HostIdentity::generate()?;
-                    id.save()?;
-                    println!("Generated a new host identity.");
-                    id
-                }
+            let had = HostIdentity::load().is_ok();
+            let fp = if force {
+                rdesk_host::admin::regenerate_identity()?
+            } else {
+                rdesk_host::admin::ensure_initialized()?
             };
-            let host_toml = config::config_path(config::HOST_CONFIG)?;
-            if !host_toml.exists() {
-                config::save_toml(config::HOST_CONFIG, &config::HostConfig::default())?;
-            }
-            let setup_path = config::config_path(config::OPAQUE_SETUP)?;
-            if !setup_path.exists() {
-                config::write_private(&setup_path, &auth::server_setup_to_bytes(&auth::new_server_setup()))?;
-            }
-            println!("Config directory: {}", dir.display());
-            println!("Fingerprint: {}", format_fingerprint(&id.fingerprint()));
+            println!(
+                "{}",
+                if had && !force { "Host identity already exists." } else { "Generated a new host identity." }
+            );
+            println!("Config directory: {}", config::config_dir()?.display());
+            println!("Fingerprint: {}", format_fingerprint(&fp));
             println!();
             println!("Next steps:");
             println!("  rdesk host add-key --from-agent      # authorize your 1Password SSH key");
             println!("  rdesk host set-password --op op://…  # optional password fallback");
-            println!("  rdesk host run");
+            println!("  rdesk host run                       # or just `rdesk` for the app");
             Ok(())
         }
         HostCmd::Run { listen, port, allow_non_tailnet, fake_capture, fake_input } => {
@@ -362,20 +416,18 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
                 runtime()?.block_on(pick_agent_key(agent_sock.as_deref(), key_fp.as_deref()))?
             } else {
                 let k = key.ok_or_else(|| anyhow!("give a public key, a .pub file, or --from-agent"))?;
-                let text = if std::path::Path::new(&k).exists() { std::fs::read_to_string(&k)? } else { k };
-                PublicKey::from_openssh(text.trim()).context("not an OpenSSH public key")?
+                rdesk_host::admin::parse_public_key(&k)?
             };
-            let mut keys = load_keys()?;
-            if keys.iter().any(|k| k.key_data() == key.key_data()) {
-                println!("Already authorized: {}", agent::key_fingerprint(key.key_data()));
-                return Ok(());
+            let fp = agent::key_fingerprint(key.key_data());
+            if rdesk_host::admin::add_key(&key)? {
+                println!("Authorized {fp} {}", key.comment());
+            } else {
+                println!("Already authorized: {fp}");
             }
-            println!("Authorized {} {}", agent::key_fingerprint(key.key_data()), key.comment());
-            keys.push(key);
-            save_keys(&keys)
+            Ok(())
         }
         HostCmd::ListKeys => {
-            let keys = load_keys()?;
+            let keys = rdesk_host::admin::load_keys()?;
             if keys.is_empty() {
                 println!("No authorized keys.");
             }
@@ -385,13 +437,7 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             Ok(())
         }
         HostCmd::RemoveKey { fingerprint } => {
-            let mut keys = load_keys()?;
-            let before = keys.len();
-            keys.retain(|k| agent::key_fingerprint(k.key_data()) != fingerprint);
-            if keys.len() == before {
-                bail!("no key with fingerprint {fingerprint}");
-            }
-            save_keys(&keys)?;
+            rdesk_host::admin::remove_key(&fingerprint)?;
             println!("Removed.");
             Ok(())
         }
@@ -410,52 +456,20 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             if pw.chars().count() < 16 {
                 eprintln!("warning: use a long random password (1Password can generate one); this one is short");
             }
-            let setup_path = config::config_path(config::OPAQUE_SETUP)?;
-            let setup = match std::fs::read(&setup_path) {
-                Ok(b) => auth::server_setup_from_bytes(&b)?,
-                Err(_) => {
-                    let s = auth::new_server_setup();
-                    config::write_private(&setup_path, &auth::server_setup_to_bytes(&s))?;
-                    s
-                }
-            };
             eprintln!("Deriving the password record (Argon2id, takes a moment)…");
-            let record = auth::register_password(&setup, pw.as_bytes())?;
-            config::write_private(&config::config_path(config::OPAQUE_PASSWORD)?, &record)?;
+            rdesk_host::admin::set_password(&pw)?;
             println!("Password login enabled.");
             Ok(())
         }
         HostCmd::ClearPassword => {
-            let p = config::config_path(config::OPAQUE_PASSWORD)?;
-            if p.exists() {
-                std::fs::remove_file(p)?;
-            }
+            rdesk_host::admin::clear_password()?;
             println!("Password login disabled.");
             Ok(())
         }
         HostCmd::Check => runtime()?.block_on(host_check()),
     }
 }
-
 #[cfg(feature = "host")]
-fn load_keys() -> Result<Vec<PublicKey>> {
-    match std::fs::read_to_string(config::config_path(config::AUTHORIZED_KEYS)?) {
-        Ok(t) => auth::parse_authorized_keys(&t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-#[cfg(feature = "host")]
-fn save_keys(keys: &[PublicKey]) -> Result<()> {
-    let mut out = String::from("# rdesk authorized keys (OpenSSH format)\n");
-    for k in keys {
-        out.push_str(k.to_openssh()?.trim());
-        out.push('\n');
-    }
-    config::write_private(&config::config_path(config::AUTHORIZED_KEYS)?, out.as_bytes())
-}
-
 async fn pick_agent_key(sock: Option<&str>, fp: Option<&str>) -> Result<PublicKey> {
     let mut a = Agent::connect(sock).await?;
     let keys = a.identities().await?;
@@ -480,48 +494,12 @@ async fn pick_agent_key(sock: Option<&str>, fp: Option<&str>) -> Result<PublicKe
 
 #[cfg(feature = "host")]
 async fn host_check() -> Result<()> {
-    println!("Config dir: {}", config::config_dir()?.display());
-    match HostIdentity::load() {
-        Ok(id) => println!("Identity:   {}", format_fingerprint(&id.fingerprint())),
-        Err(e) => println!("Identity:   MISSING ({e:#})"),
+    for l in rdesk_host::admin::diagnose().await {
+        println!("{:<14} {}{}", format!("{}:", l.label), if l.ok { "" } else { "⚠ " }, l.value);
     }
-    let keys = load_keys().unwrap_or_default();
-    println!("Keys:       {} authorized", keys.len());
-    let pw = config::config_path(config::OPAQUE_PASSWORD)?.exists();
-    println!("Password:   {}", if pw { "enabled" } else { "disabled" });
-    match transport::tailscale_ips().await {
-        Ok(ips) => println!("Tailscale:  {}", ips.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")),
-        Err(e) => println!("Tailscale:  NOT AVAILABLE ({e:#})"),
-    }
-    let cap = rdesk_host::capture::Capturer::spawn(false);
-    match cap.monitors().await {
-        Ok(ms) => {
-            for m in ms {
-                let t = std::time::Instant::now();
-                match cap.grab(m.info.id).await {
-                    Ok(f) => println!(
-                        "Monitor {}:  \"{}\" {}x{} captured in {} ms",
-                        m.info.id,
-                        m.info.name,
-                        f.width,
-                        f.height,
-                        t.elapsed().as_millis()
-                    ),
-                    Err(e) => println!("Monitor {}:  capture FAILED: {e:#}", m.info.id),
-                }
-            }
-        }
-        Err(e) => println!("Monitors:   FAILED ({e:#})"),
-    }
-    if cfg!(target_os = "macos") {
-        println!("macOS: grant rdesk Screen Recording and Accessibility in System Settings → Privacy & Security.");
-    }
-    if cfg!(target_os = "linux") {
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-        println!("Linux session: {}", if wayland { "Wayland (capture/input may not work; use X11)" } else { "X11" });
-    }
-    if cfg!(windows) {
-        println!("Windows: run elevated to control admin windows; UAC prompts on the secure desktop are not visible.");
+    if cfg!(windows) && !rdesk_host::elevation::is_elevated() {
+        println!();
+        println!("{}", rdesk_host::elevation::NOT_ELEVATED_HINT);
     }
     Ok(())
 }
@@ -578,12 +556,14 @@ async fn agent_keys(sock: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "client")]
 struct Target {
     name: String,
     entry: HostEntry,
     cfg: ClientConfig,
 }
 
+#[cfg(feature = "client")]
 fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     let cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
     let mut entry =
@@ -607,6 +587,7 @@ fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
 }
 
 /// Return the pinned fingerprint for `t`, asking the user to trust it on first contact.
+#[cfg(feature = "client")]
 async fn ensure_trusted(t: &Target, expected: Option<&str>) -> Result<[u8; 32]> {
     let mut kh = KnownHosts::load()?;
     if let Some(fp) = expected {
@@ -652,6 +633,8 @@ fn connect(a: ConnectArgs) -> Result<()> {
     };
     let opts = ConnectOpts {
         name: t.name.clone(),
+        // The window asks in a dialog; --headless asks on the terminal.
+        ask_password_in_ui: !a.headless,
         entry: t.entry.clone(),
         pin,
         monitor: a.monitor,
@@ -672,7 +655,12 @@ fn connect(a: ConnectArgs) -> Result<()> {
     let download_dir = directories::UserDirs::new()
         .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    rdesk_client::viewer::run(rdesk_client::viewer::ViewerOpts { connect: opts, swap_cmd_ctrl: swap, download_dir })
+    rdesk_client::viewer::run(rdesk_client::viewer::ViewerOpts {
+        connect: opts,
+        swap_cmd_ctrl: swap,
+        download_dir,
+        open_files: a.files,
+    })
 }
 
 /// Connect + authenticate without the video/UI machinery, for one-shot CLI commands.
@@ -683,7 +671,9 @@ async fn cli_session(t: &Target, a: &AuthArgs) -> Result<(quinn::Connection, qui
     let ep = transport::client_endpoint(&addr)?;
     let c = transport::connect(&ep, addr, Some(pin), &t.cfg.transport, Duration::from_secs(10)).await?;
     let (mut w, mut r) = c.conn.open_bi().await?;
-    let mut creds = rdesk_client::conn::credentials(&t.entry, None).await;
+    let used = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let asker = rdesk_client::conn::password_asker(&t.name, &t.entry, used.clone(), None);
+    let mut creds = rdesk_client::conn::credentials(&t.entry, None, asker).await;
     auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await?;
     // We don't watch the screen: ask for the minimum.
     rdesk_proto::write_msg(&mut w, &rdesk_proto::ClientMsg::SetQuality { max_fps: 1, jpeg_quality: 10 }).await?;

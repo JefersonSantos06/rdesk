@@ -146,6 +146,24 @@ pub async fn run(
         });
     }
 
+    // Tell the remote user when the host cannot deliver their input (e.g. UIPI on Windows).
+    {
+        let mut problems = injector.subscribe();
+        let out = out_tx.clone();
+        tasks.spawn(async move {
+            loop {
+                match problems.recv().await {
+                    Ok(text) => {
+                        let _ = out.send(HostMsg::Notice { text });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    // The injector lives as long as the host; never end the session over this.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                }
+            }
+        });
+    }
+
     // Client-opened unidirectional streams: input and acks.
     {
         let conn = conn.clone();

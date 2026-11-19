@@ -1,5 +1,5 @@
-//! The launcher: an address book of computers with live status, in the spirit of
-//! AnyDesk/TeamViewer's start screen.
+//! The "Computers" page: an address book of computers with live status, in the spirit
+//! of AnyDesk/TeamViewer's start screen.
 //!
 //! * "My computers" are the hosts saved in client.toml.
 //! * "Tailnet" lists the other devices Tailscale knows about, so a new machine shows up
@@ -27,44 +27,18 @@ const REFRESH_EVERY: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CARD: Vec2 = Vec2::new(260.0, 128.0);
 
-pub struct LauncherOpts {
-    /// The rdesk binary, re-run as `rdesk connect <target>` for each session.
-    pub exe: PathBuf,
-}
-
-pub fn run(opts: LauncherOpts) -> Result<()> {
-    let shared = Arc::new(Mutex::new(Snapshot::default()));
-    let (tx, rx) = mpsc::unbounded_channel();
-    let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("rdesk")
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([560.0, 380.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "rdesk",
-        native,
-        Box::new(move |cc| {
-            spawn_worker(shared.clone(), rx, cc.egui_ctx.clone());
-            Ok(Box::new(Launcher::new(opts, shared, tx)))
-        }),
-    )
-    .map_err(|e| anyhow!("launcher window: {e}"))
-}
-
 // ---------------------------------------------------------------------------
 // Background worker: Tailscale status + probes
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-enum Probe {
+pub(super) enum Probe {
     Ok(ProbeInfo),
     Err(String),
 }
 
 #[derive(Default, Clone)]
-struct Snapshot {
+pub(super) struct Snapshot {
     tailnet: Option<Result<Tailnet, String>>,
     /// Keyed by the address string that was probed (a saved host's `addr` or a device IP).
     probes: HashMap<String, (Probe, Instant)>,
@@ -72,13 +46,13 @@ struct Snapshot {
     refreshing: bool,
 }
 
-enum WorkerCmd {
+pub(super) enum WorkerCmd {
     Refresh,
     ProbeNow(String),
     AgentKeys(Option<String>),
 }
 
-fn spawn_worker(shared: Arc<Mutex<Snapshot>>, rx: mpsc::UnboundedReceiver<WorkerCmd>, ctx: egui::Context) {
+pub(super) fn spawn_worker(shared: Arc<Mutex<Snapshot>>, rx: mpsc::UnboundedReceiver<WorkerCmd>, ctx: egui::Context) {
     std::thread::Builder::new()
         .name("rdesk-directory".into())
         .spawn(move || {
@@ -204,7 +178,7 @@ async fn agent_keys(sock: Option<&str>) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
-fn load_client_config() -> ClientConfig {
+pub(super) fn load_client_config() -> ClientConfig {
     config::load_toml(config::CLIENT_CONFIG).unwrap_or_default()
 }
 
@@ -282,6 +256,11 @@ struct Editor {
     agent_socket: String,
     /// The "From 1Password…" key list is open.
     show_keys: bool,
+    /// A password for this host is in the system credential store.
+    saved_password: bool,
+    /// Typed here to be saved in the credential store.
+    new_password: zeroize::Zeroizing<String>,
+    forget_password: bool,
     error: Option<String>,
 }
 
@@ -297,6 +276,9 @@ impl Editor {
             identity: String::new(),
             agent_socket: String::new(),
             show_keys: false,
+            saved_password: false,
+            new_password: Default::default(),
+            forget_password: false,
             error: None,
         }
     }
@@ -312,6 +294,9 @@ impl Editor {
             identity: e.identity.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             agent_socket: e.agent_socket.clone().unwrap_or_default(),
             show_keys: false,
+            saved_password: crate::secrets::has(alias),
+            new_password: Default::default(),
+            forget_password: false,
             error: None,
         }
     }
@@ -320,10 +305,10 @@ impl Editor {
 enum Dialog {
     Edit(Editor),
     Remove(String),
-    Trust { target: String, fp: [u8; 32], old: Option<[u8; 32]>, about: String },
+    Trust { target: String, fp: [u8; 32], old: Option<[u8; 32]>, about: String, files: bool },
 }
 
-struct Launcher {
+pub(super) struct Computers {
     exe: PathBuf,
     shared: Arc<Mutex<Snapshot>>,
     tx: mpsc::UnboundedSender<WorkerCmd>,
@@ -335,15 +320,15 @@ struct Launcher {
     show_offline: bool,
     dialog: Option<Dialog>,
     sessions: Vec<Session>,
-    /// Waiting for a probe of this target before connecting (trust check).
-    pending_connect: Option<(String, Instant)>,
-    toast: Option<(String, bool, Instant)>,
+    /// Waiting for a probe of this target before connecting (trust check); `bool` = files.
+    pending_connect: Option<(String, Instant, bool)>,
+    pub(super) toast: Option<(String, bool, Instant)>,
 }
 
-impl Launcher {
-    fn new(opts: LauncherOpts, shared: Arc<Mutex<Snapshot>>, tx: mpsc::UnboundedSender<WorkerCmd>) -> Self {
+impl Computers {
+    pub(super) fn new(exe: PathBuf, shared: Arc<Mutex<Snapshot>>, tx: mpsc::UnboundedSender<WorkerCmd>) -> Self {
         let mut l = Self {
-            exe: opts.exe,
+            exe,
             shared,
             tx,
             cfg: ClientConfig::default(),
@@ -455,6 +440,12 @@ impl Launcher {
     // ---- actions ----------------------------------------------------------
 
     fn connect(&mut self, target: &str) {
+        self.open(target, false);
+    }
+
+    /// Open a session window (`files`: start on the file-transfer panel), checking the
+    /// host's identity first.
+    fn open(&mut self, target: &str, files: bool) {
         let snap = self.shared.lock().unwrap();
         let addr = self.cfg.hosts.get(target).map(|e| e.addr.clone()).unwrap_or_else(|| target.to_string());
         let device_ip = snap
@@ -479,6 +470,7 @@ impl Launcher {
                     fp: info.fingerprint,
                     old: Some(k),
                     about: describe(&info),
+                    files,
                 });
             }
             (None, Some(Probe::Ok(info))) => {
@@ -487,6 +479,7 @@ impl Launcher {
                     fp: info.fingerprint,
                     old: None,
                     about: describe(&info),
+                    files,
                 });
             }
             (None, Some(Probe::Err(e))) if self.pending_connect.is_some() => {
@@ -495,25 +488,26 @@ impl Launcher {
             }
             (None, _) => {
                 // Never seen and no fresh probe: ask for one, then come back here.
-                self.pending_connect = Some((target.to_string(), Instant::now()));
+                self.pending_connect = Some((target.to_string(), Instant::now(), files));
                 let _ = self.tx.send(WorkerCmd::ProbeNow(addr));
             }
-            (Some(_), _) => self.spawn_session(target),
+            (Some(_), _) => self.spawn_session(target, files),
         }
     }
 
-    fn trust_and_connect(&mut self, target: &str, fp: [u8; 32]) {
+    fn trust_and_connect(&mut self, target: &str, fp: [u8; 32], files: bool) {
         self.known.entries.insert(target.to_string(), fp);
         let res = config::ensure_config_dir().and_then(|_| self.known.save());
         match res {
-            Ok(()) => self.spawn_session(target),
+            Ok(()) => self.spawn_session(target, files),
             Err(e) => self.notify(format!("Saving known_hosts: {e:#}"), true),
         }
     }
 
-    fn spawn_session(&mut self, target: &str) {
+    fn spawn_session(&mut self, target: &str, files: bool) {
         if self.session_open(target) {
-            self.notify(format!("A window for {target} is already open."), false);
+            let hint = if files { " Use Files in its ▼ rdesk menu." } else { "" };
+            self.notify(format!("A window for {target} is already open.{hint}"), false);
             return;
         }
         let log = match session_log(target) {
@@ -528,10 +522,11 @@ impl Launcher {
             Err(_) => std::process::Stdio::null(),
         };
         let mut cmd = std::process::Command::new(&self.exe);
-        cmd.args(["connect", target])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(stderr);
+        cmd.args(["connect", target]);
+        if files {
+            cmd.arg("--files");
+        }
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
@@ -605,6 +600,24 @@ impl Launcher {
             ed.error = Some(format!("Saving: {e:#}"));
             return false;
         }
+        // The remembered password follows the host's name.
+        let secret = (|| {
+            if let Some(old) = &ed.original
+                && *old != alias
+            {
+                crate::secrets::rename(old, &alias)?;
+            }
+            if ed.forget_password {
+                crate::secrets::forget(&alias)?;
+            }
+            if !ed.new_password.is_empty() {
+                crate::secrets::set(&alias, &ed.new_password)?;
+            }
+            anyhow::Ok(())
+        })();
+        if let Err(e) = secret {
+            self.notify(format!("{e:#}"), true);
+        }
         self.reload();
         self.refresh();
         self.notify(format!("Saved {alias}."), false);
@@ -616,7 +629,9 @@ impl Launcher {
         cfg.hosts.remove(alias);
         let mut known = KnownHosts::load().unwrap_or_default();
         known.entries.remove(alias);
-        let res = config::save_toml(config::CLIENT_CONFIG, &cfg).and_then(|_| known.save());
+        let res = config::save_toml(config::CLIENT_CONFIG, &cfg)
+            .and_then(|_| known.save())
+            .and_then(|_| crate::secrets::forget(alias));
         match res {
             Ok(()) => self.notify(format!("Removed {alias}."), false),
             Err(e) => self.notify(format!("Removing {alias}: {e:#}"), true),
@@ -628,8 +643,6 @@ impl Launcher {
 
     fn header(&mut self, ui: &mut egui::Ui, snap: &Snapshot) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("rdesk").strong().size(22.0));
-            ui.add_space(12.0);
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.quick)
                     .hint_text("Name or address to connect…")
@@ -716,6 +729,13 @@ impl Launcher {
                         if connect.clicked() {
                             self.connect(&c.target);
                         }
+                        if ui
+                            .add_enabled(c.status.connectable(), egui::Button::new("Files").small())
+                            .on_hover_text("Open a session on the file-transfer panel")
+                            .clicked()
+                        {
+                            self.open(&c.target, true);
+                        }
                         if c.saved {
                             if ui.small_button("Edit").clicked()
                                 && let Some(e) = self.cfg.hosts.get(&c.target)
@@ -742,11 +762,22 @@ impl Launcher {
                 ui.ctx().copy_text(c.addr.clone());
                 ui.close();
             }
-            if let Some(fp) = c.known_fp
-                && ui.button("Copy trusted fingerprint").clicked()
-            {
-                ui.ctx().copy_text(format_fingerprint(&fp));
+            if ui.button("Files…").clicked() {
+                self.open(&c.target, true);
                 ui.close();
+            }
+            if let Some(fp) = c.known_fp {
+                if ui.button("Copy trusted fingerprint").clicked() {
+                    ui.ctx().copy_text(format_fingerprint(&fp));
+                    ui.close();
+                }
+                if ui.button("Forget trusted fingerprint").on_hover_text("Ask again on the next connection").clicked() {
+                    self.known.entries.remove(&c.target);
+                    if let Err(e) = self.known.save() {
+                        self.notify(format!("Saving known_hosts: {e:#}"), true);
+                    }
+                    ui.close();
+                }
             }
             if c.saved {
                 ui.separator();
@@ -868,13 +899,32 @@ impl Launcher {
                             }
                         }
                         if ed.auth != AuthPref::Agent {
-                            ui.label("Password");
+                            ui.label("1Password");
                             ui.add(
                                 egui::TextEdit::singleline(&mut ed.password_ref)
-                                    .hint_text("op://Private/rdesk/password")
+                                    .hint_text("op://Private/rdesk/password (optional)")
                                     .desired_width(330.0),
                             );
                             ui.end_row();
+                            if crate::secrets::available() {
+                                ui.label("Saved password");
+                                ui.horizontal(|ui| {
+                                    if ed.saved_password && !ed.forget_password {
+                                        ui.label(format!("✔ in {}", crate::secrets::store_name()));
+                                        if ui.small_button("Forget").clicked() {
+                                            ed.forget_password = true;
+                                        }
+                                    } else {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut *ed.new_password)
+                                                .password(true)
+                                                .hint_text("type to save it")
+                                                .desired_width(250.0),
+                                        );
+                                    }
+                                });
+                                ui.end_row();
+                            }
                         }
                     });
                     egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
@@ -887,8 +937,11 @@ impl Launcher {
                             ui.end_row();
                         });
                     });
-                    if ed.auth != AuthPref::Agent && ed.password_ref.trim().is_empty() {
-                        ui.weak("Without a 1Password reference the password can only be typed in a terminal.");
+                    if ed.auth != AuthPref::Agent {
+                        ui.weak(
+                            "Order used: 1Password reference, then the saved password, then a dialog \
+                             when connecting (with an option to remember it).",
+                        );
                     }
                     if let Some(e) = &ed.error {
                         ui.colored_label(Status::IdentityChanged.color(), e);
@@ -938,7 +991,7 @@ impl Launcher {
                     None => {}
                 }
             }
-            Dialog::Trust { target, fp, old, about } => {
+            Dialog::Trust { target, fp, old, about, files } => {
                 let m = egui::Modal::new(egui::Id::unique("trust-host")).show(ctx, |ui| {
                     ui.set_width(520.0);
                     match old {
@@ -979,9 +1032,9 @@ impl Launcher {
                 });
                 match m.inner {
                     Some(true) => {
-                        let (t, f) = (target.clone(), *fp);
+                        let (t, f, files) = (target.clone(), *fp, *files);
                         keep = false;
-                        self.trust_and_connect(&t, f);
+                        self.trust_and_connect(&t, f, files);
                     }
                     Some(false) => keep = false,
                     None if m.should_close() => keep = false,
@@ -995,90 +1048,68 @@ impl Launcher {
     }
 }
 
-impl eframe::App for Launcher {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+impl Computers {
+    pub(super) fn open_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Bookkeeping that must run even while the window is hidden.
+    pub(super) fn tick(&mut self) {
         self.reap_sessions();
         if self.loaded.elapsed() > REFRESH_EVERY && self.dialog.is_none() {
             self.reload();
         }
-
         // A connect that was waiting for a probe result.
-        if let Some((target, since)) = self.pending_connect.clone() {
+        if let Some((target, since, files)) = self.pending_connect.clone() {
             let addr = self.cfg.hosts.get(&target).map(|e| e.addr.clone()).unwrap_or_else(|| target.clone());
             let ready = self.shared.lock().unwrap().probes.get(&addr).is_some_and(|(_, at)| *at >= since);
             if ready {
-                self.connect(&target);
+                self.open(&target, files);
                 self.pending_connect = None;
             } else if since.elapsed() > PROBE_TIMEOUT * 4 {
                 self.pending_connect = None;
                 self.notify(format!("{target} did not answer."), true);
             }
         }
+    }
 
+    pub(super) fn show(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let snap = self.shared.lock().unwrap().clone();
         let (saved, others) = self.cards(&snap);
 
-        egui::Panel::top("header").show(ui, |ui| {
-            ui.add_space(6.0);
-            self.header(ui, &snap);
-            ui.add_space(6.0);
-        });
-
-        egui::Panel::bottom("status").show(ui, |ui| {
+        self.header(ui, &snap);
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                match &self.toast {
-                    Some((text, err, at)) if at.elapsed() < Duration::from_secs(12) => {
-                        let color = if *err { Status::IdentityChanged.color() } else { ui.visuals().text_color() };
-                        ui.colored_label(color, text);
-                    }
-                    _ => {
-                        ui.weak("Double-click a computer to connect · right-click for more");
-                    }
+                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(220.0));
+                if ui.button("＋ Add computer").clicked() {
+                    self.dialog = Some(Dialog::Edit(Editor::new(String::new(), String::new())));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !self.sessions.is_empty() {
-                        ui.label(format!("{} open session(s)", self.sessions.len()));
-                    }
-                });
             });
-        });
+            ui.add_space(10.0);
+            ui.label(RichText::new("My computers").strong().size(17.0));
+            ui.add_space(4.0);
+            self.section(ui, &saved, "No saved computers yet. Add one, or save a device from your tailnet below.");
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("🔍 Search").desired_width(220.0));
-                    if ui.button("＋ Add computer").clicked() {
-                        self.dialog = Some(Dialog::Edit(Editor::new(String::new(), String::new())));
-                    }
-                });
-                ui.add_space(10.0);
-                ui.label(RichText::new("My computers").strong().size(17.0));
-                ui.add_space(4.0);
-                self.section(ui, &saved, "No saved computers yet. Add one, or save a device from your tailnet below.");
-
-                ui.add_space(18.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Tailnet").strong().size(17.0));
-                    ui.checkbox(&mut self.show_offline, "show offline");
-                });
-                ui.add_space(4.0);
-                let others: Vec<Card> = others
-                    .into_iter()
-                    .filter(|c| self.show_offline || c.device.as_ref().is_none_or(|d| d.online))
-                    .collect();
-                let empty = match &snap.tailnet {
-                    None => "Asking Tailscale…",
-                    Some(Err(_)) => "Tailscale is not available.",
-                    Some(Ok(_)) => "No other devices.",
-                };
-                self.section(ui, &others, empty);
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Tailnet").strong().size(17.0));
+                ui.checkbox(&mut self.show_offline, "show offline");
             });
+            ui.add_space(4.0);
+            let others: Vec<Card> = others
+                .into_iter()
+                .filter(|c| self.show_offline || c.device.as_ref().is_none_or(|d| d.online))
+                .collect();
+            let empty = match &snap.tailnet {
+                None => "Asking Tailscale…",
+                Some(Err(_)) => "Tailscale is not available.",
+                Some(Ok(_)) => "No other devices.",
+            };
+            self.section(ui, &others, empty);
         });
-
         self.dialogs(&ctx, &snap);
-
-        ctx.request_repaint_after(Duration::from_secs(1));
     }
 }
 

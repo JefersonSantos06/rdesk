@@ -26,6 +26,8 @@ pub mod close {
     pub const PROTOCOL: VarInt = VarInt::from_u32(3);
     pub const UNTRUSTED_HOST: VarInt = VarInt::from_u32(4);
     pub const SHUTDOWN: VarInt = VarInt::from_u32(5);
+    /// Someone at the host ended the session; don't reconnect.
+    pub const KICKED: VarInt = VarInt::from_u32(6);
 }
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
