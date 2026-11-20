@@ -6270,7 +6270,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6294,7 +6294,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6325,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-common"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6373,7 +6373,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-host"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -6404,7 +6404,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-proto"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "postcard",
  "proptest",
@@ -6416,7 +6416,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-release"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6431,7 +6431,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-server"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
