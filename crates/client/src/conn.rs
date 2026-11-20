@@ -209,7 +209,10 @@ pub struct View {
     /// Set when a frame arrived and the UI has not looked yet (avoids flooding the event loop).
     pending: Arc<AtomicBool>,
     /// Newest frame id applied to each tile position (late streams must not overwrite newer tiles).
+    /// Frame ids only order frames within one connection.
     tile_frame: HashMap<(u32, u32), u64>,
+    /// Which connection is painting; streams of an older one are ignored.
+    session: u64,
 }
 
 impl View {
@@ -222,7 +225,36 @@ impl View {
             frames: 0,
             pending: Arc::new(AtomicBool::new(false)),
             tile_frame: HashMap::new(),
+            session: 0,
         }
+    }
+
+    /// A new connection: the host numbers its frames from 1 again, so the ids of the
+    /// last one must not hide the new tiles (the picture froze after a reconnect).
+    fn begin_session(&mut self) -> u64 {
+        self.session += 1;
+        self.tile_frame.clear();
+        self.session
+    }
+
+    /// Paint a decoded tile of frame `frame_id`. False when a newer frame already painted it.
+    fn paint(&mut self, frame_id: u64, rect: TileRect, px: &[u8]) -> Result<bool> {
+        let key = (rect.x, rect.y);
+        if self.tile_frame.get(&key).is_some_and(|&f| f > frame_id) {
+            return Ok(false);
+        }
+        self.frame.blit(rect, px)?;
+        self.tile_frame.insert(key, frame_id);
+        if !self.full_dirty {
+            self.dirty.push(rect);
+            // Nothing drawn for a while (a minimized window): don't pile up rectangles.
+            let (cols, rows) = self.frame.grid();
+            if self.dirty.len() > (cols * rows) as usize {
+                self.full_dirty = true;
+                self.dirty.clear();
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -746,7 +778,10 @@ async fn run_session(
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<u64>();
     let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<String>();
     let clipboard = if clipboard_on { ClipboardSync::spawn(clip_tx) } else { None };
-    let frame_pending = view.lock().unwrap().pending.clone();
+    let (frame_pending, session) = {
+        let mut v = view.lock().unwrap();
+        (v.pending.clone(), v.begin_session())
+    };
 
     let mut tasks = tokio::task::JoinSet::<Result<()>>::new();
 
@@ -855,7 +890,7 @@ async fn run_session(
                 let pending = pending.clone();
                 let ack_tx = ack_tx.clone();
                 tokio::spawn(async move {
-                    match read_frame(&mut s, &view).await {
+                    match read_frame(&mut s, &view, session).await {
                         Ok(id) => {
                             let _ = ack_tx.send(id);
                         }
@@ -936,10 +971,13 @@ async fn run_session(
     result
 }
 
-async fn read_frame(s: &mut RecvStream, view: &SharedView) -> Result<u64> {
+async fn read_frame(s: &mut RecvStream, view: &SharedView, session: u64) -> Result<u64> {
     let h: FrameHeader = expect_msg(s, MAX_VIDEO_MSG).await?;
     {
         let mut v = view.lock().unwrap();
+        if v.session != session {
+            return Err(anyhow!("frame from an old connection"));
+        }
         if v.monitor != h.monitor_id || v.frame.width != h.width || v.frame.height != h.height {
             v.frame = Frame::new(h.width, h.height);
             v.monitor = h.monitor_id;
@@ -954,25 +992,13 @@ async fn read_frame(s: &mut RecvStream, view: &SharedView) -> Result<u64> {
         rdesk_common::tiles::decode_tile(&tile, &mut scratch)?;
         let rect = TileRect { x: tile.x, y: tile.y, w: tile.w as u32, h: tile.h as u32 };
         let mut v = view.lock().unwrap();
+        if v.session != session {
+            return Err(anyhow!("frame from an old connection"));
+        }
         if v.monitor != h.monitor_id {
             return Err(anyhow!("monitor switched mid-frame"));
         }
-        let key = (tile.x, tile.y);
-        if v.tile_frame.get(&key).is_some_and(|&f| f > h.frame_id) {
-            continue; // a newer frame already painted this tile
-        }
-        v.tile_frame.insert(key, h.frame_id);
-        v.frame.blit(rect, &scratch)?;
-        if !v.full_dirty {
-            v.dirty.push(rect);
-            // Nothing drawn for a while (a minimized window): don't pile up rectangles.
-            let tiles =
-                (v.frame.width.div_ceil(rdesk_proto::TILE) * v.frame.height.div_ceil(rdesk_proto::TILE)) as usize;
-            if v.dirty.len() > tiles {
-                v.full_dirty = true;
-                v.dirty.clear();
-            }
-        }
+        v.paint(h.frame_id, rect, &scratch)?;
     }
     view.lock().unwrap().frames += 1;
     Ok(h.frame_id)
@@ -1053,6 +1079,53 @@ pub fn take_updates(view: &SharedView) -> Update {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tile(v: u8) -> Vec<u8> {
+        vec![v; (rdesk_proto::TILE * rdesk_proto::TILE * 4) as usize]
+    }
+
+    fn rect(col: u32) -> TileRect {
+        rdesk_common::tiles::tile_rect(col, 0, 128, 64)
+    }
+
+    fn pixel(v: &View, col: u32) -> u8 {
+        v.frame.data[(col * rdesk_proto::TILE * 4) as usize]
+    }
+
+    #[test]
+    fn late_frame_does_not_overwrite_newer_tile() {
+        let mut v = View::new();
+        v.frame = Frame::new(128, 64);
+        v.begin_session();
+        assert!(v.paint(2, rect(0), &tile(2)).unwrap());
+        assert!(!v.paint(1, rect(0), &tile(1)).unwrap(), "frame 1 arrived after frame 2");
+        assert_eq!(pixel(&v, 0), 2);
+    }
+
+    #[test]
+    fn reconnect_paints_although_frame_ids_restart() {
+        let mut v = View::new();
+        v.frame = Frame::new(128, 64);
+        v.begin_session();
+        for id in 1..=5000 {
+            v.paint(id, rect(0), &tile(1)).unwrap();
+        }
+        v.paint(3, rect(1), &tile(1)).unwrap();
+        // Same monitor and size after the reconnect, and the host counts from 1 again.
+        v.begin_session();
+        assert!(v.paint(1, rect(0), &tile(9)).unwrap());
+        assert!(v.paint(1, rect(1), &tile(9)).unwrap());
+        assert_eq!((pixel(&v, 0), pixel(&v, 1)), (9, 9));
+    }
+
+    #[test]
+    fn a_new_session_retires_the_old_one() {
+        let mut v = View::new();
+        let old = v.begin_session();
+        let new = v.begin_session();
+        assert_ne!(old, new);
+        assert_eq!(v.session, new, "read_frame drops streams still tagged with `old`");
+    }
 
     #[test]
     fn raise_lines_round_trip() {
