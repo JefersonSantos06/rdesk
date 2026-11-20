@@ -158,6 +158,9 @@ enum Command {
     #[cfg(feature = "client")]
     Shell {
         target: String,
+        /// With the administrator rights of whoever is signed in (Windows, full control).
+        #[arg(long)]
+        admin: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -813,7 +816,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "client")]
         Command::Ls { target, path, auth } => runtime()?.block_on(cli_ls(target, path, auth)),
         #[cfg(feature = "client")]
-        Command::Shell { target, auth } => runtime()?.block_on(cli_shell(target, auth)),
+        Command::Shell { target, admin, auth } => runtime()?.block_on(cli_shell(target, admin, auth)),
     }
 }
 
@@ -1360,7 +1363,9 @@ async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()
         return Ok(());
     }
     if !cfg!(target_os = "linux") {
-        bail!("rdesk update installs Debian packages (Linux); on Windows the service updates by itself");
+        bail!(
+            "rdesk update installs Debian packages (Linux); on Windows the service and on a Mac the app update by themselves"
+        );
     }
     let platform = this_platform();
     let file =
@@ -1678,13 +1683,13 @@ impl Drop for RawTerminal {
 
 /// `rdesk shell`: the computer's shell in this terminal.
 #[cfg(feature = "client")]
-async fn cli_shell(target: String, a: AuthArgs) -> Result<()> {
+async fn cli_shell(target: String, admin: bool, a: AuthArgs) -> Result<()> {
     use rdesk_proto::{TermClient, TermHost};
     use std::io::Read as _;
     let t = resolve_target(&target, &a).await?;
     let s = cli_session(&t).await?;
     let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 30));
-    let mut link = rdesk_client::terminal::open(s.conn.clone(), cols, rows, || {}).await?;
+    let mut link = rdesk_client::terminal::open(s.conn.clone(), cols, rows, admin, || {}).await?;
     let raw = RawTerminal::enable()?;
     let keys = link.tx.clone();
     std::thread::spawn(move || {

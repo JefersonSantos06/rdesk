@@ -1,6 +1,6 @@
 //! A newer rdesk released by the server's admin. On Windows the service's host installs it
-//! by itself (`win::update`); elsewhere the host only says it exists (on Linux the
-//! `rdesk-update` timer installs packages, on a Mac it is downloaded by hand).
+//! by itself (`win::update`), and so does the app on a Mac (`mac_update`); on Linux the
+//! host only says it exists (the `rdesk-update` timer installs packages).
 
 use std::sync::Arc;
 
@@ -22,6 +22,11 @@ pub(crate) fn offered(offer: UpdateOffer, server: &Arc<Server>, reporter: &Repor
     #[cfg(windows)]
     if server.agent {
         tokio::spawn(crate::win::update::install(offer, server.clone(), reporter.clone()));
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if crate::mac_update::bundle().is_some() {
+        tokio::spawn(crate::mac_update::install(offer, server.clone(), reporter.clone()));
         return;
     }
     let _ = server;

@@ -10,8 +10,8 @@ use rdesk_common::config::HostConfig;
 use rdesk_common::files;
 use rdesk_common::transport;
 use rdesk_proto::{
-    ClientMsg, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MonitorInfo, StreamOpen, expect_msg,
-    read_msg, write_msg,
+    ClientMsg, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MonitorInfo, StreamOpen, TermClient,
+    expect_msg, read_msg, write_msg,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -226,8 +226,8 @@ pub async fn run(
                                     let _ = ack_tx.send(a.frame_id);
                                 }
                             }
-                            StreamOpen::File | StreamOpen::Terminal => {
-                                return Err(anyhow!("file and terminal streams must be bidirectional"));
+                            StreamOpen::File | StreamOpen::Terminal | StreamOpen::Audio => {
+                                return Err(anyhow!("file, terminal and audio streams must be bidirectional"));
                             }
                         }
                         Ok(())
@@ -246,6 +246,22 @@ pub async fn run(
         let conn = conn.clone();
         let inbox = shared.cfg.inbox_dir();
         let chosen_inbox = shared.cfg.inbox_dir.clone();
+        // Sound comes with the picture.
+        let audio_refused = if !access.screen {
+            Some("this session has no picture, so no sound")
+        } else if !shared.cfg.audio {
+            Some("this computer does not share its sound")
+        } else {
+            None
+        };
+        // Administrator rights in a terminal: only with every other right too.
+        let admin_refused = if !shared.cfg.admin_terminal {
+            Some("this computer does not allow a terminal as administrator")
+        } else if access != rdesk_proto::Access::FULL {
+            Some("a terminal as administrator needs full control")
+        } else {
+            None
+        };
         tasks.spawn(async move {
             loop {
                 let (mut w, mut r) = match conn.accept_bi().await {
@@ -268,16 +284,30 @@ pub async fn run(
                                 Ok(())
                             }
                             StreamOpen::Terminal => {
-                                reporter.event(format!("{who} opened a terminal"), false);
+                                let first = expect_msg::<_, TermClient>(&mut r, MAX_SMALL_MSG).await?;
+                                let admin = first.start().is_some_and(|s| s.2);
+                                if admin && let Some(why) = admin_refused {
+                                    write_msg(&mut w, &rdesk_proto::TermHost::Error(why.into())).await?;
+                                    return Ok(());
+                                }
+                                let what = if admin { "a terminal as administrator" } else { "a terminal" };
+                                reporter.event(format!("{who} opened {what}"), false);
                                 reporter.terminal(1);
                                 let r2 = if files_as_user {
-                                    terminal_as_user(&mut r, &mut w).await
+                                    terminal_as_user(first, &mut r, &mut w).await
                                 } else {
-                                    crate::terminal::serve(&mut r, &mut w).await
+                                    crate::terminal::serve_from(first, &mut r, &mut w).await
                                 };
                                 reporter.terminal(-1);
                                 r2
                             }
+                            StreamOpen::Audio => match audio_refused {
+                                Some(why) => {
+                                    write_msg(&mut w, &rdesk_proto::AudioMsg::Error(why.into())).await?;
+                                    Ok(())
+                                }
+                                None => crate::audio::serve(&mut r, &mut w).await,
+                            },
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
                     }
@@ -364,7 +394,7 @@ async fn serve_as_user<R, W>(_: &mut R, _: &mut W, _: Option<&std::path::Path>) 
 }
 
 #[cfg(not(windows))]
-async fn terminal_as_user<R, W>(_: &mut R, _: &mut W) -> Result<()> {
+async fn terminal_as_user<R, W>(_: TermClient, _: &mut R, _: &mut W) -> Result<()> {
     Err(anyhow!("not available"))
 }
 

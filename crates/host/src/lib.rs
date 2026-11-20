@@ -1,6 +1,7 @@
 //! rdesk host: everything that runs on the machine being controlled.
 
 pub mod admin;
+pub mod audio;
 pub mod capture;
 pub mod control;
 pub mod elevation;
@@ -9,6 +10,8 @@ pub mod input;
 pub mod ipc;
 pub mod keymap;
 pub mod localnet;
+#[cfg(any(target_os = "macos", test))]
+pub mod mac_update;
 pub mod power;
 pub mod server;
 pub mod session;
@@ -16,6 +19,8 @@ pub mod sync;
 pub mod terminal;
 pub mod update;
 pub mod video;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 #[cfg(windows)]
 pub mod win;
 

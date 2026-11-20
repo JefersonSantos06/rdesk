@@ -146,6 +146,11 @@ pub trait Backend {
     /// Whole notches; positive = up / right.
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<()>;
     fn text(&mut self, s: &str) -> Result<()>;
+    /// Ctrl+Alt+Del, which no injected key press makes. True if the backend sent the
+    /// real one; false to inject the keys as they come.
+    fn secure_attention(&mut self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Default)]
@@ -188,6 +193,9 @@ impl State {
                     }
                 }
                 InputEvent::Key { key, down } => {
+                    if down && key == Key::Delete && self.ctrl_alt() && b.secure_attention()? {
+                        return Ok(());
+                    }
                     if down {
                         self.keys.insert(key);
                     } else if !self.keys.remove(&key) {
@@ -201,6 +209,11 @@ impl State {
             },
         }
         Ok(())
+    }
+
+    fn ctrl_alt(&self) -> bool {
+        let held = |a, b| self.keys.contains(&a) || self.keys.contains(&b);
+        held(Key::ControlLeft, Key::ControlRight) && held(Key::AltLeft, Key::AltRight)
     }
 
     fn release_all(&mut self, b: &mut dyn Backend) {
@@ -309,6 +322,15 @@ mod win {
             }
         }
 
+        fn secure_attention(&mut self) -> Result<bool> {
+            // Only the service's host (SYSTEM) may ask Windows for it.
+            if !crate::win::proc::is_system() {
+                return Ok(false);
+            }
+            crate::win::sas::send()?;
+            Ok(true)
+        }
+
         fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
             let (vx, vy, vw, vh) = unsafe {
                 (
@@ -368,6 +390,10 @@ mod win {
 
 #[cfg(not(windows))]
 fn platform_backend() -> Result<Box<dyn Backend>> {
+    #[cfg(target_os = "linux")]
+    if crate::wayland::active() {
+        return Ok(Box::new(crate::wayland::Input::new()?));
+    }
     let enigo = enigo::Enigo::new(&enigo::Settings::default())
         .map_err(|e| anyhow::anyhow!("{e:?} (macOS: grant Accessibility; Linux: needs an X11 session)"))?;
     Ok(Box::new(EnigoBackend { enigo }))
@@ -456,6 +482,58 @@ mod tests {
             self.0.lock().unwrap().push(format!("text {s}"));
             Ok(())
         }
+    }
+
+    /// Sends Ctrl+Alt+Del itself, as the service's host does.
+    struct Sas(Rec);
+
+    impl Backend for Sas {
+        fn key(&mut self, key: Key, down: bool) -> Result<()> {
+            self.0.key(key, down)
+        }
+        fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
+            self.0.mouse_abs(x, y)
+        }
+        fn button(&mut self, b: MouseButton, down: bool) -> Result<()> {
+            self.0.button(b, down)
+        }
+        fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
+            self.0.scroll(dx, dy)
+        }
+        fn text(&mut self, s: &str) -> Result<()> {
+            self.0.text(s)
+        }
+        fn secure_attention(&mut self) -> Result<bool> {
+            self.0.0.lock().unwrap().push("SAS".into());
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn ctrl_alt_del_becomes_the_real_one_where_the_backend_can() {
+        let keys = |s: &mut State, b: &mut dyn Backend| {
+            for (key, down) in [
+                (Key::ControlRight, true),
+                (Key::AltLeft, true),
+                (Key::Delete, true),
+                (Key::Delete, false),
+                (Key::AltLeft, false),
+                (Key::ControlRight, false),
+            ] {
+                s.handle(b, InputCmd::Event(InputEvent::Key { key, down })).unwrap();
+            }
+        };
+        let rec = Rec::default();
+        keys(&mut State::default(), &mut Sas(rec.clone()));
+        let log = rec.0.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            ["key ControlRight true", "key AltLeft true", "SAS", "key AltLeft false", "key ControlRight false"]
+        );
+        // A backend that cannot just injects the keys.
+        let rec = Rec::default();
+        keys(&mut State::default(), &mut rec.clone());
+        assert_eq!(rec.0.lock().unwrap().len(), 6);
     }
 
     struct Failing(Arc<Mutex<u32>>);

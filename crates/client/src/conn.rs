@@ -90,6 +90,8 @@ pub enum UiEvent {
     Fatal(String),
     /// A terminal opened (or why not).
     Terminal(Result<crate::terminal::TermSlot, String>),
+    /// The host's sound plays (from which output), or why not.
+    Audio(Result<String, String>),
     /// Something to redraw (terminal output).
     Wake,
     Quit,
@@ -114,7 +116,11 @@ pub enum Cmd {
     OpenTerminal {
         cols: u16,
         rows: u16,
+        /// With administrator rights (Windows hosts, full control).
+        admin: bool,
     },
+    /// Play the host's sound, or stop it.
+    Sound(bool),
     Quit,
 }
 
@@ -739,6 +745,7 @@ async fn run_session(
         });
     }
     let mut transfer_id = 0u64;
+    let mut sound: Option<crate::audio::AudioLink> = None;
     let mut list_req = 0u32;
     let result = loop {
         tokio::select! {
@@ -780,11 +787,18 @@ async fn run_session(
                         transfer_id += 1;
                         spawn_pull(conn.clone(), remote, local_dir, transfer_id, notify.clone());
                     }
-                    Cmd::OpenTerminal { cols, rows } => {
+                    Cmd::Sound(false) => sound = None,
+                    Cmd::Sound(true) => {
+                        if sound.is_none() {
+                            let notify = notify.clone();
+                            sound = Some(crate::audio::start(conn.clone(), move |r| notify(UiEvent::Audio(r))));
+                        }
+                    }
+                    Cmd::OpenTerminal { cols, rows, admin } => {
                         let (conn, notify) = (conn.clone(), notify.clone());
                         tokio::spawn(async move {
                             let wake = notify.clone();
-                            let r = crate::terminal::open(conn, cols, rows, move || wake(UiEvent::Wake)).await;
+                            let r = crate::terminal::open(conn, cols, rows, admin, move || wake(UiEvent::Wake)).await;
                             notify(UiEvent::Terminal(
                                 r.map(|l| crate::terminal::TermSlot(std::sync::Arc::new(std::sync::Mutex::new(Some(l)))))
                                     .map_err(|e| format!("{e:#}")),

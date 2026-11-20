@@ -271,6 +271,7 @@ pub fn uninstall() -> Result<String> {
         Err(e) => return Err(e.into()),
     }
     firewall_remove();
+    super::sas::revert();
     let mut msg = "The rdesk service is removed.".to_string();
     if let Some(machine) = config::service_dir().filter(|d| d.is_dir()) {
         let back = config::config_dir()?;
@@ -333,6 +334,9 @@ fn run_service() -> Result<()> {
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
     ))?;
     tracing::info!("service started");
+    if let Err(e) = super::sas::allow() {
+        tracing::warn!("Ctrl+Alt+Del will not work: {e:#}");
+    }
     supervise(&stop_rx);
     tracing::info!("service stopped");
     handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;

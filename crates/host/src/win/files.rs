@@ -7,14 +7,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use rdesk_proto::DirEntry;
+use rdesk_proto::{DirEntry, TermClient, TermHost};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::proc::{self, Env, Spawned};
 
-fn helper(args: &[&str], stdin: bool) -> Result<Spawned> {
+fn helper(args: &[&str], stdin: bool, admin: bool) -> Result<Spawned> {
     let session = proc::console_session().ok_or_else(|| anyhow!("nobody is at this computer's screen"))?;
-    let token = proc::user_token(session)?;
+    let token = if admin { proc::admin_token(session)? } else { proc::user_token(session)? };
     let exe = std::env::current_exe().context("finding rdesk.exe")?;
     let mut all = vec!["host", "file-helper"];
     all.extend_from_slice(args);
@@ -45,28 +45,42 @@ where
     if let Some(dir) = &inbox {
         args.extend(["--inbox", dir]);
     }
-    relay_as_user(&args, r, w).await
+    relay_as_user(&args, Vec::new(), false, r, w).await
 }
 
-/// A terminal ([`crate::terminal::serve`]) in a helper started as the signed-in user.
-pub async fn terminal_as_user<R, W>(r: &mut R, w: &mut W) -> Result<()>
+/// A terminal ([`crate::terminal::serve`]) in a helper started as the signed-in user,
+/// with their administrator rights if `first` asks for them. `first` (already read here,
+/// to choose) goes to the helper ahead of the rest.
+pub async fn terminal_as_user<R, W>(first: TermClient, r: &mut R, w: &mut W) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    relay_as_user(&["terminal"], r, w).await
+    let admin = first.start().is_some_and(|s| s.2);
+    let mut head = Vec::new();
+    rdesk_proto::write_msg(&mut head, &first).await?;
+    match relay_as_user(&["terminal"], head, admin, r, w).await {
+        Err(e) if admin => {
+            // Not an administrator, say: tell the client why.
+            rdesk_proto::write_msg(w, &TermHost::Error(format!("{e:#}"))).await?;
+            Ok(())
+        }
+        other => other,
+    }
 }
 
-/// Start `rdesk host file-helper <args>` as the signed-in user and relay one stream to it.
-async fn relay_as_user<R, W>(args: &[&str], r: &mut R, w: &mut W) -> Result<()>
+/// Start `rdesk host file-helper <args>` as the signed-in user (with their administrator
+/// rights if `admin`), send it `head`, then relay one stream to it.
+async fn relay_as_user<R, W>(args: &[&str], head: Vec<u8>, admin: bool, r: &mut R, w: &mut W) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut sp = helper(args, true)?;
+    let mut sp = helper(args, true, admin)?;
     let mut to_helper = tokio::fs::File::from_std(sp.stdin.take().expect("piped stdin"));
     let mut from_helper = tokio::fs::File::from_std(sp.stdout.take().expect("piped stdout"));
     let send = async {
+        let _ = to_helper.write_all(&head).await;
         // The client may keep its side open while it waits for the answer: once its data is
         // in, close the helper's input and wait for the other direction to finish.
         let _ = tokio::io::copy(r, &mut to_helper).await;
@@ -85,7 +99,7 @@ where
 /// [`rdesk_common::files::list_dir`] as the signed-in user.
 pub async fn list_as_user(path: &str) -> Result<(String, Vec<DirEntry>), String> {
     let run = async {
-        let mut sp = helper(&["list", path], false)?;
+        let mut sp = helper(&["list", path], false, false)?;
         let mut out = Vec::new();
         tokio::fs::File::from_std(sp.stdout.take().expect("piped stdout")).read_to_end(&mut out).await?;
         reap(&sp).await;

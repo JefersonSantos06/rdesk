@@ -224,7 +224,7 @@ Como ficou:
 - App: *Terminal* na janela da sessão (▼ rdesk), nos cartões e no menu dos computadores (e na lista *On this network*); a janela desenha a tela com `vt100` e responde às perguntas do terminal (o ConPTY pergunta a posição do cursor antes de tudo).
 - CLI: `rdesk shell <computador>`, no terminal local em modo cru.
 - Atividade "… opened a terminal" e "(terminal open)" na barra de aviso.
-- Fora desta fase: terminal como administrador no Windows.
+- Fora desta fase: terminal como administrador no Windows (feito depois, veja *Extras*).
 
 Planejado:
 - App: botão **Terminal** na aba *Computers* e no menu da sessão. Abre uma janela de terminal dentro do app (emulador embutido; a avaliar: `egui_term`, baseado no `alacritty_terminal`). Várias abas por conexão.
@@ -240,6 +240,13 @@ Planejado:
   - *view only* e *files only* não incluem.
 - Host sem tela (placa sem X11): aceita sessões só de terminal e arquivos.
 - O histórico registra "terminal", e o aviso da fase 7 mostra "Fulano abriu um terminal".
+
+### Extras depois da fase 10 (feitos, branch `main`)
+- **Ctrl+Alt+Del**: o botão do menu da sessão manda as teclas; com o serviço do Windows, o host (SYSTEM) troca a combinação pelo `SendSAS` do `sas.dll`. O serviço liga a política `SoftwareSASGeneration` (bit "serviços") ao iniciar e a desinstalação desfaz só o que ele mudou. Sem o serviço, as teclas seguem como antes (o Windows ignora).
+- **Terminal como administrador** (Windows): `TermClient::StartAdmin` no lugar do `Start` (hosts antigos respondem com erro). Só com *full control* e se o host permitir (`admin_terminal`, ligado por padrão; *This computer → Terminal*). Com o serviço, o auxiliar do terminal roda com o token elevado de quem está logado (o `TokenLinkedToken` do UAC); quem não é administrador recebe a recusa. Sem o serviço, só se o próprio host já roda elevado. App: *Terminal (admin)* no menu da sessão; CLI: `rdesk shell --admin`.
+- **Atualização automática no Mac**: o host dentro do `rdesk.app` recebe a oferta do servidor, confere a assinatura e o hash, desempacota ao lado do app, confere `--version` e, sem ninguém conectado, troca os bundles (renomeando; volta o antigo se falhar). O app percebe o programa novo e reinicia. Precisa da pasta do app gravável (Aplicativos, para um administrador) e do compartilhamento ligado (*This computer*). Testado só no CI.
+- **Áudio**: o que o computador toca (não o microfone), num stream `StreamOpen::Audio`: Opus 48 kHz estéreo, pacotes de 20 ms a 96 kbit/s. Captura com `cpal` 0.18: loopback do WASAPI no Windows, tap do CoreAudio no Mac (macOS 14.6+, pede permissão; o app passa a exigir macOS 14.2), monitor do PulseAudio/PipeWire no Linux. O cliente toca na saída padrão com um buffer de 60–300 ms. Vem com a imagem (não em sessões só de arquivos/terminal); o host pode desligar (`audio`, *This computer → Sound*), o cliente tem *Sound* no menu da sessão. Hosts antigos recusam o stream e o cliente avisa.
+- **Wayland**: no host Linux em sessão Wayland, imagem e input vão pelo portal (xdg-desktop-portal): uma sessão RemoteDesktop com ScreenCast, imagem por PipeWire (fd do portal) e teclado/mouse pelas chamadas do portal. Na primeira vez o desktop pergunta a quem está no computador; o *restore token* fica em `wayland-token` na pasta do host, e as próximas sessões não perguntam (GNOME 46+, KDE Plasma 6.1+). `RDESK_WAYLAND=0/1` força X11/Wayland. Compilado e com testes de unidade no Linux (contêiner), mas não testado num desktop Wayland de verdade.
 
 ## Ainda não verificado
 - Imagem Docker (o `Dockerfile` não foi construído aqui) e a unit do systemd numa VPS de verdade.

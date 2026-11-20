@@ -1,8 +1,9 @@
 //! Screen capture on a dedicated thread (capture APIs are blocking and some
 //! platform handles are not `Send`).
 //!
-//! Backends: `xcap` (Windows / macOS / X11) and a synthetic animated test
-//! pattern (`RDESK_FAKE_CAPTURE=1`) for tests and machines without a display.
+//! Backends: `xcap` (Windows / macOS / X11), the desktop portal on Wayland
+//! (`wayland`), and a synthetic animated test pattern (`RDESK_FAKE_CAPTURE=1`) for
+//! tests and machines without a display.
 
 use std::sync::mpsc;
 use std::time::Instant;
@@ -44,8 +45,19 @@ impl Capturer {
         std::thread::Builder::new()
             .name("rdesk-capture".into())
             .spawn(move || {
-                let mut backend: Box<dyn Backend> =
-                    if fake { Box::new(Synthetic::new()) } else { Box::new(XcapBackend::default()) };
+                let mut backend: Box<dyn Backend> = if fake {
+                    Box::new(Synthetic::new())
+                } else {
+                    #[cfg(target_os = "linux")]
+                    if crate::wayland::active() {
+                        tracing::info!("Wayland: the screen comes through the desktop portal");
+                        Box::new(WaylandBackend::default())
+                    } else {
+                        Box::new(XcapBackend::default())
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    Box::new(XcapBackend::default())
+                };
                 while let Ok(req) = rx.recv() {
                     // Started by the service: the sign-in, lock and UAC screens are another desktop.
                     #[cfg(windows)]
@@ -82,6 +94,59 @@ impl Capturer {
 trait Backend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>>;
     fn grab(&mut self, id: u32) -> Result<Frame>;
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct WaylandBackend(crate::wayland::Capture);
+
+#[cfg(target_os = "linux")]
+impl Backend for WaylandBackend {
+    fn list(&mut self) -> Result<Vec<MonitorDesc>> {
+        self.0.list()
+    }
+    fn grab(&mut self, id: u32) -> Result<Frame> {
+        self.0.grab(id)
+    }
+}
+
+/// How a captured picture's pixels are laid out (before RGBA).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pixels {
+    Rgbx,
+    Bgrx,
+    Rgb,
+    Bgr,
+}
+
+/// Packed rows (`stride` bytes apart; 0 or less: tightly packed) → RGBA, opaque.
+/// `None` if `src` is too short for that picture.
+pub fn packed_to_rgba(src: &[u8], order: Pixels, width: u32, height: u32, stride: i32) -> Option<Vec<u8>> {
+    let (w, h) = (width as usize, height as usize);
+    let bpp = match order {
+        Pixels::Rgbx | Pixels::Bgrx => 4,
+        Pixels::Rgb | Pixels::Bgr => 3,
+    };
+    let stride = if stride > 0 { stride as usize } else { w * bpp };
+    if w == 0 || h == 0 || stride < w * bpp || src.len() < stride * (h - 1) + w * bpp {
+        return None;
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for (y, row) in out.chunks_exact_mut(w * 4).enumerate() {
+        let line = &src[y * stride..y * stride + w * bpp];
+        for (d, s) in row.as_chunks_mut::<4>().0.iter_mut().zip(line.chunks_exact(bpp)) {
+            match order {
+                Pixels::Rgbx | Pixels::Rgb => d[..3].copy_from_slice(&s[..3]),
+                Pixels::Bgrx | Pixels::Bgr => {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                }
+            }
+            d[3] = 255;
+        }
+    }
+    Some(out)
 }
 
 #[derive(Default)]
@@ -205,5 +270,22 @@ impl Backend for Synthetic {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
         Ok(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_pixels_become_rgba() {
+        // 2×2 BGRx with 4 bytes of padding per row.
+        let src = [3, 2, 1, 0, 6, 5, 4, 0, 9, 9, 9, 9, 13, 12, 11, 0, 16, 15, 14, 0, 9, 9, 9, 9];
+        let out = packed_to_rgba(&src, Pixels::Bgrx, 2, 2, 12).unwrap();
+        assert_eq!(out, [1, 2, 3, 255, 4, 5, 6, 255, 11, 12, 13, 255, 14, 15, 16, 255]);
+        // RGB, tightly packed.
+        assert_eq!(packed_to_rgba(&[1, 2, 3], Pixels::Rgb, 1, 1, 0).unwrap(), [1, 2, 3, 255]);
+        // Too short.
+        assert!(packed_to_rgba(&[1, 2, 3], Pixels::Rgbx, 1, 1, 0).is_none());
     }
 }

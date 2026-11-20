@@ -298,6 +298,26 @@ pub enum StreamOpen {
     File,
     /// A terminal (bidirectional): [`TermClient`] in, [`TermHost`] out.
     Terminal,
+    /// The computer's sound (bidirectional, the client sends nothing more): [`AudioMsg`]
+    /// out until the client closes it. Older hosts refuse it.
+    Audio,
+}
+
+/// Sound is Opus at this rate, stereo, in packets of [`AUDIO_FRAME`] samples per channel.
+pub const AUDIO_RATE: u32 = 48_000;
+/// 20 ms.
+pub const AUDIO_FRAME: usize = 960;
+
+/// The host's side of an audio stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AudioMsg {
+    /// Capturing: from which output (for the client to show).
+    Started { device: String },
+    /// One Opus packet ([`AUDIO_FRAME`] samples per channel). Nothing comes while the
+    /// computer plays nothing.
+    Packet(Vec<u8>),
+    /// No sound from this computer, and why.
+    Error(String),
 }
 
 /// The client's side of a terminal stream.
@@ -314,6 +334,23 @@ pub enum TermClient {
         cols: u16,
         rows: u16,
     },
+    /// First message instead of `Start`: the shell with administrator rights (Windows, full
+    /// control only, if the host allows it). Older hosts answer it with an error.
+    StartAdmin {
+        cols: u16,
+        rows: u16,
+    },
+}
+
+impl TermClient {
+    /// A first message: the size, and whether it asks for administrator rights.
+    pub fn start(&self) -> Option<(u16, u16, bool)> {
+        match *self {
+            TermClient::Start { cols, rows } => Some((cols, rows, false)),
+            TermClient::StartAdmin { cols, rows } => Some((cols, rows, true)),
+            _ => None,
+        }
+    }
 }
 
 /// The host's side of a terminal stream.

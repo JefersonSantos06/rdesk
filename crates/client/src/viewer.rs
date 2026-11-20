@@ -108,6 +108,11 @@ struct App {
     terminal: Option<crate::terminal::TermView>,
     terminal_open: bool,
     terminal_on_connect: bool,
+    /// The terminal window's shell has administrator rights.
+    terminal_admin: bool,
+    /// Play the host's sound; where it comes from (or why there is none).
+    sound: bool,
+    sound_status: Option<Result<String, String>>,
 }
 
 impl App {
@@ -142,6 +147,9 @@ impl App {
             terminal: None,
             terminal_open: false,
             terminal_on_connect: false,
+            terminal_admin: false,
+            sound: true,
+            sound_status: None,
         }
     }
 
@@ -326,13 +334,15 @@ impl App {
         }
     }
 
-    fn open_terminal(&mut self) {
-        if self.terminal.as_ref().is_some_and(|t| !t.ended) {
+    fn open_terminal(&mut self, admin: bool) {
+        if self.terminal.as_ref().is_some_and(|t| !t.ended) && self.terminal_admin == admin {
             self.terminal_open = true;
             return;
         }
+        // One terminal window: another kind replaces it (closing that shell).
         self.terminal = None;
-        self.send(Cmd::OpenTerminal { cols: 100, rows: 30 });
+        self.terminal_admin = admin;
+        self.send(Cmd::OpenTerminal { cols: 100, rows: 30, admin });
     }
 
     fn password_dialog(&mut self, ctx: &egui::Context) {
@@ -376,7 +386,15 @@ impl App {
             ui.label(format!("{} ({})", h.hostname, h.os));
         }
         if ui.button("Terminal").on_hover_text("A shell on that computer, as whoever is signed in there").clicked() {
-            self.open_terminal();
+            self.open_terminal(false);
+        }
+        if self.access == rdesk_proto::Access::FULL
+            && ui
+                .button("Terminal (admin)")
+                .on_hover_text("Windows: a shell with the administrator rights of whoever is signed in there")
+                .clicked()
+        {
+            self.open_terminal(true);
         }
         ui.label(format!(
             "{} · RTT {} ms{} · {:.0} fps · {:.0} kbit/s",
@@ -416,9 +434,26 @@ impl App {
             if ui.button("Refresh picture").clicked() {
                 self.send(Cmd::FullFrame);
             }
+            if self.access.screen {
+                let hover = match &self.sound_status {
+                    Some(Ok(device)) => format!("What that computer plays ({device})"),
+                    Some(Err(e)) => format!("No sound: {e}"),
+                    None => "What that computer plays".into(),
+                };
+                if ui.checkbox(&mut self.sound, "Sound").on_hover_text(hover).changed() {
+                    if !self.sound {
+                        self.sound_status = None;
+                    }
+                    self.send(Cmd::Sound(self.sound));
+                }
+            }
             ui.checkbox(&mut self.swap_cmd_ctrl, "Mac keys")
                 .on_hover_text("Cmd → Ctrl, left Option → Windows key, Control → Alt");
-            if ui.button("Ctrl+Alt+Del").on_hover_text("Only works if the host runs elevated").clicked() {
+            if ui
+                .button("Ctrl+Alt+Del")
+                .on_hover_text("Works when the computer runs rdesk as a service (installed)")
+                .clicked()
+            {
                 use rdesk_proto::Key::*;
                 for k in [ControlLeft, AltLeft, Delete] {
                     self.input(InputEvent::Key { key: k, down: true });
@@ -639,6 +674,12 @@ impl ApplicationHandler<UiEvent> for App {
                     self.terminal_open = true;
                 }
             }
+            UiEvent::Audio(r) => {
+                if let Err(e) = &r {
+                    self.notice = Some((format!("Sound: {e}"), Instant::now()));
+                }
+                self.sound_status = Some(r);
+            }
             UiEvent::Terminal(Err(e)) => self.notice = Some((format!("Terminal: {e}"), Instant::now())),
             UiEvent::Status(s) => {
                 self.status = s;
@@ -668,6 +709,10 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Access(a) => {
                 self.access = a;
+                // Sound comes with the picture (asked again after each reconnection).
+                if a.screen && self.sound {
+                    self.send(Cmd::Sound(true));
+                }
                 if !a.screen {
                     // Files only: there is no picture; open the file panel.
                     self.menu_open = true;
@@ -679,7 +724,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Connected(h) => {
                 if std::mem::take(&mut self.terminal_on_connect) {
-                    self.send(Cmd::OpenTerminal { cols: 100, rows: 30 });
+                    self.send(Cmd::OpenTerminal { cols: 100, rows: 30, admin: false });
                 }
                 self.fatal = None;
                 self.monitors = h.monitors.clone();

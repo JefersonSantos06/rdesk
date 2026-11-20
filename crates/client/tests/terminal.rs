@@ -60,17 +60,60 @@ async fn shell_runs_a_command() {
     let ok = auth::client_handshake(&mut r, &mut w, c.ek, c.host_fingerprint, &mut creds).await.unwrap();
     assert!(rdesk_proto::Access::from(ok.access).terminal, "a local login may open a terminal");
 
-    let mut link = rdesk_client::terminal::open(c.conn.clone(), 100, 30, || {}).await.unwrap();
+    // As administrator: refused unless this host has those rights (tests run unelevated).
+    let mut admin = rdesk_client::terminal::open(c.conn.clone(), 100, 30, true, || {}).await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(45), admin.rx.recv()).await.unwrap() {
+        Some(TermHost::Error(e)) => assert!(e.contains("administrator"), "{e}"),
+        Some(TermHost::Started { user, .. }) => assert!(user.ends_with("(administrator)"), "{user}"),
+        other => panic!("unexpected {other:?}"),
+    }
+    drop(admin);
+
+    // Sound: it starts, or says why not (a computer without a sound output, like CI's).
+    // Not on a Mac: the first capture asks the user's permission.
+    if !cfg!(target_os = "macos") {
+        use rdesk_proto::{AudioMsg, StreamOpen};
+        let (mut w, mut r) = c.conn.open_bi().await.unwrap();
+        rdesk_proto::write_msg(&mut w, &StreamOpen::Audio).await.unwrap();
+        let first =
+            tokio::time::timeout(Duration::from_secs(20), rdesk_proto::expect_msg::<_, AudioMsg>(&mut r, 1 << 16))
+                .await
+                .expect("no answer to the sound request")
+                .unwrap();
+        eprintln!("sound: {first:?}");
+        assert!(matches!(first, AudioMsg::Started { .. } | AudioMsg::Error(_)), "{first:?}");
+        // RDESK_SOUND_CHECK=1 while something plays: packets must come.
+        if matches!(first, AudioMsg::Started { .. }) && std::env::var_os("RDESK_SOUND_CHECK").is_some() {
+            let mut packets = 0;
+            while let Ok(Ok(Some(AudioMsg::Packet(_)))) =
+                tokio::time::timeout(Duration::from_secs(5), rdesk_proto::read_msg::<_, AudioMsg>(&mut r, 1 << 16))
+                    .await
+            {
+                packets += 1;
+                if packets == 50 {
+                    break;
+                }
+            }
+            assert_eq!(packets, 50, "one second of sound");
+        }
+        let _ = w.finish();
+    }
+
+    let mut link = rdesk_client::terminal::open(c.conn.clone(), 100, 30, false, || {}).await.unwrap();
     let start = Instant::now();
     let mut output = String::new();
     let mut started = false;
     let mut exited = None;
-    let next = async |link: &mut rdesk_client::terminal::TerminalLink, phase: &str, seen: &str| {
-        match tokio::time::timeout(Duration::from_secs(45), link.rx.recv()).await {
+    let next =
+        async |link: &mut rdesk_client::terminal::TerminalLink, phase: &str, seen: &str| match tokio::time::timeout(
+            Duration::from_secs(45),
+            link.rx.recv(),
+        )
+        .await
+        {
             Ok(m) => m,
             Err(_) => panic!("the terminal went quiet ({phase}); so far: {seen:?}"),
-        }
-    };
+        };
     while !started {
         match next(&mut link, "starting", &output).await.expect("the terminal closed") {
             TermHost::Started { .. } => started = true,
@@ -97,7 +140,8 @@ async fn shell_runs_a_command() {
     }
     link.tx.send(TermClient::Input(b"exit\r".to_vec())).unwrap();
     while exited.is_none() {
-        match next(&mut link, "exiting", &output).await.expect("the terminal closed before saying how the shell ended") {
+        match next(&mut link, "exiting", &output).await.expect("the terminal closed before saying how the shell ended")
+        {
             TermHost::Exited(code) => exited = Some(code),
             TermHost::Output(b) => answer(&link, &b),
             other => panic!("unexpected {other:?}"),

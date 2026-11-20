@@ -45,9 +45,30 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let TermClient::Start { cols, rows } = expect_msg::<_, TermClient>(r, MAX_SMALL_MSG).await? else {
+    let first = expect_msg::<_, TermClient>(r, MAX_SMALL_MSG).await?;
+    serve_from(first, r, w).await
+}
+
+/// [`serve`], its first message already read.
+pub async fn serve_from<R, W>(first: TermClient, r: &mut R, w: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let Some((cols, rows, admin)) = first.start() else {
         return Err(anyhow!("a terminal starts with its size"));
     };
+    // This process runs the shell: as administrator only if it has those rights itself
+    // (the service starts it so; see `win::files::terminal_as_user`).
+    if admin && !(cfg!(windows) && crate::elevation::is_elevated()) {
+        let why = if cfg!(windows) {
+            "a terminal as administrator needs rdesk installed as a service on that computer"
+        } else {
+            "a terminal as administrator is only for Windows (use sudo)"
+        };
+        write_msg(w, &TermHost::Error(why.into())).await?;
+        return Ok(());
+    }
     let started = (|| {
         let pair = native_pty_system().openpty(size(cols, rows)).map_err(|e| anyhow!("opening a terminal: {e}"))?;
         let (name, cmd) = shell();
@@ -67,7 +88,8 @@ where
     let mut killer = child.clone_killer();
     // Resizing happens between awaits; the lock is never held across one.
     let master = std::sync::Mutex::new(master);
-    write_msg(w, &TermHost::Started { shell: name, user: user() }).await?;
+    let user = if admin { format!("{} (administrator)", user()) } else { user() };
+    write_msg(w, &TermHost::Started { shell: name, user }).await?;
 
     // The pty's blocking ends, on their own threads.
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -103,7 +125,7 @@ where
                 TermClient::Resize { cols, rows } => {
                     let _ = master.lock().unwrap().resize(size(cols, rows));
                 }
-                TermClient::Start { .. } => {}
+                TermClient::Start { .. } | TermClient::StartAdmin { .. } => {}
             }
         }
         anyhow::Ok(())

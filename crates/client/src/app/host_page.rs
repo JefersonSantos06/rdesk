@@ -765,6 +765,13 @@ impl HostPage {
                 ui.label("Clipboard");
                 ui.checkbox(&mut self.cfg.clipboard, "share text in both directions");
                 ui.end_row();
+                ui.label("Sound");
+                ui.checkbox(&mut self.cfg.audio, "send what this computer plays (with the picture)");
+                ui.end_row();
+                ui.label("Terminal");
+                ui.checkbox(&mut self.cfg.admin_terminal, "full control may open it as administrator")
+                    .on_hover_text("Windows, with rdesk installed: the signed-in person's administrator rights");
+                ui.end_row();
                 ui.label("Extra lock");
                 ui.checkbox(&mut self.cfg.require_local, "also ask for this computer's password or SSH key")
                     .on_hover_text("Besides the permission from the server (needs a password or key set above)");

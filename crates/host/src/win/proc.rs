@@ -13,9 +13,11 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
-    DuplicateTokenEx, GetTokenInformation, IsWellKnownSid, SECURITY_ATTRIBUTES, SecurityImpersonation,
-    SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_QUERY, TOKEN_USER, TokenPrimary, TokenSessionId, TokenUser,
-    WinLocalSystemSid,
+    CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation, IsWellKnownSid,
+    SECURITY_ATTRIBUTES, SecurityIdentification, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS,
+    TOKEN_DUPLICATE, TOKEN_ELEVATION_TYPE, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TOKEN_USER, TokenElevationType,
+    TokenElevationTypeFull, TokenElevationTypeLimited, TokenImpersonation, TokenLinkedToken, TokenPrimary,
+    TokenSessionId, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -94,6 +96,67 @@ pub fn user_token(session: u32) -> Result<OwnedHandle> {
         bail!("nobody is signed in on this computer");
     }
     Ok(owned(token))
+}
+
+/// The signed-in user's token with their administrator rights: under UAC, the elevated
+/// half of their split token (only SYSTEM gets it as a token that starts processes).
+/// Fails for someone who is not an administrator.
+pub fn admin_token(session: u32) -> Result<OwnedHandle> {
+    let token = user_token(session)?;
+    unsafe {
+        let mut kind: TOKEN_ELEVATION_TYPE = 0;
+        let mut len = 0u32;
+        if GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevationType,
+            (&mut kind as *mut TOKEN_ELEVATION_TYPE).cast(),
+            size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut len,
+        ) == 0
+        {
+            return Err(last_error("GetTokenInformation"));
+        }
+        match kind {
+            k if k == TokenElevationTypeLimited => {
+                let mut linked = TOKEN_LINKED_TOKEN { LinkedToken: null_mut() };
+                if GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenLinkedToken,
+                    (&mut linked as *mut TOKEN_LINKED_TOKEN).cast(),
+                    size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                    &mut len,
+                ) == 0
+                {
+                    return Err(last_error("getting the administrator token"));
+                }
+                Ok(owned(linked.LinkedToken))
+            }
+            k if k == TokenElevationTypeFull => Ok(token),
+            // No split token: UAC is off, or this is a standard user.
+            _ if is_admin(&token) => Ok(token),
+            _ => bail!("the person signed in on that computer is not an administrator"),
+        }
+    }
+}
+
+fn is_admin(token: &OwnedHandle) -> bool {
+    unsafe {
+        let mut dup: HANDLE = null_mut();
+        let access = TOKEN_QUERY | TOKEN_DUPLICATE;
+        if DuplicateTokenEx(token.as_raw_handle(), access, null(), SecurityIdentification, TokenImpersonation, &mut dup)
+            == 0
+        {
+            return false;
+        }
+        let dup = owned(dup);
+        let mut sid = [0u8; 68];
+        let mut size = sid.len() as u32;
+        if CreateWellKnownSid(WinBuiltinAdministratorsSid, null_mut(), sid.as_mut_ptr().cast(), &mut size) == 0 {
+            return false;
+        }
+        let mut member = 0;
+        CheckTokenMembership(dup.as_raw_handle(), sid.as_mut_ptr().cast(), &mut member) != 0 && member != 0
+    }
 }
 
 /// A started process; closing it does not kill it.

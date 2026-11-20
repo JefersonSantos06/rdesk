@@ -57,6 +57,7 @@ pub(crate) struct Server {
     /// Direct access is on: who may log in with this computer's own password or key alone.
     direct: Option<DirectConfig>,
     /// Run by the Windows service: it installs released versions by itself.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) agent: bool,
     /// The networks this computer is on ("local network" includes them).
     local_nets: crate::localnet::LocalNets,

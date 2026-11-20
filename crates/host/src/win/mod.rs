@@ -7,5 +7,6 @@ pub mod files;
 pub mod install;
 pub mod notice;
 pub mod proc;
+pub mod sas;
 pub mod service;
 pub mod update;

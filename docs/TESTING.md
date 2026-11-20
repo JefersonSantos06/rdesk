@@ -67,6 +67,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] `rdesk shell "PC"` num terminal: funciona e devolve o código de saída do shell.
 - [ ] A barra de aviso no host mostra "(terminal open)"; a atividade registra quem abriu.
 
+## Extras
+- [ ] Ctrl+Alt+Del (menu da sessão) num Windows com o serviço: abre a tela de segurança; na tela de bloqueio, leva à senha.
+- [ ] *Terminal (admin)*: `whoami /groups` mostra "Mandatory Label\High"; num usuário que não é administrador, a recusa aparece; com *full control* desligado ou a opção do host desligada, também.
+- [ ] Mac: liberar uma versão nova no Admin; o app baixa, troca o `rdesk.app` e reinicia sozinho (sem ninguém conectado).
+- [ ] Som: um vídeo tocando no host se ouve no cliente com atraso pequeno; *Sound* desligado para; host com *Sound* desligado avisa; sessão só de arquivos não pede som.
+- [ ] Som com o serviço do Windows (host como SYSTEM) e num Linux com PipeWire; Mac pede permissão de gravação na primeira vez.
+- [ ] Wayland (GNOME e KDE): primeira conexão mostra o pedido no host; aceitar dá imagem, mouse, teclado e texto (acentos); a segunda conexão não pergunta de novo.
+
 ## Instalação
 - [ ] `https://seu-servidor/download` mostra a versão liberada; o Windows baixa `rdesk@seu-servidor.exe` e o app já vem com o servidor preenchido.
 - [ ] *Install rdesk on this computer*: aparece em *Configurações → Aplicativos*; o Menu Iniciar abre o rdesk de `Program Files`; *Desinstalar* por lá remove tudo e devolve as configurações do host.

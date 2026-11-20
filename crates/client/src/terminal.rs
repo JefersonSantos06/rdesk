@@ -29,11 +29,19 @@ impl std::fmt::Debug for TermSlot {
     }
 }
 
-/// Open a terminal on an authenticated connection; `wake` runs when output arrives.
-pub async fn open(conn: Connection, cols: u16, rows: u16, wake: impl Fn() + Send + 'static) -> Result<TerminalLink> {
+/// Open a terminal on an authenticated connection (`admin`: with administrator rights, on
+/// Windows); `wake` runs when output arrives.
+pub async fn open(
+    conn: Connection,
+    cols: u16,
+    rows: u16,
+    admin: bool,
+    wake: impl Fn() + Send + 'static,
+) -> Result<TerminalLink> {
     let (mut w, mut r) = conn.open_bi().await?;
     write_msg(&mut w, &StreamOpen::Terminal).await?;
-    write_msg(&mut w, &TermClient::Start { cols, rows }).await?;
+    let start = if admin { TermClient::StartAdmin { cols, rows } } else { TermClient::Start { cols, rows } };
+    write_msg(&mut w, &start).await?;
     let (tx, mut out) = mpsc::unbounded_channel::<TermClient>();
     let (inc, rx) = mpsc::unbounded_channel::<TermHost>();
     tokio::spawn(async move {
