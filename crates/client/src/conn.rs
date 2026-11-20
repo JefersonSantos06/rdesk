@@ -90,8 +90,6 @@ pub enum UiEvent {
     Fatal(String),
     /// A terminal opened (or why not).
     Terminal(Result<crate::terminal::TermSlot, String>),
-    /// The host's sound plays (from which output), or why not.
-    Audio(Result<String, String>),
     /// Something to redraw (terminal output).
     Wake,
     Quit,
@@ -119,8 +117,6 @@ pub enum Cmd {
         /// With administrator rights (Windows hosts, full control).
         admin: bool,
     },
-    /// Play the host's sound, or stop it.
-    Sound(bool),
     Quit,
 }
 
@@ -745,7 +741,6 @@ async fn run_session(
         });
     }
     let mut transfer_id = 0u64;
-    let mut sound: Option<crate::audio::AudioLink> = None;
     let mut list_req = 0u32;
     let result = loop {
         tokio::select! {
@@ -786,13 +781,6 @@ async fn run_session(
                     Cmd::Pull { remote, local_dir } => {
                         transfer_id += 1;
                         spawn_pull(conn.clone(), remote, local_dir, transfer_id, notify.clone());
-                    }
-                    Cmd::Sound(false) => sound = None,
-                    Cmd::Sound(true) => {
-                        if sound.is_none() {
-                            let notify = notify.clone();
-                            sound = Some(crate::audio::start(conn.clone(), move |r| notify(UiEvent::Audio(r))));
-                        }
                     }
                     Cmd::OpenTerminal { cols, rows, admin } => {
                         let (conn, notify) = (conn.clone(), notify.clone());

@@ -226,8 +226,8 @@ pub async fn run(
                                     let _ = ack_tx.send(a.frame_id);
                                 }
                             }
-                            StreamOpen::File | StreamOpen::Terminal | StreamOpen::Audio => {
-                                return Err(anyhow!("file, terminal and audio streams must be bidirectional"));
+                            StreamOpen::File | StreamOpen::Terminal => {
+                                return Err(anyhow!("file and terminal streams must be bidirectional"));
                             }
                         }
                         Ok(())
@@ -246,14 +246,6 @@ pub async fn run(
         let conn = conn.clone();
         let inbox = shared.cfg.inbox_dir();
         let chosen_inbox = shared.cfg.inbox_dir.clone();
-        // Sound comes with the picture.
-        let audio_refused = if !access.screen {
-            Some("this session has no picture, so no sound")
-        } else if !shared.cfg.audio {
-            Some("this computer does not share its sound")
-        } else {
-            None
-        };
         // Administrator rights in a terminal: only with every other right too.
         let admin_refused = if !shared.cfg.admin_terminal {
             Some("this computer does not allow a terminal as administrator")
@@ -301,13 +293,6 @@ pub async fn run(
                                 reporter.terminal(-1);
                                 r2
                             }
-                            StreamOpen::Audio => match audio_refused {
-                                Some(why) => {
-                                    write_msg(&mut w, &rdesk_proto::AudioMsg::Error(why.into())).await?;
-                                    Ok(())
-                                }
-                                None => crate::audio::serve(&mut r, &mut w).await,
-                            },
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
                     }

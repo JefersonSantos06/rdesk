@@ -197,8 +197,7 @@ rdesk connect <host ID>@192.168.0.20     # computador não cadastrado, na LAN
 Ordem de autenticação: token de retomada → **tíquete do servidor** (pedido automaticamente) → se o computador tiver o cadeado extra: chave SSH (agente do 1Password; aprovação/Touch ID) → senha (`op read` ou prompt).
 
 Na janela:
-- **▼ rdesk** (topo) abre o menu: monitores, fps/qualidade, tela cheia, som, teclas do Mac, Ctrl+Alt+Del, terminal (e terminal como administrador, no Windows), arquivos.
-- O som do computador acessado toca aqui (desligue em *Sound*, no menu).
+- **▼ rdesk** (topo) abre o menu: monitores, fps/qualidade, tela cheia, teclas do Mac, Ctrl+Alt+Del, terminal (e terminal como administrador, no Windows), arquivos.
 - Arraste arquivos para a janela para enviá-los ao host (vão para `Downloads/rdesk`).
 - No Mac, por padrão, Cmd vira Ctrl, o Option esquerdo vira a tecla Windows e o Control vira Alt; o Option direito continua AltGr (`--no-swap-cmd-ctrl` desliga).
 - Minimizada, a janela pausa o vídeo; ao voltar, recebe a tela inteira de novo.
@@ -227,9 +226,8 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 - Com o app rodando como administrador no Windows (*Manage as administrator*), as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Send files…* no menu da sessão.
 - Tela de bloqueio/UAC do Windows e Ctrl+Alt+Del: só com o serviço instalado.
 - Wayland: imagem e input vão pelo portal do desktop; na primeira conexão alguém no computador precisa permitir (depois a permissão fica guardada, no GNOME 46+ e no KDE Plasma 6.1+). Ainda não testado num desktop de verdade: se der problema, `RDESK_WAYLAND=0` volta ao X11.
-- Som no Mac: macOS 14.6+ (pede permissão na primeira vez). O app do Mac exige macOS 14.2.
 - O cursor remoto não é desenhado na imagem; use o cursor local (posição é absoluta e sincronizada).
-- Captura via `xcap` (GDI/CGWindowList/X11): ~20–40 ms por frame em 1080p; DXGI/ScreenCaptureKit/H.264 são o próximo passo.
+- Sem áudio. Captura via `xcap` (GDI/CGWindowList/X11): ~20–40 ms por frame em 1080p; DXGI/ScreenCaptureKit/H.264 são o próximo passo.
 
 ## Desenvolvimento
 

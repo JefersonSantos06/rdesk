@@ -1,7 +1,6 @@
 //! rdesk host: everything that runs on the machine being controlled.
 
 pub mod admin;
-pub mod audio;
 pub mod capture;
 pub mod control;
 pub mod elevation;

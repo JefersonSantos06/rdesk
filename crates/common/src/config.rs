@@ -168,8 +168,6 @@ pub struct HostConfig {
     /// Windows: full-control sessions may open a terminal as administrator (the signed-in
     /// person's elevated rights, if they are an administrator).
     pub admin_terminal: bool,
-    /// Send what this computer plays to the session (with the picture).
-    pub audio: bool,
 }
 
 /// `[direct]` in host.toml: this computer's own password or SSH key open it without the
@@ -270,7 +268,6 @@ impl Default for HostConfig {
             enroll: EnrollConfig::default(),
             direct: DirectConfig::default(),
             admin_terminal: true,
-            audio: true,
         }
     }
 }

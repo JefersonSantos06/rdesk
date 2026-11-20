@@ -110,9 +110,6 @@ struct App {
     terminal_on_connect: bool,
     /// The terminal window's shell has administrator rights.
     terminal_admin: bool,
-    /// Play the host's sound; where it comes from (or why there is none).
-    sound: bool,
-    sound_status: Option<Result<String, String>>,
 }
 
 impl App {
@@ -148,8 +145,6 @@ impl App {
             terminal_open: false,
             terminal_on_connect: false,
             terminal_admin: false,
-            sound: true,
-            sound_status: None,
         }
     }
 
@@ -434,19 +429,6 @@ impl App {
             if ui.button("Refresh picture").clicked() {
                 self.send(Cmd::FullFrame);
             }
-            if self.access.screen {
-                let hover = match &self.sound_status {
-                    Some(Ok(device)) => format!("What that computer plays ({device})"),
-                    Some(Err(e)) => format!("No sound: {e}"),
-                    None => "What that computer plays".into(),
-                };
-                if ui.checkbox(&mut self.sound, "Sound").on_hover_text(hover).changed() {
-                    if !self.sound {
-                        self.sound_status = None;
-                    }
-                    self.send(Cmd::Sound(self.sound));
-                }
-            }
             ui.checkbox(&mut self.swap_cmd_ctrl, "Mac keys")
                 .on_hover_text("Cmd → Ctrl, left Option → Windows key, Control → Alt");
             if ui
@@ -674,12 +656,6 @@ impl ApplicationHandler<UiEvent> for App {
                     self.terminal_open = true;
                 }
             }
-            UiEvent::Audio(r) => {
-                if let Err(e) = &r {
-                    self.notice = Some((format!("Sound: {e}"), Instant::now()));
-                }
-                self.sound_status = Some(r);
-            }
             UiEvent::Terminal(Err(e)) => self.notice = Some((format!("Terminal: {e}"), Instant::now())),
             UiEvent::Status(s) => {
                 self.status = s;
@@ -709,10 +685,6 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Access(a) => {
                 self.access = a;
-                // Sound comes with the picture (asked again after each reconnection).
-                if a.screen && self.sound {
-                    self.send(Cmd::Sound(true));
-                }
                 if !a.screen {
                     // Files only: there is no picture; open the file panel.
                     self.menu_open = true;

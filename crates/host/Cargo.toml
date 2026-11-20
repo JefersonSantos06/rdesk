@@ -25,9 +25,6 @@ netwatch = "0.20"
 ipnet = "2"
 # Remote terminal: ConPTY on Windows, a pty elsewhere.
 portable-pty = "0.9"
-# Sound: what the computer plays (WASAPI loopback, PulseAudio monitor, CoreAudio tap), in Opus.
-cpal = { version = "0.18", features = ["pulseaudio"] }
-opus = "0.4"
 
 # Windows injects input with SendInput directly (scancodes), so enigo is only for macOS/Linux.
 [target.'cfg(not(windows))'.dependencies]

@@ -71,8 +71,6 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Ctrl+Alt+Del (menu da sessão) num Windows com o serviço: abre a tela de segurança; na tela de bloqueio, leva à senha.
 - [ ] *Terminal (admin)*: `whoami /groups` mostra "Mandatory Label\High"; num usuário que não é administrador, a recusa aparece; com *full control* desligado ou a opção do host desligada, também.
 - [ ] Mac: liberar uma versão nova no Admin; o app baixa, troca o `rdesk.app` e reinicia sozinho (sem ninguém conectado).
-- [ ] Som: um vídeo tocando no host se ouve no cliente com atraso pequeno; *Sound* desligado para; host com *Sound* desligado avisa; sessão só de arquivos não pede som.
-- [ ] Som com o serviço do Windows (host como SYSTEM) e num Linux com PipeWire; Mac pede permissão de gravação na primeira vez.
 - [ ] Wayland (GNOME e KDE): primeira conexão mostra o pedido no host; aceitar dá imagem, mouse, teclado e texto (acentos); a segunda conexão não pergunta de novo.
 
 ## Instalação

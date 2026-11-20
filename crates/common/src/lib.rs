@@ -2,7 +2,6 @@
 
 pub mod account;
 pub mod agent;
-pub mod audio;
 pub mod auth;
 pub mod clipboard;
 pub mod config;
