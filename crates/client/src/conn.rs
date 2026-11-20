@@ -165,6 +165,9 @@ pub enum Cmd {
         /// With administrator rights (Windows hosts, full control).
         admin: bool,
     },
+    /// Start receiving the remote screen (a session opened with `video: false`); it stays on
+    /// for the rest of the session, reconnects included.
+    ShowScreen,
     /// Try to connect again now: skips the wait between attempts, or starts over after a
     /// [`UiEvent::Fatal`].
     Reconnect,
@@ -275,6 +278,9 @@ pub struct ConnectOpts {
     pub transport: TransportTuning,
     pub net: NetworkConfig,
     pub clipboard: bool,
+    /// Receive the remote screen from the start. Without it the host captures nothing
+    /// until [`Cmd::ShowScreen`] (a terminal-only window).
+    pub video: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +396,7 @@ async fn reconnect_loop(
     let mut resume: Option<(SessionId, [u8; 32])> = None;
     let mut ticket: CachedTicket = None;
     let mut monitor = opts.monitor;
+    let mut video = opts.video;
     let mut failures = 0u32;
     let mut password_hint: Option<String> = None;
     loop {
@@ -401,6 +408,7 @@ async fn reconnect_loop(
             &mut resume,
             &mut ticket,
             &mut monitor,
+            &mut video,
             &mut password_hint,
             &mut cmd_rx,
             &view,
@@ -416,6 +424,7 @@ async fn reconnect_loop(
                     match cmd_rx.recv().await {
                         None | Some(Cmd::Quit) => return,
                         Some(Cmd::Reconnect) => break,
+                        Some(Cmd::ShowScreen) => video = true,
                         Some(_) => {}
                     }
                 }
@@ -449,6 +458,7 @@ async fn reconnect_loop(
                         c = cmd_rx.recv() => match c {
                             None | Some(Cmd::Quit) => return,
                             Some(Cmd::Reconnect) => break,
+                            Some(Cmd::ShowScreen) => video = true,
                             _ => {}
                         }
                     }
@@ -600,6 +610,7 @@ async fn once(
     resume: &mut Option<(SessionId, [u8; 32])>,
     ticket: &mut CachedTicket,
     monitor: &mut Option<u32>,
+    video: &mut bool,
     password_hint: &mut Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
@@ -723,7 +734,7 @@ async fn once(
 
     // The clipboard goes both ways: only with full control.
     let clipboard = opts.clipboard && access.input;
-    match run_session(&conn, ctrl_w, ctrl_r, monitor, cmd_rx, view, notify, clipboard, access.input).await {
+    match run_session(&conn, ctrl_w, ctrl_r, monitor, video, cmd_rx, view, notify, clipboard, access.input).await {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -756,6 +767,7 @@ async fn run_session(
     mut ctrl_w: SendStream,
     mut ctrl_r: RecvStream,
     monitor: &mut Option<u32>,
+    video: &mut bool,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
     notify: &Notify,
@@ -766,9 +778,6 @@ async fn run_session(
     let _ = input.set_priority(20);
     write_msg(&mut input, &StreamOpen::Input).await?;
     write_msg(&mut input, &InputEvent::ReleaseAll).await?;
-    let mut acks = conn.open_uni().await?;
-    let _ = acks.set_priority(20);
-    write_msg(&mut acks, &StreamOpen::Acks).await?;
 
     if let Some(m) = *monitor {
         write_msg(&mut ctrl_w, &ClientMsg::SelectMonitor { id: m }).await?;
@@ -793,8 +802,23 @@ async fn run_session(
         Ok(())
     });
 
-    // Ack writer.
+    // Ack writer. The host starts the picture when this stream opens, so it opens only once
+    // the screen is wanted. (Older hosts send frames regardless: without acks they stop
+    // after a couple, and the acks held here let them go on when the screen is asked for.)
+    let (want_video, video_wanted) = tokio::sync::oneshot::channel::<()>();
+    let mut want_video = Some(want_video);
+    if *video && let Some(tx) = want_video.take() {
+        let _ = tx.send(());
+    }
+    let ack_conn = conn.clone();
     tasks.spawn(async move {
+        if video_wanted.await.is_err() {
+            // The session is ending without the picture.
+            std::future::pending::<()>().await;
+        }
+        let mut acks = ack_conn.open_uni().await?;
+        let _ = acks.set_priority(20);
+        write_msg(&mut acks, &StreamOpen::Acks).await?;
         while let Some(id) = ack_rx.recv().await {
             write_msg(&mut acks, &FrameAck { frame_id: id }).await?;
         }
@@ -920,6 +944,12 @@ async fn run_session(
                     Cmd::Quit => break Ok(true),
                     // Already connected.
                     Cmd::Reconnect => {}
+                    Cmd::ShowScreen => {
+                        *video = true;
+                        if let Some(tx) = want_video.take() {
+                            let _ = tx.send(());
+                        }
+                    }
                     // View-only sessions: the host would drop it anyway.
                     Cmd::Input(_) if !input_allowed => {}
                     Cmd::Input(ev) => {

@@ -87,6 +87,9 @@ pub async fn run(
         epoch: 0,
     });
     let (ack_tx, ack_rx) = mpsc::unbounded_channel::<u64>();
+    // The picture starts when the client opens its acks stream: a client that only wants a
+    // terminal (or files) leaves it closed, and the screen is never captured.
+    let acks_opened = Arc::new(tokio::sync::Notify::new());
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<HostMsg>();
     let stats = Arc::new(std::sync::Mutex::new(VideoStats { frames: 0, bytes: 0 }));
 
@@ -207,6 +210,7 @@ pub async fn run(
     {
         let conn = conn.clone();
         let injector = injector.clone();
+        let acks_opened = acks_opened.clone();
         tasks.spawn(async move {
             loop {
                 let mut s = match conn.accept_uni().await {
@@ -215,6 +219,7 @@ pub async fn run(
                 };
                 let injector = injector.clone();
                 let ack_tx = ack_tx.clone();
+                let acks_opened = acks_opened.clone();
                 tokio::spawn(async move {
                     let r: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut s, MAX_SMALL_MSG).await? {
@@ -227,6 +232,7 @@ pub async fn run(
                                 }
                             }
                             StreamOpen::Acks => {
+                                acks_opened.notify_one();
                                 while let Some(a) = read_msg::<_, FrameAck>(&mut s, MAX_SMALL_MSG).await? {
                                     let _ = ack_tx.send(a.frame_id);
                                 }
@@ -327,12 +333,13 @@ pub async fn run(
         });
     }
 
-    // Video (not for files-only sessions).
+    // Video (not for files-only sessions), once the client wants the picture.
     if access.screen {
         let conn = conn.clone();
         let capturer = shared.capturer.clone();
         let stats = stats.clone();
         tasks.spawn(async move {
+            acks_opened.notified().await;
             video::run(conn, capturer, settings_rx, ack_rx, stats).await?;
             Ok("video")
         });

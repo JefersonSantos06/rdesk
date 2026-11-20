@@ -80,10 +80,12 @@ pub fn run(opts: ViewerOpts) -> Result<()> {
         })?;
     }
     let name = opts.connect.name.clone();
+    let video = opts.connect.video;
     let handle = conn::spawn(opts.connect, move |ev| {
         let _ = proxy.send_event(ev);
     });
     let mut app = App::new(handle, name, opts.swap_cmd_ctrl, opts.download_dir);
+    app.video = video;
     app.terminal_on_connect = opts.open_terminal;
     if opts.open_files {
         app.open_panel(Tab::Files);
@@ -149,11 +151,14 @@ enum Tool {
     Keys,
     Files,
     Terminal,
+    /// "Show screen", in a window that opened without the picture.
+    Screen,
 }
 
 impl Tool {
     fn icon(self) -> &'static str {
         match self {
+            Tool::Screen => icons::MONITOR,
             Tool::Monitor => icons::MONITOR,
             Tool::Quality => icons::SLIDERS_HORIZONTAL,
             Tool::Keys => icons::KEYBOARD,
@@ -169,6 +174,7 @@ impl Tool {
             Tool::Keys => t!("Keys", "Teclas"),
             Tool::Files => t!("Files", "Arquivos"),
             Tool::Terminal => t!("Terminal", "Terminal"),
+            Tool::Screen => t!("Show screen", "Mostrar tela"),
         }
     }
 }
@@ -256,6 +262,8 @@ struct App {
     stats: (u32, f32, f32, &'static str),
     /// What this session may do (from the host's answer).
     access: rdesk_proto::Access,
+    /// The remote screen is wanted (a terminal opens without it until "Show screen").
+    video: bool,
     /// Where the remote image is drawn, in egui points.
     image_rect: Option<egui::Rect>,
     pending_move: Option<(u16, u16)>,
@@ -324,6 +332,7 @@ impl App {
             active: 0,
             stats: (0, 0.0, 0.0, ""),
             access: rdesk_proto::Access::FULL,
+            video: true,
             image_rect: None,
             pending_move: None,
             pointer_inside: false,
@@ -378,6 +387,20 @@ impl App {
 
     fn host_name(&self) -> String {
         self.host.as_ref().map(|h| h.hostname.clone()).unwrap_or_else(|| self.name.clone())
+    }
+
+    /// The window shows the remote screen: the session may see it and it was wanted.
+    /// Otherwise the side panel is the whole window.
+    fn screen(&self) -> bool {
+        self.access.screen && self.video
+    }
+
+    /// Start the picture in a window that opened without it (it stays on from then on).
+    fn show_screen(&mut self) {
+        if self.access.screen && !self.video {
+            self.video = true;
+            self.send(Cmd::ShowScreen);
+        }
     }
 
     fn host_is_windows(&self) -> bool {
@@ -465,7 +488,7 @@ impl App {
 
     /// The toolbar's Files and Terminal buttons: open the panel there, or close it.
     fn toggle_panel(&mut self, tab: Tab) {
-        if self.access.screen && self.panel && self.tab == tab {
+        if self.screen() && self.panel && self.tab == tab {
             self.panel = false;
         } else {
             self.open_panel(tab);
@@ -473,7 +496,7 @@ impl App {
     }
 
     fn panel_shows(&self, tab: Tab) -> bool {
-        (self.panel || !self.access.screen) && self.tab == tab
+        (self.panel || !self.screen()) && self.tab == tab
     }
 
     fn list(&mut self, path: String) {
@@ -521,7 +544,7 @@ impl App {
     /// Where the keyboard goes, when a terminal could take it: `Some(true)` the terminal,
     /// `Some(false)` the remote screen.
     fn keyboard_target(&self) -> Option<bool> {
-        if !(self.access.screen && self.access.input && self.panel && self.tab == Tab::Terminal) {
+        if !(self.screen() && self.access.input && self.panel && self.tab == Tab::Terminal) {
             return None;
         }
         self.shells.iter().find(|s| s.id == self.shell_active && s.live()).map(|s| s.view.focused)
@@ -657,7 +680,7 @@ impl App {
         }
 
         let panel_frame = egui::Frame::new().fill(p.bg_alt).inner_margin(Margin::same(space::M as i8));
-        if self.access.screen {
+        if self.screen() {
             if self.panel {
                 egui::Panel::right("session-panel")
                     .resizable(true)
@@ -741,18 +764,20 @@ impl App {
     /// The toolbar buttons this session has.
     fn tools(&self) -> Vec<Tool> {
         let mut v = Vec::new();
-        if self.access.screen {
+        if self.screen() {
             v.push(Tool::Monitor);
             v.push(Tool::Quality);
             if self.access.input {
                 v.push(Tool::Keys);
             }
+        } else if self.access.screen {
+            v.push(Tool::Screen);
         }
         // Without a screen the panel is the window, and its tabs do this.
-        if self.access.screen && self.access.files {
+        if self.screen() && self.access.files {
             v.push(Tool::Files);
         }
-        if self.access.screen && self.access.terminal {
+        if self.screen() && self.access.terminal {
             v.push(Tool::Terminal);
         }
         v
@@ -870,6 +895,19 @@ impl App {
             RichText::new(ui::with_icon(tool.icon(), tool.label()))
         };
         let min = Vec2::new(CONTROL_H, CONTROL_H);
+        if tool == Tool::Screen {
+            let hover = t!(
+                "See and control that computer's screen. Until then it is not even captured.",
+                "Ver e controlar a tela desse computador. Até lá ela nem é capturada."
+            );
+            let r = ui.add(egui::Button::new(text).min_size(min));
+            let r =
+                if compact { r.on_hover_text(format!("{}\n{hover}", tool.label())) } else { r.on_hover_text(hover) };
+            if r.clicked() {
+                self.show_screen();
+            }
+            return;
+        }
         let tab = match tool {
             Tool::Files => Some(Tab::Files),
             Tool::Terminal => Some(Tab::Terminal),
@@ -1402,7 +1440,7 @@ impl App {
         let route = route_label(self.stats.3);
         items.push((t!("Route", "Rota"), if route.is_empty() { dash() } else { route.to_string() }));
         items.push((t!("Latency", "Latência"), if connected { format!("{} ms", self.stats.0) } else { dash() }));
-        if self.access.screen {
+        if self.screen() {
             items.push((
                 t!("Frames per second", "Quadros por segundo"),
                 if connected { format!("{:.0}", self.stats.1) } else { dash() },
@@ -1456,7 +1494,7 @@ impl App {
             Card::Lost { since: o.since.elapsed(), attempt: o.attempt, reason: o.reason.clone() }
         } else if !self.connected {
             Card::Connecting
-        } else if self.tex.is_none() && self.access.screen {
+        } else if self.tex.is_none() && self.screen() {
             Card::Waiting
         } else {
             return;
@@ -1897,7 +1935,8 @@ impl ApplicationHandler<UiEvent> for App {
                     g.window.focus_window();
                 }
                 match what {
-                    Raise::Window => {}
+                    // The app's "Connect" for a window that opened on a terminal.
+                    Raise::Window => self.show_screen(),
                     Raise::Files => {
                         self.open_panel(Tab::Files);
                         if !self.listing_pending {
@@ -1931,7 +1970,9 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Access(a) => {
                 self.access = a;
-                if !a.screen {
+                // Already on a terminal it opened with (or a reconnect): stay there.
+                let settled = self.panel && self.tab != Tab::Info && self.tabs().iter().any(|(t, _)| *t == self.tab);
+                if !self.screen() && !settled {
                     // No picture: the window is the panel, on what the session may do.
                     if a.files {
                         self.open_panel(Tab::Files);
@@ -2635,6 +2676,13 @@ pub(crate) fn gallery() -> Vec<crate::app::gallery::Screen> {
             a.access = rdesk_proto::Access::FILES;
             a
         }),
+        // Opened from the app's Terminal: full control, no picture until "Show screen".
+        s("session-terminal-start", || {
+            let mut a = App::sample().with_shells();
+            a.sample.picture = false;
+            a.video = false;
+            a
+        }),
     ]
 }
 
@@ -2661,6 +2709,26 @@ mod tests {
         assert_eq!(c("C:\\", '\\'), ["C:\\=C:\\"]);
         assert_eq!(c("~", '/'), ["~=~"]);
         assert_eq!(c("~/x", '/'), ["~=~", "x=~/x"]);
+    }
+
+    #[test]
+    fn terminal_window_shows_the_screen_on_request() {
+        let mut a = App::sample().with_shells();
+        a.video = false;
+        assert!(!a.screen(), "the terminal is the whole window");
+        assert_eq!(a.tools(), [Tool::Screen]);
+        assert!(a.panel_shows(Tab::Terminal));
+        a.show_screen();
+        assert!(a.screen(), "Show screen brings the picture");
+        assert!(a.tools().contains(&Tool::Monitor) && !a.tools().contains(&Tool::Screen));
+        assert!(a.panel_shows(Tab::Terminal), "the terminal stays open beside it");
+
+        // Without the right to see the screen there is nothing to ask for.
+        let mut v = App::sample().with_shells();
+        v.video = false;
+        v.access = rdesk_proto::Access::TERMINAL;
+        v.show_screen();
+        assert!(!v.screen() && v.tools().is_empty());
     }
 
     #[test]
