@@ -73,6 +73,7 @@ fn remember_admin() {
 pub(super) enum AdminAnswer {
     Confirmed,
     /// Windows: this app must run as administrator (it can restart itself so).
+    #[cfg_attr(not(windows), allow(dead_code))]
     NeedsRestart,
     // Windows does not refuse: the app restarts as administrator instead.
     #[cfg_attr(windows, allow(dead_code))]

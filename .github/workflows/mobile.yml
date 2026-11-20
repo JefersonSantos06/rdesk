@@ -1,7 +1,9 @@
 name: Mobile
 
-# The phone app, on branch pushes that touch it: analyze the Dart code and build a debug
-# APK. (The iPhone build runs only for releases: macOS minutes are expensive.)
+# The phone app, on branch pushes that touch it: analyze the Dart code and build one APK
+# (arm64, release, signed with the debug key: no secrets here). The other processors and
+# the iPhone build run only for releases: each one is another full Rust build, and macOS
+# minutes are expensive.
 on:
   push:
     branches: ["**"]
@@ -29,15 +31,19 @@ jobs:
           cache: true
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
+          # Cargokit builds the Rust side into Flutter's build folder, not target/.
+          workspaces: ". -> mobile/build/rust_lib_rdesk/build"
       - name: Analyze
         working-directory: mobile
         run: |
           flutter pub get
           flutter analyze lib
-      - name: Build a debug APK
+      # A debug build would compile the Rust side for arm64, x86 and x64 (cargokit always
+      # adds the emulators' to debug builds); a release build for one processor is one.
+      - name: Build the APK (arm64)
         working-directory: mobile
-        run: flutter build apk --debug
+        run: flutter build apk --release --target-platform android-arm64
