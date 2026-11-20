@@ -95,7 +95,21 @@ fn forget_enrollment() {
     }
 }
 
-/// Remove this computer from the server (only who registered it can) and forget it here.
+/// A presence proof for `user_id` on this computer (see `rdesk_proto::api::HereProof`): its
+/// host key signs it, or, when the service runs the host (the key is for administrators
+/// only), the service does. The app asks the system's administrator before asking for
+/// [`Here::Manage`](rdesk_proto::api::Here::Manage).
+pub async fn here_proof(user_id: i64, scope: rdesk_proto::api::Here) -> Result<String> {
+    #[cfg(windows)]
+    if config::service_mode() {
+        return crate::ipc::here(user_id, scope).await;
+    }
+    let id = HostIdentity::load()?;
+    Ok(rdesk_common::account::here_proof(&id.secret_key(), user_id, scope))
+}
+
+/// Remove this computer from the server (who registered it, or whoever manages it here)
+/// and forget it here.
 pub async fn unregister(session: &Session) -> Result<()> {
     let Some(reg) = Registration::load() else {
         bail!(t!("this computer is not registered", "este computador não está cadastrado"))
@@ -107,7 +121,13 @@ pub async fn unregister(session: &Session) -> Result<()> {
             reg.server
         ));
     }
-    match session.api()?.remove_machine(reg.machine_id).await {
+    // Someone else's computer: they may remove it at the computer itself (the app asked for
+    // the administrator first). Without the proof, only its owner may.
+    let api = match here_proof(session.user.id, rdesk_proto::api::Here::Manage).await {
+        Ok(p) => session.api()?.with_here(p),
+        Err(_) => session.api()?,
+    };
+    match api.remove_machine(reg.machine_id).await {
         Ok(()) => {}
         // Already gone on the server: just forget it here.
         Err(e) if format!("{e:#}").contains("no such computer") => {}

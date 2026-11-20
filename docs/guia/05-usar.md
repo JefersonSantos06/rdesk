@@ -25,6 +25,9 @@ compartilhados com você e os salvos neste aparelho para a rede local.
   menu **⋯** (copiar o ID, opções de login). Numa janela pequena, use o **>** da linha para
   ver os detalhes.
 - **F2** renomeia (nos seus) e **Delete** descadastra (só o dono, com confirmação).
+- O computador em que você está vem **primeiro**, com o selo **Este computador**: dele não
+  se abre a tela nem os arquivos, só o terminal (veja
+  [No próprio computador](06-compartilhar.md#no-próprio-computador)).
 
 Se a janela de um computador já estiver aberta, **Mostrar** (no lugar de *Conectar*) traz
 ela para a frente. **Arquivos** e **Terminal** também abrem direto nela.

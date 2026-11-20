@@ -9,9 +9,9 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use base64::Engine as _;
 use rdesk_proto::api::{
-    AgentSync, AgentSyncReply, GroupRef, HistoryEntry, Machine, Managers, RegisterMachine, Registered, Revocation,
-    SetManagers, SetShares, ShareRole, Shares, TicketRequest, TicketResponse, UpdateMachine, UserRef, Visibility,
-    register_message,
+    AgentSync, AgentSyncReply, GroupRef, HEADER_HERE, HERE_MAX_AGE, Here, HereProof, HistoryEntry, Machine, Managers,
+    RegisterMachine, Registered, Revocation, SetManagers, SetShares, ShareRole, Shares, TicketRequest, TicketResponse,
+    UpdateMachine, UserRef, Visibility, register_message,
 };
 use rdesk_proto::ticket::{SignedTicket, TICKET_MAX_SECS, TicketClaims};
 
@@ -66,10 +66,65 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         direct: m.direct,
         version: m.version.clone(),
         ring: m.ring,
+        here: None,
     })
 }
 
-/// Only who registered it (unregister, choose managers).
+/// A presence proof that came with the request (`x-rdesk-here`), its signature and age
+/// checked: the app runs on that computer. Whom it is for and which computer is checked
+/// per request ([`Presence::on`]).
+pub struct Presence(Result<Option<HereProof>, String>);
+
+impl axum::extract::FromRequestParts<Shared> for Presence {
+    type Rejection = Error;
+
+    async fn from_request_parts(parts: &mut Parts, _: &Shared) -> Result<Self, Self::Rejection> {
+        let Some(v) = parts.headers.get(HEADER_HERE) else { return Ok(Self(Ok(None))) };
+        Ok(Self(check_proof(v.to_str().unwrap_or_default(), now())))
+    }
+}
+
+fn check_proof(header: &str, now: i64) -> Result<Option<HereProof>, String> {
+    let p = HereProof::parse(header).ok_or("malformed presence proof")?;
+    if (now - p.timestamp).abs() > HERE_MAX_AGE {
+        return Err("this computer's clock is off by more than 5 minutes".into());
+    }
+    let key = iroh_base::PublicKey::from_bytes(&p.endpoint).map_err(|_| "invalid host ID in the presence proof")?;
+    key.verify(&p.signed_message(), &iroh_base::Signature::from_bytes(&p.signature))
+        .map_err(|_| "the presence proof was not signed by that computer")?;
+    Ok(Some(p))
+}
+
+impl Presence {
+    /// What the proof allows `user` on `m` (`None`: no proof, or one for someone or
+    /// somewhere else).
+    pub fn on(&self, user: &User, m: &MachineRow) -> Option<Here> {
+        let p = self.0.as_ref().ok()?.as_ref()?;
+        (p.user_id == user.id && hex::encode(p.endpoint) == m.endpoint_id).then_some(p.scope)
+    }
+
+    /// A refusal, with why a proof that came along did not count.
+    fn refuse(&self, msg: &str) -> Error {
+        match &self.0 {
+            Err(p) => err(StatusCode::FORBIDDEN, format!("{msg} ({p})")),
+            Ok(_) => err(StatusCode::FORBIDDEN, msg),
+        }
+    }
+}
+
+/// `user`'s view of `m`, with what the proof gives them there.
+fn view_here(st: &Shared, m: &MachineRow, user: &User, here: &Presence) -> Result<Machine, Error> {
+    let mut v = view(st, m, Some(user.id))?;
+    v.here = here.on(user, m);
+    Ok(v)
+}
+
+/// Marks the audit line when only the presence proof allowed the change.
+fn at_the_computer(by_presence: bool) -> &'static str {
+    if by_presence { " (at the computer)" } else { "" }
+}
+
+/// Only who registered it (choose managers).
 fn owned(st: &Shared, id: i64, user: &User) -> Result<MachineRow, Error> {
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
     if m.owner_id != user.id {
@@ -78,21 +133,49 @@ fn owned(st: &Shared, id: i64, user: &User) -> Result<MachineRow, Error> {
     Ok(m)
 }
 
-/// The owner or a co-manager (rename, visibility, sharing, history).
-fn managed(st: &Shared, id: i64, user: &User) -> Result<MachineRow, Error> {
+/// Who registered it, or whoever manages it at the computer itself (unregister). Also
+/// says whether only the presence proof allowed it.
+fn owned_or_here(st: &Shared, id: i64, user: &User, here: &Presence) -> Result<(MachineRow, bool), Error> {
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
-    if !st.db.can_manage(user.id, &m)? {
-        return Err(err(StatusCode::FORBIDDEN, "only who registered this computer and its managers can change it"));
+    if m.owner_id == user.id {
+        return Ok((m, false));
     }
-    Ok(m)
+    if here.on(user, &m) == Some(Here::Manage) {
+        return Ok((m, true));
+    }
+    Err(here.refuse("only who registered this computer can do this"))
 }
 
-/// `GET /api/machines`: the computers this user may access, plus their own.
-pub async fn list(State(st): State<Shared>, Authed(s): Authed) -> Result<Json<Vec<Machine>>, Error> {
+/// The owner, a co-manager, or whoever manages it at the computer itself (rename,
+/// visibility, sharing, history). Also says whether only the presence proof allowed it.
+fn managed(st: &Shared, id: i64, user: &User, here: &Presence) -> Result<(MachineRow, bool), Error> {
+    let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
+    if st.db.can_manage(user.id, &m)? {
+        return Ok((m, false));
+    }
+    if here.on(user, &m) == Some(Here::Manage) {
+        return Ok((m, true));
+    }
+    Err(here.refuse("only who registered this computer and its managers can change it"))
+}
+
+/// Who may see who it is shared with and who manages it: whoever may reach it, manage it,
+/// or is at the computer.
+fn seen(st: &Shared, id: i64, user: &User, here: &Presence) -> Result<MachineRow, Error> {
+    let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
+    if st.db.can_manage(user.id, &m)? || st.db.can_access(user.id, &m)? || here.on(user, &m).is_some() {
+        return Ok(m);
+    }
+    Err(here.refuse("this computer is not shared with you"))
+}
+
+/// `GET /api/machines`: the computers this user may access, plus their own, plus the one
+/// the app runs on (with a presence proof), whoever registered it.
+pub async fn list(State(st): State<Shared>, Authed(s): Authed, here: Presence) -> Result<Json<Vec<Machine>>, Error> {
     let mut out = Vec::new();
     for m in st.db.machines()? {
-        if m.owner_id == s.user.id || st.db.can_access(s.user.id, &m)? {
-            out.push(view(&st, &m, Some(s.user.id))?);
+        if m.owner_id == s.user.id || st.db.can_access(s.user.id, &m)? || here.on(&s.user, &m).is_some() {
+            out.push(view_here(&st, &m, &s.user, &here)?);
         }
     }
     Ok(Json(out))
@@ -139,40 +222,54 @@ pub async fn register(
 pub async fn update(
     State(st): State<Shared>,
     Authed(s): Authed,
+    here: Presence,
     Path(id): Path<i64>,
     Json(req): Json<UpdateMachine>,
 ) -> Result<Json<Machine>, Error> {
-    let m = managed(&st, id, &s.user)?;
+    let (m, by_presence) = managed(&st, id, &s.user, &here)?;
     if let Some(n) = &req.name {
         st.db.rename_machine(id, n)?;
+        if by_presence {
+            st.db.audit(Some(s.user.id), "machine-renamed", &format!("{} → {n} (at the computer)", m.name));
+        }
     }
     if let Some(v) = req.visibility {
         let before = st.db.snapshot(Some(&[id]))?;
         st.db.set_visibility(id, v)?;
         let touched = st.db.revoke_lost(before)?;
         st.wake(&touched);
-        st.db.audit(Some(s.user.id), "machine-visibility", &format!("{} → {v:?}", m.name));
+        st.db.audit(
+            Some(s.user.id),
+            "machine-visibility",
+            &format!("{} → {v:?}{}", m.name, at_the_computer(by_presence)),
+        );
     }
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
-    Ok(Json(view(&st, &m, Some(s.user.id))?))
+    Ok(Json(view_here(&st, &m, &s.user, &here)?))
 }
 
 /// `DELETE /api/machines/{id}`: unregister (the host stops being reachable through the server).
-pub async fn remove(State(st): State<Shared>, Authed(s): Authed, Path(id): Path<i64>) -> Result<StatusCode, Error> {
-    let m = owned(&st, id, &s.user)?;
+pub async fn remove(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    here: Presence,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, Error> {
+    let (m, by_presence) = owned_or_here(&st, id, &s.user, &here)?;
     st.db.remove_machine(id)?;
     st.wake(&[id]);
-    st.db.audit(Some(s.user.id), "machine-unregistered", &m.name);
+    st.db.audit(Some(s.user.id), "machine-unregistered", &format!("{}{}", m.name, at_the_computer(by_presence)));
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/machines/{id}/shares`.
+/// `GET /api/machines/{id}/shares`: for whoever may reach it, manage it, or is at it.
 pub async fn get_shares(
     State(st): State<Shared>,
     Authed(s): Authed,
+    here: Presence,
     Path(id): Path<i64>,
 ) -> Result<Json<Shares>, Error> {
-    managed(&st, id, &s.user)?;
+    seen(&st, id, &s.user, &here)?;
     let (users, groups) = st.db.shares(id)?;
     Ok(Json(shares_view(&st, &users, &groups)))
 }
@@ -191,10 +288,11 @@ pub(crate) fn shares_view(st: &Shared, users: &[(i64, ShareRole)], groups: &[(i6
 pub async fn set_shares(
     State(st): State<Shared>,
     Authed(s): Authed,
+    here: Presence,
     Path(id): Path<i64>,
     Json(req): Json<SetShares>,
 ) -> Result<Json<Shares>, Error> {
-    let m = managed(&st, id, &s.user)?;
+    let (m, by_presence) = managed(&st, id, &s.user, &here)?;
     for (u, _) in &req.users {
         st.db.user(*u)?.ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("no user {u}")))?;
     }
@@ -208,21 +306,33 @@ pub async fn set_shares(
     st.db.audit(
         Some(s.user.id),
         "machine-shared",
-        &format!("{}: {} user(s), {} group(s)", m.name, req.users.len(), req.groups.len()),
+        &format!(
+            "{}: {} user(s), {} group(s){}",
+            m.name,
+            req.users.len(),
+            req.groups.len(),
+            at_the_computer(by_presence)
+        ),
     );
-    get_shares(State(st), Authed(s), Path(id)).await
+    let (users, groups) = st.db.shares(id)?;
+    Ok(Json(shares_view(&st, &users, &groups)))
 }
 
-/// `GET /api/machines/{id}/managers` (owner only).
+fn managers_view(st: &Shared, id: i64) -> Result<Managers, Error> {
+    let users =
+        st.db.managers(id)?.into_iter().filter_map(|u| st.db.user(u).ok().flatten()).map(|u| user_ref(&u)).collect();
+    Ok(Managers { users })
+}
+
+/// `GET /api/machines/{id}/managers`: for whoever may reach it, manage it, or is at it.
 pub async fn get_managers(
     State(st): State<Shared>,
     Authed(s): Authed,
+    here: Presence,
     Path(id): Path<i64>,
 ) -> Result<Json<Managers>, Error> {
-    owned(&st, id, &s.user)?;
-    let users =
-        st.db.managers(id)?.into_iter().filter_map(|u| st.db.user(u).ok().flatten()).map(|u| user_ref(&u)).collect();
-    Ok(Json(Managers { users }))
+    seen(&st, id, &s.user, &here)?;
+    Ok(Json(managers_view(&st, id)?))
 }
 
 /// `PUT /api/machines/{id}/managers` (owner only): who else may manage it.
@@ -242,18 +352,20 @@ pub async fn set_managers(
     let touched = st.db.revoke_lost(before)?;
     st.wake(&touched);
     st.db.audit(Some(s.user.id), "machine-managers", &format!("{}: {} manager(s)", m.name, users.len()));
-    get_managers(State(st), Authed(s), Path(id)).await
+    Ok(Json(managers_view(&st, id)?))
 }
 
-/// `GET /api/machines/{id}/history`: the last sessions (managers, and system admins).
+/// `GET /api/machines/{id}/history`: the last sessions (managers, whoever manages it at the
+/// computer, and system admins).
 pub async fn history(
     State(st): State<Shared>,
     Authed(s): Authed,
+    here: Presence,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<HistoryEntry>>, Error> {
     let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
-    if !s.user.is_admin && !st.db.can_manage(s.user.id, &m)? {
-        return Err(err(StatusCode::FORBIDDEN, "only who manages this computer can see its history"));
+    if !s.user.is_admin && !st.db.can_manage(s.user.id, &m)? && here.on(&s.user, &m) != Some(Here::Manage) {
+        return Err(here.refuse("only who manages this computer can see its history"));
     }
     Ok(Json(st.db.history(id, 200)?))
 }
@@ -363,4 +475,37 @@ pub async fn users(State(st): State<Shared>, _: Authed) -> Result<Json<Vec<UserR
 /// Visibility as text for logs and the CLI.
 pub fn visibility_label(v: Visibility) -> &'static str {
     crate::access::visibility_str(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proof(key: &iroh_base::SecretKey, scope: Here, user_id: i64, timestamp: i64) -> HereProof {
+        let endpoint = *key.public().as_bytes();
+        let sig = key.sign(&HereProof::message(scope, user_id, &endpoint, timestamp));
+        HereProof { scope, user_id, timestamp, endpoint, signature: sig.to_bytes() }
+    }
+
+    #[test]
+    fn presence_proofs_are_checked() {
+        let key = iroh_base::SecretKey::generate();
+        let t = 1_700_000_000;
+        let good = proof(&key, Here::Manage, 7, t);
+        assert_eq!(check_proof(&good.to_header(), t + 10), Ok(Some(good.clone())));
+        // Too old, or from the future.
+        assert!(check_proof(&good.to_header(), t + HERE_MAX_AGE + 1).unwrap_err().contains("clock"));
+        assert!(check_proof(&good.to_header(), t - HERE_MAX_AGE - 1).is_err());
+        // Someone changed what it says (manage instead of view, another person).
+        let view = proof(&key, Here::View, 7, t);
+        let forged = HereProof { scope: Here::Manage, ..view };
+        assert!(check_proof(&forged.to_header(), t).unwrap_err().contains("not signed"));
+        let other = HereProof { user_id: 8, ..good.clone() };
+        assert!(check_proof(&other.to_header(), t).is_err());
+        // Signed by another computer's key.
+        let stranger = iroh_base::SecretKey::generate();
+        let claimed = HereProof { endpoint: *key.public().as_bytes(), ..proof(&stranger, Here::Manage, 7, t) };
+        assert!(check_proof(&claimed.to_header(), t).is_err());
+        assert!(check_proof("nonsense", t).is_err());
+    }
 }

@@ -21,11 +21,12 @@ use rdesk_host::admin::{self, CheckLine};
 use rdesk_host::control::HostEvent;
 use rdesk_host::ipc::RemoteHost;
 use rdesk_host::{HostHandle, HostState, HostStatus, Reporter, RunOpts};
-use rdesk_proto::api::Visibility;
+use rdesk_proto::api::{Machine, Shares, UserRef, Visibility};
 use ssh_key::PublicKey;
 use zeroize::Zeroizing;
 
 use super::autostart;
+use super::presence::{self, AdminGate, GateEvent};
 use crate::ui::{self, Tone, icons, space};
 
 /// The page's content is at most this wide (lines stay readable on a large window).
@@ -68,7 +69,12 @@ enum Dialog {
     UninstallService,
     /// Who is connected.
     Disconnect(String),
+    /// Windows: unregistering someone else's computer here needs the app as administrator.
+    RestartAsAdmin,
 }
+
+/// Who it is shared with and who manages it (for the registration row), by machine id.
+type AccessInfo = (i64, Result<(Shares, Vec<UserRef>), String>);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Tab {
@@ -82,6 +88,9 @@ enum Tab {
 /// Something a click asks for, done after drawing (closures only record it).
 enum Act {
     GoComputers,
+    /// "Manage access" for this computer (on the Computers page).
+    ManageAccess,
+    AskUnregister,
     Tab(Tab),
     Open(Dialog),
     AddKey,
@@ -140,6 +149,15 @@ pub(super) struct HostPage {
     pub(super) go_to: Option<super::Page>,
     /// Ask the shell to quit (after starting an elevated copy).
     pub(super) quit_requested: bool,
+    /// This computer as the server lists it for whoever is signed in (set by the window).
+    pub(super) this_machine: Option<Machine>,
+    /// Who it is shared with, loaded now and then, and when.
+    access: Option<(AccessInfo, Instant)>,
+    access_job: Option<Receiver<AccessInfo>>,
+    /// "Manage access" was clicked: the window opens it on the Computers page.
+    pub(super) manage_access: Option<Machine>,
+    /// Unregistering it as someone else's: waits for an administrator.
+    gate: AdminGate<()>,
     #[cfg(test)]
     sample: Option<Sample>,
 }
@@ -195,6 +213,11 @@ impl HostPage {
             toast: None,
             go_to: None,
             quit_requested: false,
+            this_machine: None,
+            access: None,
+            access_job: None,
+            manage_access: None,
+            gate: AdminGate::new(),
             #[cfg(test)]
             sample: None,
         }
@@ -305,6 +328,86 @@ impl HostPage {
     /// The host ID, as clients enter it.
     pub(super) fn fingerprint_text(&self) -> Option<String> {
         self.fingerprint.or(self.status().fingerprint).map(|f| format_host_id(&f))
+    }
+
+    /// This computer's host ID, to find it in the Computers list.
+    pub(super) fn this_id(&self) -> Option<String> {
+        self.fingerprint_text()
+    }
+
+    /// "name on server" when registered.
+    pub(super) fn registration_text(&self) -> Option<String> {
+        self.registered_as(&self.status())
+    }
+
+    /// From the Computers page: register it.
+    pub(super) fn ask_register(&mut self) {
+        if !self.is_registered(&self.status()) {
+            self.dialog = Some(Dialog::Register { error: None });
+        }
+    }
+
+    /// From the Computers page, or this one: unregister it (as someone else's computer,
+    /// once an administrator confirmed).
+    pub(super) fn ask_unregister(&mut self, ctx: &egui::Context) {
+        let needed = self.this_machine.as_ref().and_then(presence::remove_scope).is_some();
+        if self.gate.request(ctx, needed, ()).is_some() {
+            self.open_unregister();
+        }
+    }
+
+    fn open_unregister(&mut self) {
+        if let Some(name) = self.registered_as(&self.status()) {
+            self.dialog = Some(Dialog::Unregister(name));
+        }
+    }
+
+    fn poll_gate(&mut self) {
+        match self.gate.poll() {
+            GateEvent::Nothing => {}
+            GateEvent::Go(()) => self.open_unregister(),
+            GateEvent::NeedsRestart => self.dialog = Some(Dialog::RestartAsAdmin),
+            GateEvent::Refused(e) => self.notify(e, true),
+        }
+    }
+
+    /// Who it is shared with and who manages it, read again every 15 s while shown.
+    fn load_access(&mut self) {
+        if let Some(rx) = &self.access_job
+            && let Ok(info) = rx.try_recv()
+        {
+            self.access_job = None;
+            self.access = Some((info, Instant::now()));
+        }
+        let Some(m) = &self.this_machine else {
+            self.access = None;
+            return;
+        };
+        let fresh = self.access.as_ref().is_some_and(|((id, _), at)| *id == m.id && at.elapsed().as_secs() < 15);
+        if fresh || self.access_job.is_some() {
+            return;
+        }
+        let Some(s) = Session::load() else { return };
+        let (id, scope) = (m.id, presence::view_scope(m));
+        let (tx, rx) = channel();
+        self.rt.spawn(async move {
+            let r = async {
+                let api = presence::api(&s, scope).await?;
+                let shares = api.shares(id).await?;
+                let managers = api.managers(id).await?.users;
+                anyhow::Ok((shares, managers))
+            }
+            .await
+            .map_err(|e| format!("{e:#}"));
+            let _ = tx.send((id, r));
+        });
+        self.access_job = Some(rx);
+    }
+
+    /// What the registration row says about who may reach it.
+    fn access_of_this(&self) -> Option<&Result<(Shares, Vec<UserRef>), String>> {
+        let m = self.this_machine.as_ref()?;
+        self.access.as_ref().filter(|((id, _), _)| *id == m.id).map(|((_, r), _)| r)
     }
 
     pub(super) fn start(&mut self) {
@@ -473,6 +576,8 @@ impl HostPage {
     fn act(&mut self, ctx: &egui::Context, a: Act) {
         match a {
             Act::GoComputers => self.go_to = Some(super::Page::Computers),
+            Act::ManageAccess => self.manage_access = self.this_machine.clone(),
+            Act::AskUnregister => self.ask_unregister(ctx),
             Act::Tab(t) => self.tab = t,
             Act::Open(d) => self.dialog = Some(d),
             Act::AddKey => self.open_add_key(),
@@ -627,6 +732,14 @@ impl HostPage {
     pub(super) fn show(&mut self, ui: &mut Ui) {
         let st = self.status();
         let ctx = ui.ctx().clone();
+        self.poll_gate();
+        #[cfg(test)]
+        let live = self.sample.is_none();
+        #[cfg(not(test))]
+        let live = true;
+        if live {
+            self.load_access();
+        }
         if self.cfg != self.saved_cfg
             && let Some(a) = self.pending_bar(ui)
         {
@@ -956,6 +1069,11 @@ impl HostPage {
         let n_keys = self.keys.len();
         let is_reg = self.is_registered(st);
         let direct = self.saved_cfg.direct.is_on(is_reg);
+        let this = self.this_machine.clone();
+        let access = self.access_of_this().cloned();
+        // Unknown (not listed yet, another server): as before, the server decides.
+        let can_unregister = this.as_ref().is_none_or(|m| m.is_owner || m.here.is_some());
+        let gate_busy = self.gate.busy();
         let mut act = None;
         ui::card(ui, |ui| {
             ui::section(ui, t!("Access setup", "Configuração do acesso"));
@@ -991,20 +1109,23 @@ impl HostPage {
                                     .wrap(),
                                 );
                                 ui::caption(ui, &status);
-                                who_may_reach(ui)
+                                who_here(ui, this.as_ref(), access.as_ref())
                             })
                             .inner
                         },
                         |ui| {
-                            if reg_busy {
+                            if reg_busy || gate_busy {
                                 ui.spinner();
-                            } else if ui::secondary(ui, t!("Unregister…", "Descadastrar…")).clicked() {
-                                act = Some(Act::Open(Dialog::Unregister(name.clone())));
+                            } else if can_unregister && ui::secondary(ui, t!("Unregister…", "Descadastrar…")).clicked()
+                            {
+                                act = Some(Act::AskUnregister);
                             }
                         },
                     );
-                    if left {
-                        act = Some(Act::GoComputers);
+                    match left {
+                        WhoClick::Nothing => {}
+                        WhoClick::Computers => act = Some(Act::GoComputers),
+                        WhoClick::Manage => act = Some(Act::ManageAccess),
                     }
                 }
                 (None, Some(msg)) => {
@@ -2289,6 +2410,26 @@ impl HostPage {
                     keep = false;
                 }
             }
+            Dialog::RestartAsAdmin => {
+                let (title, body) = presence::restart_question();
+                let r = ui::confirm(
+                    ctx,
+                    "host-admin",
+                    title,
+                    body,
+                    t!("Open as administrator", "Abrir como administrador"),
+                    false,
+                );
+                if let Some(yes) = r {
+                    keep = false;
+                    if yes {
+                        match autostart::restart_as_admin(&self.exe) {
+                            Ok(()) => self.quit_requested = true,
+                            Err(e) => self.notify(format!("{e:#}"), true),
+                        }
+                    }
+                }
+            }
             Dialog::UninstallService => {
                 let r = ui::confirm(
                     ctx,
@@ -2400,6 +2541,72 @@ fn who_may_reach(ui: &mut Ui) -> bool {
         ui.add(egui::Link::new(RichText::new(t!("Computers", "Computadores")).size(ui::size::SMALL))).clicked()
     })
     .inner
+}
+
+/// What was clicked in [`who_here`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhoClick {
+    Nothing,
+    Computers,
+    Manage,
+}
+
+/// Under "Registered as": whose it is, who manages it and who it is shared with, and
+/// "Manage access" for who may change it (here: anyone signed in, as administrator).
+/// Before the server listed it, the link to the Computers page.
+fn who_here(ui: &mut Ui, m: Option<&Machine>, access: Option<&Result<(Shares, Vec<UserRef>), String>>) -> WhoClick {
+    let Some(m) = m else {
+        return if who_may_reach(ui) { WhoClick::Computers } else { WhoClick::Nothing };
+    };
+    let p = ui::pal(ui);
+    let small = |ui: &mut Ui, text: &str| {
+        ui.add(egui::Label::new(RichText::new(text).size(ui::size::SMALL).color(p.muted)).wrap());
+    };
+    let person = |u: &UserRef| super::access::person_label(u).to_string();
+    small(
+        ui,
+        &if m.is_owner {
+            t!("Owner: you", "Dono: você").to_string()
+        } else {
+            tf!("Owner: {}", "Dono: {}", m.owner.email)
+        },
+    );
+    match access {
+        None => small(ui, t!("Loading who may reach it…", "Carregando quem pode acessá-lo…")),
+        Some(Err(e)) => {
+            small(ui, &tf!("Cannot load who may reach it: {e}", "Não foi possível carregar quem o acessa: {e}"))
+        }
+        Some(Ok((shares, managers))) => {
+            if !managers.is_empty() {
+                let names: Vec<String> = managers.iter().map(person).collect();
+                small(ui, &tf!("Managers: {}", "Gestores: {}", names.join(", ")));
+            }
+            match m.visibility {
+                Visibility::Private => small(ui, t!("Not shared with anyone.", "Não compartilhado com ninguém.")),
+                Visibility::Everyone => {
+                    small(ui, t!("Everyone on the server may reach it.", "Todos do servidor podem acessá-lo."))
+                }
+                Visibility::Shared if shares.users.is_empty() && shares.groups.is_empty() => {
+                    small(ui, t!("Not shared with anyone yet.", "Ainda não compartilhado com ninguém."))
+                }
+                Visibility::Shared => {
+                    let role = |r| rdesk_common::i18n::role_label(r);
+                    let mut who: Vec<String> =
+                        shares.groups.iter().map(|(g, r)| format!("{} ({})", g.name, role(*r))).collect();
+                    who.extend(shares.users.iter().map(|(u, r)| format!("{} ({})", person(u), role(*r))));
+                    small(ui, &tf!("Shared with: {}", "Compartilhado com: {}", who.join(", ")));
+                }
+            }
+        }
+    }
+    let manage = m.can_manage || m.here.is_some();
+    let label =
+        if manage { t!("Manage access", "Gerenciar acesso") } else { t!("See in Computers", "Ver em Computadores") };
+    if ui.add(egui::Link::new(RichText::new(label).size(ui::size::SMALL))).clicked() {
+        if manage { WhoClick::Manage } else { WhoClick::Computers }
+    } else {
+        WhoClick::Nothing
+    }
 }
 
 /// How others reach it: an icon in a color and a wrapped line.
@@ -2537,6 +2744,17 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
             p
         }),
         s("host-on-registered", || HostPage::sample(on_registered(), true, false).registered()),
+        // Signed in as someone else than who registered it: whose it is, who may reach it.
+        s("host-registered-by-someone-else", || {
+            let mut p = HostPage::sample(on_registered(), true, false).registered();
+            p.listed(false, Visibility::Shared);
+            p
+        }),
+        s("host-registered-mine-private", || {
+            let mut p = HostPage::sample(on_registered(), true, false).registered();
+            p.listed(true, Visibility::Private);
+            p
+        }),
         s("host-on-unregistered-norelay", || {
             HostPage::sample(HostStatus { state: listening(), events: events(2), ..Default::default() }, true, false)
         }),
@@ -2817,6 +3035,47 @@ mod sample {
                 endpoint_id: String::new(),
             });
             self
+        }
+
+        /// As the server lists it for whoever is signed in, with who may reach it.
+        pub(super) fn listed(&mut self, mine: bool, visibility: Visibility) {
+            use rdesk_proto::api::{GroupRef, Here, ShareRole};
+            let user = |id: i64, email: &str, name: &str| UserRef { id, email: email.into(), name: name.into() };
+            let owner = if mine {
+                user(1, "jeferson@exemplo.com", "")
+            } else {
+                user(9, "ana.beatriz.ferreira.dos.santos@exemplo.com.br", "")
+            };
+            let m = Machine {
+                id: 42,
+                endpoint_id: format_host_id(&self.fingerprint.unwrap_or_default()),
+                name: "Notebook da Ana Beatriz no escritório".into(),
+                os: "windows".into(),
+                owner,
+                visibility,
+                online: true,
+                in_session: false,
+                last_seen: None,
+                addrs: Vec::new(),
+                can_access: mine,
+                access: if mine { rdesk_proto::Access::FULL } else { rdesk_proto::Access::NONE },
+                is_owner: mine,
+                can_manage: mine,
+                direct: false,
+                version: "0.5.0".into(),
+                ring: Default::default(),
+                here: Some(Here::View),
+            };
+            let shares = Shares {
+                users: vec![
+                    (user(2, "jefersonsantos006@hotmail.com", ""), ShareRole::Control),
+                    (user(3, "mariana.costa@exemplo.com", "Mariana Costa"), ShareRole::View),
+                ],
+                groups: vec![(GroupRef { id: 1, name: "Família".into() }, ShareRole::Files)],
+            };
+            let managers = vec![user(4, "carlos@exemplo.com", "Carlos")];
+            self.access = Some(((m.id, Ok((shares, managers))), Instant::now()));
+            self.this_machine = Some(m);
         }
     }
 

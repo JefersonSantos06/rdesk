@@ -21,6 +21,12 @@ pub enum Request {
     Disconnect,
     /// Stop; the service starts the host again with the new settings. Administrators only.
     Restart,
+    /// A presence proof for `user_id` (the host key is for administrators only): anyone at
+    /// the computer gets one to see it, administrators one to manage it.
+    Here {
+        user_id: i64,
+        scope: rdesk_proto::api::Here,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +35,17 @@ pub enum Response {
     Status(Box<HostStatus>),
     Ok,
     Error(String),
+    /// The presence proof, as the header value.
+    Here(String),
+}
+
+/// A presence proof from the host the service runs.
+pub async fn here(user_id: i64, scope: rdesk_proto::api::Here) -> Result<String> {
+    match request(&Request::Here { user_id, scope }).await? {
+        Response::Here(p) => Ok(p),
+        Response::Error(e) => Err(anyhow!(e)),
+        _ => Err(anyhow!(t!("unexpected answer from the host", "resposta inesperada do host"))),
+    }
 }
 
 /// Ask the host run by the service.
@@ -48,7 +65,7 @@ async fn expect_ok(req: Request) -> Result<()> {
     match request(&req).await? {
         Response::Ok => Ok(()),
         Response::Error(e) => Err(anyhow!(e)),
-        Response::Status(_) => Err(anyhow!(t!("unexpected answer from the host", "resposta inesperada do host"))),
+        _ => Err(anyhow!(t!("unexpected answer from the host", "resposta inesperada do host"))),
     }
 }
 
@@ -230,6 +247,22 @@ mod imp {
                 )
                 .into(),
             ),
+            Ok(Request::Here { user_id, scope }) => {
+                if scope == rdesk_proto::api::Here::Manage && !client_is_admin(&pipe) {
+                    Response::Error(
+                        rdesk_common::t!(
+                            "managing this computer needs administrator rights",
+                            "gerenciar este computador exige direitos de administrador"
+                        )
+                        .into(),
+                    )
+                } else {
+                    match rdesk_common::transport::HostIdentity::load() {
+                        Ok(id) => Response::Here(rdesk_common::account::here_proof(&id.secret_key(), user_id, scope)),
+                        Err(e) => Response::Error(format!("{e:#}")),
+                    }
+                }
+            }
             Err(e) => Response::Error(format!("bad request: {e}")),
         };
         let mut out = serde_json::to_string(&resp)?;

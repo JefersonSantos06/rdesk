@@ -144,9 +144,9 @@ impl AccessDialog {
         let mut d = Self::empty(m);
         if let Some(s) = Session::load() {
             d.me = Some(s.user.id);
-            let (id, owner) = (m.id, m.is_owner);
+            let (id, owner, scope) = (m.id, m.is_owner, super::presence::view_scope(m));
             d.job = Some(spawn(ctx, move || async move {
-                let api = s.api().map_err(|e| format!("{e:#}"))?;
+                let api = super::presence::api(&s, scope).await.map_err(|e| format!("{e:#}"))?;
                 let f = async {
                     let users = api.directory().await?;
                     let groups = api.all_groups().await?;
@@ -180,6 +180,10 @@ impl AccessDialog {
 
     pub(super) fn machine_id(&self) -> i64 {
         self.machine.id
+    }
+
+    pub(super) fn machine(&self) -> &Machine {
+        &self.machine
     }
 
     fn take(&mut self, (users, groups, shares, managers): (Vec<UserRef>, Vec<GroupRef>, Shares, Option<Vec<UserRef>>)) {

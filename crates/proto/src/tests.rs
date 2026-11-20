@@ -160,3 +160,24 @@ fn enroll_replies_are_tagged() {
     let r: api::EnrollReply = serde_json::from_value(serde_json::json!({"status": "rejected"})).unwrap();
     assert!(matches!(r, api::EnrollReply::Rejected));
 }
+
+#[test]
+fn presence_proofs_round_trip_through_the_header() {
+    let p = api::HereProof {
+        scope: api::Here::Manage,
+        user_id: 42,
+        timestamp: 1_700_000_000,
+        endpoint: [7; 32],
+        signature: [0xab; 64],
+    };
+    let h = p.to_header();
+    assert!(h.starts_with("manage.42.1700000000."), "{h}");
+    assert_eq!(api::HereProof::parse(&h), Some(p.clone()));
+    // Scope, user and time are all signed.
+    let view = api::HereProof { scope: api::Here::View, ..p.clone() };
+    assert_ne!(view.signed_message(), p.signed_message());
+    assert_ne!(api::HereProof { user_id: 43, ..p.clone() }.signed_message(), p.signed_message());
+    for bad in ["", "admin.42.1.00.00", "view.x.1.00.00", &format!("{h}.extra"), &h[..h.len() - 1]] {
+        assert_eq!(api::HereProof::parse(bad), None, "{bad}");
+    }
+}

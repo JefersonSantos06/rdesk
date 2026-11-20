@@ -16,6 +16,7 @@ mod groups;
 mod host_page;
 mod icon;
 mod instance;
+mod presence;
 mod settings;
 mod tray;
 
@@ -411,6 +412,9 @@ impl eframe::App for App {
         }
         self.account.tick();
         self.computers.tick();
+        if std::mem::take(&mut self.computers.quit_requested) {
+            self.quit(ctx);
+        }
         self.settings.tick();
         self.admin.tick(ctx, self.account.session());
         self.groups.tick(ctx);
@@ -446,6 +450,20 @@ impl eframe::App for App {
             if self.host.quit_requested {
                 self.host.quit_requested = false;
                 self.quit(ctx);
+            }
+            // This computer, as both pages see it.
+            self.computers.this_host = self.host.this_id();
+            self.computers.this_registered = self.host.registration_text();
+            self.host.this_machine = self.computers.this_machine();
+            if std::mem::take(&mut self.computers.register_here) {
+                self.host.ask_register();
+            }
+            if std::mem::take(&mut self.computers.unregister_here) {
+                self.host.ask_unregister(ctx);
+            }
+            if let Some(m) = self.host.manage_access.take() {
+                self.computers.manage_access_of(ctx, m);
+                self.page = Page::Computers;
             }
             let (summary, on) = (self.host.summary(), self.host.running());
             if let Some(t) = &mut self.tray {

@@ -122,6 +122,106 @@ pub fn register_message(user_id: i64, endpoint: &[u8; 32], timestamp: i64) -> Ve
     m
 }
 
+/// The header with a presence proof: the app making the request runs on that computer.
+pub const HEADER_HERE: &str = "x-rdesk-here";
+/// Signed by the host key for a presence proof.
+pub const HERE_DOMAIN: &[u8] = b"rdesk-here-v1";
+/// A presence proof counts this long (seconds, either way: clocks drift).
+pub const HERE_MAX_AGE: i64 = 300;
+
+/// What a presence proof allows on the computer it was signed on, whoever is signed in
+/// there: seeing it (its owner and who it is shared with), or managing it like its
+/// managers do (the app asks for the system's administrator first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Here {
+    View,
+    Manage,
+}
+
+impl Here {
+    fn byte(self) -> u8 {
+        match self {
+            Here::View => 1,
+            Here::Manage => 2,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Here::View => "view",
+            Here::Manage => "manage",
+        }
+    }
+}
+
+/// A presence proof, as sent in [`HEADER_HERE`]: `scope.user.timestamp.endpoint.signature`
+/// (the last two in hex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HereProof {
+    pub scope: Here,
+    pub user_id: i64,
+    pub timestamp: i64,
+    /// The host ID of the computer.
+    pub endpoint: [u8; 32],
+    pub signature: [u8; 64],
+}
+
+impl HereProof {
+    /// What the signature covers.
+    pub fn message(scope: Here, user_id: i64, endpoint: &[u8; 32], timestamp: i64) -> Vec<u8> {
+        let mut m = HERE_DOMAIN.to_vec();
+        m.push(scope.byte());
+        m.extend_from_slice(&user_id.to_le_bytes());
+        m.extend_from_slice(endpoint);
+        m.extend_from_slice(&timestamp.to_le_bytes());
+        m
+    }
+
+    pub fn signed_message(&self) -> Vec<u8> {
+        Self::message(self.scope, self.user_id, &self.endpoint, self.timestamp)
+    }
+
+    pub fn to_header(&self) -> String {
+        format!(
+            "{}.{}.{}.{}.{}",
+            self.scope.as_str(),
+            self.user_id,
+            self.timestamp,
+            hex_encode(&self.endpoint),
+            hex_encode(&self.signature)
+        )
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut it = s.trim().split('.');
+        let scope = match it.next()? {
+            "view" => Here::View,
+            "manage" => Here::Manage,
+            _ => return None,
+        };
+        let user_id = it.next()?.parse().ok()?;
+        let timestamp = it.next()?.parse().ok()?;
+        let endpoint = hex_decode(it.next()?)?.try_into().ok()?;
+        let signature = hex_decode(it.next()?)?.try_into().ok()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(Self { scope, user_id, timestamp, endpoint, signature })
+    }
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
@@ -181,6 +281,10 @@ pub struct Machine {
     /// Gets released versions with the test computers.
     #[serde(default)]
     pub ring: Ring,
+    /// The request proved it comes from this computer (see [`HereProof`]): whoever is
+    /// signed in there sees it, and may manage it with [`Here::Manage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub here: Option<Here>,
 }
 
 /// What a share grants.

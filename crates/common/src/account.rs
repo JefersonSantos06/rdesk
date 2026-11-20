@@ -164,7 +164,18 @@ pub fn normalize_server(s: &str) -> Result<String> {
 pub struct Api {
     base: String,
     token: Option<String>,
+    /// A presence proof sent with every request (see [`Api::with_here`]).
+    here: Option<String>,
     http: reqwest::Client,
+}
+
+/// A presence proof for the computer whose host key is `key`, for `user_id` (see
+/// [`api::HereProof`]), as the header value.
+pub fn here_proof(key: &iroh::SecretKey, user_id: i64, scope: api::Here) -> String {
+    let endpoint = *key.public().as_bytes();
+    let timestamp = now();
+    let sig = key.sign(&api::HereProof::message(scope, user_id, &endpoint, timestamp));
+    api::HereProof { scope, user_id, timestamp, endpoint, signature: sig.to_bytes() }.to_header()
 }
 
 impl Api {
@@ -174,7 +185,14 @@ impl Api {
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("rdesk/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { base: normalize_server(server)?, token, http })
+        Ok(Self { base: normalize_server(server)?, token, here: None, http })
+    }
+
+    /// Send a presence proof (from [`here_proof`]) with every request: the server then
+    /// also shows (and, with [`api::Here::Manage`], lets manage) the computer it was signed on.
+    pub fn with_here(mut self, proof: String) -> Self {
+        self.here = Some(proof);
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -182,6 +200,10 @@ impl Api {
     }
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let rb = match &self.here {
+            Some(h) => rb.header(api::HEADER_HERE, h),
+            None => rb,
+        };
         match &self.token {
             Some(t) => rb.bearer_auth(t),
             None => rb,

@@ -85,6 +85,25 @@ qual nível. Os admins do servidor também podem ver.
   computador sai do servidor: ninguém mais chega a ele por lá, e o compartilhamento se
   perde. Para voltar, cadastre de novo pelo próprio computador.
 
+## Quem vê com quem está compartilhado
+
+Todos que podem acessar um computador veem, no painel, o dono, os gestores e com quem
+ele está compartilhado. Só o dono e os gestores mudam isso.
+
+## No próprio computador
+
+O computador em que o app está aberto aparece sempre **no topo** da lista, com o selo
+**Este computador**, mesmo que outra conta o tenha cadastrado e não o tenha compartilhado
+com você. Ali você vê o dono e com quem ele está compartilhado (também na página
+**Este computador**). Também pode **gerenciá-lo**: compartilhar com pessoas ou grupos,
+renomear, ver o histórico e descadastrar. Antes, o sistema confirma um administrador:
+no Windows o rdesk abre de novo como administrador, e no macOS e no Linux o sistema pede a
+senha de um administrador.
+
+Dele mesmo não se abre a **tela** nem os **arquivos** (seria a tela mostrando a si mesma).
+O **terminal** continua disponível, se o seu acesso permitir. Se ele ainda não estiver
+cadastrado, o topo da lista oferece **Cadastrar…**.
+
 ## Computadores salvos neste aparelho ("Nesta rede")
 
 Os computadores da rede local ([cenário F](04-cenarios.md#f-sem-servidor-rede-local-ou-tailscale))

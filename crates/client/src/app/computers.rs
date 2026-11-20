@@ -3,7 +3,12 @@
 //! computers saved on this device ("On this network"), in one list with a detail panel.
 //!
 //! * Whoever registered a computer (and its managers) renames it and chooses who may reach
-//!   it ("Manage access", see `access.rs`); the owner can unregister it.
+//!   it ("Manage access", see `access.rs`); the owner can unregister it. Everyone who may
+//!   reach it sees who else may.
+//! * The computer the app runs on comes first, even when someone else registered it and
+//!   shared nothing (see `presence.rs`): whoever is signed in here sees it and, once the
+//!   system confirms an administrator, manages it. It cannot be opened from itself (a
+//!   picture of the screen showing itself): only its terminal.
 //! * Every session runs as its own `rdesk connect <host ID>` process (its own window); the
 //!   ticket from the server and the host ID are checked by the connection itself.
 //! * "Login options" keep, per computer, how to answer its optional extra lock (its own
@@ -21,11 +26,12 @@ use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, parse_host_id};
 use rdesk_common::i18n::{access_label, role_label, visibility_label};
 use rdesk_common::{t, tf};
-use rdesk_proto::api::{HistoryEntry, Machine, MachineRequest, Shares, UpdateMachine, UserRef, Visibility};
+use rdesk_proto::api::{Here, HistoryEntry, Machine, MachineRequest, Shares, UpdateMachine, UserRef, Visibility};
 use tokio::sync::mpsc;
 
 use super::access::{self, AccessDialog};
 use super::account::spawn;
+use super::presence::{self, AdminGate, GateEvent};
 use crate::ui::{self, Palette, Tone, icons, size, space};
 
 const REFRESH_EVERY: Duration = Duration::from_secs(5);
@@ -94,7 +100,8 @@ async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<Wo
         shared.lock().unwrap().refreshing = true;
         ctx.request_repaint();
         let (list, requests) = match Session::load() {
-            Some(s) => match s.api() {
+            // With a presence proof: this computer is listed whoever registered it.
+            Some(s) => match presence::api(&s, Some(Here::View)).await {
                 Ok(api) => {
                     let (list, requests) = tokio::join!(api.machines(), api.machine_requests());
                     (list.map_err(|e| short_error(&e)), requests.ok())
@@ -307,14 +314,16 @@ struct History {
     job: Option<Receiver<Result<Vec<HistoryEntry>, String>>>,
 }
 
-/// Shares, managers (owner only) and the history of the selected computer.
-type DetailLoad = (Result<Shares, String>, Option<Result<Vec<UserRef>, String>>, Result<Vec<HistoryEntry>, String>);
+/// Shares, managers and (for who manages it) the history of the selected computer.
+type DetailLoad = (Result<Shares, String>, Result<Vec<UserRef>, String>, Option<Result<Vec<HistoryEntry>, String>>);
 
-/// What the detail panel shows about a computer this user manages (loaded on selection).
+/// What the detail panel shows about a computer this user may reach, manages, or is at
+/// (loaded on selection).
 struct Detail {
     id: i64,
     shares: Option<Result<Shares, String>>,
     managers: Option<Result<Vec<UserRef>, String>>,
+    /// `None` also when this user does not manage it.
     history: Option<Result<Vec<HistoryEntry>, String>>,
     job: Option<Receiver<DetailLoad>>,
     /// Something changed: load again (keeping what is shown meanwhile).
@@ -338,6 +347,23 @@ enum Dialog {
     RemoveLocal(HostEntry),
     /// The selected computer's details, when the window is too narrow for the side panel.
     Details,
+    /// Windows: managing this computer needs the app to run as administrator.
+    RestartAsAdmin,
+}
+
+/// Managing a computer, once allowed (at the computer: after an administrator confirmed).
+enum Manage {
+    Rename(Machine),
+    Access(Machine),
+    History(Machine),
+}
+
+impl Manage {
+    fn machine(&self) -> &Machine {
+        match self {
+            Manage::Rename(m) | Manage::Access(m) | Manage::History(m) => m,
+        }
+    }
 }
 
 fn when(t: i64) -> String {
@@ -436,9 +462,20 @@ pub(super) struct Computers {
     #[cfg(test)]
     fake_sessions: Vec<String>,
     job: Option<Receiver<Result<String, String>>>,
+    /// Managing this computer as someone else's: waits for an administrator.
+    gate: AdminGate<Manage>,
     pub(super) toast: Option<(String, bool, Instant)>,
     /// Another page to show (set by this page, taken by the window).
     pub(super) go_to: Option<super::Page>,
+    /// The host ID of the computer the app runs on (set by the window), lowercase hex.
+    pub(super) this_host: Option<String>,
+    /// "name on server" when this computer's host says it is registered (set by the window).
+    pub(super) this_registered: Option<String>,
+    /// Asks the This computer page to register it, or to unregister it (taken by the window).
+    pub(super) register_here: bool,
+    pub(super) unregister_here: bool,
+    /// The app restarts as administrator: quit (taken by the window).
+    pub(super) quit_requested: bool,
 }
 
 impl Computers {
@@ -466,8 +503,93 @@ impl Computers {
             #[cfg(test)]
             fake_sessions: Vec::new(),
             job: None,
+            gate: AdminGate::new(),
             toast: None,
             go_to: None,
+            this_host: None,
+            this_registered: None,
+            register_here: false,
+            unregister_here: false,
+            quit_requested: false,
+        }
+    }
+
+    /// The computer the app runs on.
+    fn is_this(&self, endpoint_id: &str) -> bool {
+        self.this_host.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(endpoint_id.trim()))
+    }
+
+    fn is_this_item(&self, it: &Item) -> bool {
+        match it {
+            Item::Server(m) => self.is_this(&m.endpoint_id),
+            Item::Local(e) => self.is_this(&e.id),
+        }
+    }
+
+    /// The computer the app runs on, as the server lists it.
+    #[cfg_attr(not(feature = "host"), allow(dead_code))]
+    pub(super) fn this_machine(&self) -> Option<Machine> {
+        let snap = self.shared.lock().unwrap();
+        let Some(Ok(list)) = &snap.machines else { return None };
+        list.iter().find(|m| self.is_this(&m.endpoint_id)).cloned()
+    }
+
+    /// Opening a session to it: its screen and files make no sense from itself.
+    fn connectable(&self, it: &Item) -> bool {
+        it.can_connect() && !self.is_this_item(it)
+    }
+
+    /// Show "Manage access" from another page (This computer).
+    #[cfg_attr(not(feature = "host"), allow(dead_code))]
+    pub(super) fn manage_access_of(&mut self, ctx: &egui::Context, m: Machine) {
+        self.selected = Some(Sel::Server(m.id));
+        self.scroll_to_selected = true;
+        self.manage(ctx, Manage::Access(m));
+    }
+
+    /// Do `what` now, or once an administrator confirmed when this user only manages it by
+    /// being at the computer.
+    fn manage(&mut self, ctx: &egui::Context, what: Manage) {
+        let needed = presence::manage_scope(what.machine()).is_some();
+        if let Some(what) = self.gate.request(ctx, needed, what) {
+            self.do_manage(ctx, what);
+        }
+    }
+
+    fn do_manage(&mut self, ctx: &egui::Context, what: Manage) {
+        match what {
+            Manage::Rename(m) => {
+                self.renaming = Some((m.id, m.name.clone()));
+                self.rename_focus = true;
+                if self.compact {
+                    self.dialog = Some(Dialog::Details);
+                }
+            }
+            Manage::Access(m) => self.dialog = Some(Dialog::Access(Box::new(AccessDialog::new(ctx, &m)))),
+            Manage::History(m) => self.start_history(ctx, &m),
+        }
+    }
+
+    fn poll_gate(&mut self, ctx: &egui::Context) {
+        match self.gate.poll() {
+            GateEvent::Nothing => {}
+            GateEvent::Go(what) => self.do_manage(ctx, what),
+            GateEvent::NeedsRestart => self.dialog = Some(Dialog::RestartAsAdmin),
+            GateEvent::Refused(e) => self.notify(e, true),
+        }
+    }
+
+    /// Unregister: this computer through its This computer page (which also forgets the
+    /// registration here), another one here.
+    fn ask_unregister(&mut self, m: &Machine) {
+        if self.is_this(&m.endpoint_id) {
+            self.unregister_here = true;
+            #[cfg(feature = "host")]
+            {
+                self.go_to = Some(super::Page::ThisComputer);
+            }
+        } else {
+            self.dialog = Some(Dialog::Unregister(m.clone()));
         }
     }
 
@@ -528,12 +650,22 @@ impl Computers {
         F: FnOnce(rdesk_common::account::Api) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<String>>,
     {
+        self.run_here(ctx, None, f);
+    }
+
+    /// [`Computers::run`], with a presence proof of `scope` (managing this computer as
+    /// someone else's).
+    fn run_here<F, Fut>(&mut self, ctx: &egui::Context, scope: Option<Here>, f: F)
+    where
+        F: FnOnce(rdesk_common::account::Api) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<String>>,
+    {
         let Some(s) = Session::load() else {
             self.notify(t!("Not signed in.", "Você não entrou em um servidor.").into(), true);
             return;
         };
         self.job = Some(spawn(ctx, move || async move {
-            match s.api() {
+            match presence::api(&s, scope).await {
                 Ok(api) => f(api).await.map_err(|e| format!("{e:#}")),
                 Err(e) => Err(format!("{e:#}")),
             }
@@ -592,6 +724,19 @@ impl Computers {
     }
 
     fn spawn_session(&mut self, target: &str, label: &str, how: Open) {
+        // Its own screen (a picture of itself, endlessly) or files: only its terminal.
+        let id = target.split('@').next().unwrap_or(target);
+        let id = parse_host_id(id).map(|b| config::format_host_id(&b)).unwrap_or_else(|_| id.to_string());
+        if how != Open::Terminal && self.is_this(&id) {
+            self.notify(
+                tf!(
+                    "{label} is the computer you are on: only its terminal opens from here.",
+                    "{label} é o computador em que você está: daqui só abre o terminal dele."
+                ),
+                true,
+            );
+            return;
+        }
         if self.session_open(target) {
             self.raise(target, label, how);
             return;
@@ -779,9 +924,9 @@ impl Computers {
 
     fn start_history(&mut self, ctx: &egui::Context, m: &Machine) {
         let Some(s) = Session::load() else { return };
-        let id = m.id;
+        let (id, scope) = (m.id, presence::manage_scope(m));
         let job = spawn(ctx, move || async move {
-            match s.api() {
+            match presence::api(&s, scope).await {
                 Ok(api) => api.history(id).await.map_err(|e| format!("{e:#}")),
                 Err(e) => Err(format!("{e:#}")),
             }
@@ -789,15 +934,22 @@ impl Computers {
         self.dialog = Some(Dialog::History(Box::new(History { machine: m.clone(), data: None, job: Some(job) })));
     }
 
-    fn start_access(&mut self, ctx: &egui::Context, m: &Machine) {
-        self.dialog = Some(Dialog::Access(Box::new(AccessDialog::new(ctx, m))));
+    /// This user may change it: manages it, or is at the computer.
+    fn may_manage(m: &Machine) -> bool {
+        m.can_manage || m.here.is_some()
     }
 
-    fn start_rename(&mut self, m: &Machine) {
-        if m.can_manage {
-            self.renaming = Some((m.id, m.name.clone()));
-            self.rename_focus = true;
+    fn start_rename(&mut self, ctx: &egui::Context, m: &Machine) {
+        if Self::may_manage(m) {
+            self.manage(ctx, Manage::Rename(m.clone()));
         }
+    }
+
+    /// The machine as last listed.
+    fn listed(&self, id: i64) -> Option<Machine> {
+        let snap = self.shared.lock().unwrap();
+        let Some(Ok(list)) = &snap.machines else { return None };
+        list.iter().find(|m| m.id == id).cloned()
     }
 
     fn save_rename(&mut self, ctx: &egui::Context) {
@@ -806,35 +958,31 @@ impl Computers {
         if new.is_empty() {
             return;
         }
-        self.run(ctx, move |api| async move {
+        let scope = self.listed(id).as_ref().and_then(presence::manage_scope);
+        self.run_here(ctx, scope, move |api| async move {
             let m = api.update_machine(id, &UpdateMachine { name: Some(new), visibility: None }).await?;
             Ok(tf!("Renamed to {}.", "Renomeado para {}.", m.name))
         });
     }
 
-    /// Load (or reload) what the detail panel shows about a computer this user manages.
+    /// Load (or reload) what the detail panel shows about a computer: who it is shared
+    /// with and who manages it, and its history for who manages it.
     fn load_detail(&mut self, ctx: &egui::Context, m: &Machine) {
         let keep = self.detail.take().filter(|d| d.id == m.id);
         let Some(s) = Session::load() else { return };
-        let (id, owner) = (m.id, m.is_owner);
+        let (id, manages, scope) = (m.id, m.can_manage, presence::view_scope(m));
         let job = spawn(ctx, move || async move {
-            let api = match s.api() {
+            let api = match presence::api(&s, scope).await {
                 Ok(a) => a,
                 Err(e) => {
                     let e = format!("{e:#}");
-                    return (Err(e.clone()), owner.then(|| Err(e.clone())), Err(e));
+                    return (Err(e.clone()), Err(e.clone()), manages.then_some(Err(e)));
                 }
             };
             let (shares, managers, history) = tokio::join!(
                 async { api.shares(id).await.map_err(|e| short_error(&e)) },
-                async {
-                    if owner {
-                        Some(api.managers(id).await.map(|m| m.users).map_err(|e| short_error(&e)))
-                    } else {
-                        None
-                    }
-                },
-                async { api.history(id).await.map_err(|e| short_error(&e)) },
+                async { api.managers(id).await.map(|m| m.users).map_err(|e| short_error(&e)) },
+                async { if manages { Some(api.history(id).await.map_err(|e| short_error(&e))) } else { None } },
             );
             (shares, managers, history)
         });
@@ -855,8 +1003,8 @@ impl Computers {
         {
             d.job = None;
             d.shares = Some(shares);
-            d.managers = managers;
-            d.history = Some(history);
+            d.managers = Some(managers);
+            d.history = history;
         }
     }
 
@@ -921,11 +1069,13 @@ impl Computers {
         });
     }
 
-    /// Every computer, online first, then by name.
+    /// Every computer: this one first, then online first, then by name.
     fn items(&self, machines: &[Machine]) -> Vec<Item> {
         let mut v: Vec<Item> = machines.iter().cloned().map(Item::Server).collect();
         v.extend(self.locals.iter().cloned().map(Item::Local));
-        v.sort_by_cached_key(|it| (!self.item_status(it).0.reachable(), it.name().to_lowercase()));
+        v.sort_by_cached_key(|it| {
+            (!self.is_this_item(it), !self.item_status(it).0.reachable(), it.name().to_lowercase())
+        });
         v
     }
 
@@ -952,7 +1102,7 @@ impl Computers {
     }
 
     /// Ctrl+K, arrows, Enter, F2 and Delete.
-    fn keys(&mut self, ctx: &egui::Context, visible: &[Item], compact: bool) {
+    fn keys(&mut self, ctx: &egui::Context, visible: &[Item]) {
         if self.dialog.is_some() || self.renaming.is_some() {
             return;
         }
@@ -991,14 +1141,11 @@ impl Computers {
             self.open_item(&it, Open::Screen);
         }
         if f2 && let Item::Server(m) = &it {
-            self.start_rename(m);
-            if compact && m.can_manage {
-                self.dialog = Some(Dialog::Details);
-            }
+            self.start_rename(ctx, m);
         }
         if del && free {
             match &it {
-                Item::Server(m) if m.is_owner => self.dialog = Some(Dialog::Unregister(m.clone())),
+                Item::Server(m) if m.is_owner || m.here.is_some() => self.ask_unregister(m),
                 Item::Local(e) => self.dialog = Some(Dialog::RemoveLocal(e.clone())),
                 _ => {}
             }
@@ -1098,7 +1245,8 @@ impl Computers {
                 .max_rect(rect.shrink2(egui::vec2(space::M, 0.0)))
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        let show_button = (hovered || selected) && it.can_connect();
+        let this = self.is_this_item(it);
+        let show_button = (hovered || selected) && self.connectable(it);
         let mut connect = false;
         let mut details = false;
         let label = if status == Status::Open { t!("Focus", "Mostrar") } else { t!("Connect", "Conectar") };
@@ -1128,6 +1276,10 @@ impl Computers {
                         b.on_hover_text(&long);
                     }
                 }
+                if this {
+                    ui::badge(ui, t!("This computer", "Este computador"), Tone::Accent)
+                        .on_hover_text(t!("The computer you are on", "O computador em que você está"));
+                }
             },
         );
         if self.scroll_to_selected && selected {
@@ -1141,7 +1293,7 @@ impl Computers {
             self.selected = Some(sel.clone());
             self.dialog = Some(Dialog::Details);
         }
-        if resp.double_clicked() || connect {
+        if (resp.double_clicked() && !this) || connect {
             self.open_item(it, Open::Screen);
         }
         let ctx = ui.ctx().clone();
@@ -1174,14 +1326,20 @@ impl Computers {
                 Item::Server(m) => (m.can_access, m.can_access && m.access.files, m.can_access && m.access.terminal),
                 Item::Local(_) => (true, true, true),
             };
-            if ui
-                .add_enabled(can, egui::Button::new(ui::with_icon(icons::MONITOR, t!("Connect", "Conectar"))))
-                .clicked()
+            // The computer you are on: only its terminal.
+            let this = self.is_this_item(it);
+            if !this
+                && ui
+                    .add_enabled(can, egui::Button::new(ui::with_icon(icons::MONITOR, t!("Connect", "Conectar"))))
+                    .clicked()
             {
                 self.open_item(it, Open::Screen);
                 ui.close();
             }
-            if ui.add_enabled(files, egui::Button::new(ui::with_icon(icons::FOLDER, t!("Files", "Arquivos")))).clicked()
+            if !this
+                && ui
+                    .add_enabled(files, egui::Button::new(ui::with_icon(icons::FOLDER, t!("Files", "Arquivos"))))
+                    .clicked()
             {
                 self.open_item(it, Open::Files);
                 ui.close();
@@ -1216,33 +1374,30 @@ impl Computers {
                     self.dialog = Some(Dialog::Login(Box::new(LoginOptions::load(m))));
                     ui.close();
                 }
-                if m.can_manage {
+                if Self::may_manage(m) {
                     ui.separator();
                     if ui.button(ui::with_icon(icons::PENCIL_SIMPLE, t!("Rename  (F2)", "Renomear  (F2)"))).clicked() {
                         self.selected = Some(Sel::Server(m.id));
-                        self.start_rename(m);
-                        if self.compact {
-                            self.dialog = Some(Dialog::Details);
-                        }
+                        self.start_rename(ctx, m);
                         ui.close();
                     }
                     if ui.button(ui::with_icon(icons::USERS, t!("Manage access…", "Gerenciar acesso…"))).clicked() {
-                        self.start_access(ctx, m);
+                        self.manage(ctx, Manage::Access(m.clone()));
                         ui.close();
                     }
                     if ui.button(ui::with_icon(icons::CLOCK_COUNTER_CLOCKWISE, t!("History…", "Histórico…"))).clicked()
                     {
-                        self.start_history(ctx, m);
+                        self.manage(ctx, Manage::History(m.clone()));
                         ui.close();
                     }
                 }
-                if m.is_owner {
+                if m.is_owner || m.here.is_some() {
                     ui.separator();
                     let p = ui::pal(ui);
                     let text =
                         RichText::new(ui::with_icon(icons::TRASH, t!("Unregister…", "Descadastrar…"))).color(p.danger);
                     if ui.button(text).clicked() {
-                        self.dialog = Some(Dialog::Unregister(m.clone()));
+                        self.ask_unregister(m);
                         ui.close();
                     }
                 }
@@ -1336,7 +1491,7 @@ impl Computers {
                 |ui| {
                     // More actions next to the name, so the action buttons below keep one line.
                     more_menu(ui, |ui| self.menu_items(ui, &ctx, &it, false));
-                    if m.can_manage
+                    if Self::may_manage(m)
                         && ui::icon_button(ui, icons::PENCIL_SIMPLE, t!("Rename  (F2)", "Renomear  (F2)")).clicked()
                     {
                         rename = true;
@@ -1344,7 +1499,7 @@ impl Computers {
                 },
             );
             if rename {
-                self.start_rename(m);
+                self.start_rename(&ctx, m);
             }
         }
         ui.horizontal_wrapped(|ui| {
@@ -1361,14 +1516,19 @@ impl Computers {
         }
         ui.add_space(space::M);
 
-        // Actions.
+        // Actions (the computer you are on: only its terminal).
+        let this = self.is_this(&m.endpoint_id);
         ui.horizontal_wrapped(|ui| {
             let label = if status == Status::Open { t!("Focus", "Mostrar") } else { t!("Connect", "Conectar") };
-            let r = ui.add_enabled_ui(m.can_access, |ui| ui::primary(ui, ui::with_icon(icons::MONITOR, label))).inner;
-            if r.clicked() {
-                self.open(m, Open::Screen);
+            if !this {
+                let r =
+                    ui.add_enabled_ui(m.can_access, |ui| ui::primary(ui, ui::with_icon(icons::MONITOR, label))).inner;
+                if r.clicked() {
+                    self.open(m, Open::Screen);
+                }
             }
-            if m.can_access
+            if !this
+                && m.can_access
                 && m.access.files
                 && ui::secondary(ui, ui::with_icon(icons::FOLDER, t!("Files", "Arquivos")))
                     .on_hover_text(t!(
@@ -1391,8 +1551,31 @@ impl Computers {
                 self.open(m, Open::Terminal);
             }
         });
-        if !m.can_access {
+        if this {
+            ui::caption(
+                ui,
+                t!(
+                    "This is the computer you are on: its screen and files open from other computers.",
+                    "Este é o computador em que você está: a tela e os arquivos dele abrem de outros computadores."
+                ),
+            );
+        } else if !m.can_access {
             ui::caption(ui, t!("It is not shared with you.", "Ele não está compartilhado com você."));
+        }
+        if m.here.is_some() && !m.can_manage {
+            ui.add_space(space::S);
+            ui::banner(
+                ui,
+                Tone::Accent,
+                &tf!(
+                    "Registered by {}. You are at this computer, so you may manage it too: the system asks for \
+                     an administrator first.",
+                    "Cadastrado por {}. Você está neste computador, então também pode gerenciá-lo: o sistema pede \
+                     um administrador antes.",
+                    m.owner.email
+                ),
+                None,
+            );
         }
         if m.direct {
             ui.add_space(space::S);
@@ -1415,17 +1598,17 @@ impl Computers {
         id_line(ui, &m.endpoint_id, &mut self.toast);
         ui.add_space(space::M);
 
-        // Who has access.
+        // Who has access (everyone who may reach it, manages it, or is at it sees it).
         ui::section(ui, t!("Who has access", "Quem tem acesso"));
-        if m.can_manage {
-            self.who_ui(ui, m);
-            if ui::link(ui, ui::with_icon(icons::USERS, t!("Manage access", "Gerenciar acesso"))).clicked() {
-                self.start_access(&ctx, m);
-            }
-        } else {
-            ui::caption(ui, &tf!("Owner: {}", "Dono: {}", m.owner.email));
+        self.who_ui(ui, m);
+        if !m.can_manage {
             let mine = if m.can_access { access_label(m.access) } else { t!("no access", "sem acesso").into() };
-            ui.label(tf!("You: {mine}", "Você: {mine}"));
+            ui::caption(ui, &tf!("You: {mine}", "Você: {mine}"));
+        }
+        if Self::may_manage(m)
+            && ui::link(ui, ui::with_icon(icons::USERS, t!("Manage access", "Gerenciar acesso"))).clicked()
+        {
+            self.manage(&ctx, Manage::Access(m.clone()));
         }
 
         // Recent sessions.
@@ -1455,7 +1638,7 @@ impl Computers {
                 }
             }
             if ui::link(ui, t!("Full history", "Histórico completo")).clicked() {
-                self.start_history(&ctx, m);
+                self.manage(&ctx, Manage::History(m.clone()));
             }
         }
 
@@ -1477,7 +1660,7 @@ impl Computers {
                 {
                     self.dialog = Some(Dialog::Login(Box::new(LoginOptions::load(m))));
                 }
-                if m.is_owner {
+                if m.is_owner || m.here.is_some() {
                     ui.add_space(space::S);
                     ui::caption(
                         ui,
@@ -1487,13 +1670,13 @@ impl Computers {
                         ),
                     );
                     if ui::danger(ui, t!("Unregister from the server…", "Descadastrar do servidor…")).clicked() {
-                        self.dialog = Some(Dialog::Unregister(m.clone()));
+                        self.ask_unregister(m);
                     }
                 }
             });
     }
 
-    /// "Who has access" for a computer this user manages.
+    /// "Who has access": the owner, the managers and who it is shared with.
     fn who_ui(&mut self, ui: &mut egui::Ui, m: &Machine) {
         let p = ui::pal(ui);
         let d = self.detail.as_ref().filter(|d| d.id == m.id);
@@ -1525,8 +1708,11 @@ impl Computers {
             line(ui, Err(&u.email), access::person_label(u), t!("manager", "gestor"));
         }
         match m.visibility {
-            Visibility::Private => {
+            Visibility::Private if m.is_owner => {
                 ui::caption(ui, t!("Nobody else: only me.", "Ninguém mais: só eu."));
+            }
+            Visibility::Private => {
+                ui::caption(ui, t!("Nobody else: only its owner.", "Ninguém mais: só o dono."));
             }
             Visibility::Everyone => {
                 line(
@@ -1585,12 +1771,13 @@ impl Computers {
             },
         );
         ui.add_space(space::M);
+        let this = self.is_this(&e.id);
         ui.horizontal_wrapped(|ui| {
             let label = if open { t!("Focus", "Mostrar") } else { t!("Connect", "Conectar") };
-            if ui::primary(ui, ui::with_icon(icons::MONITOR, label)).clicked() {
+            if !this && ui::primary(ui, ui::with_icon(icons::MONITOR, label)).clicked() {
                 self.open_item(&it, Open::Screen);
             }
-            if ui::secondary(ui, ui::with_icon(icons::FOLDER, t!("Files", "Arquivos"))).clicked() {
+            if !this && ui::secondary(ui, ui::with_icon(icons::FOLDER, t!("Files", "Arquivos"))).clicked() {
                 self.open_item(&it, Open::Files);
             }
             if ui::secondary(ui, ui::with_icon(icons::TERMINAL_WINDOW, t!("Terminal", "Terminal"))).clicked() {
@@ -1621,6 +1808,67 @@ impl Computers {
                 self.dialog = Some(Dialog::RemoveLocal(e.clone()));
             }
         });
+    }
+
+    /// This computer, when the server does not list it: not registered (register it), or
+    /// registered with another server.
+    fn this_card(&mut self, ui: &mut egui::Ui, machines: &[Machine]) {
+        if self.this_host.is_none()
+            || machines.iter().any(|m| self.is_this(&m.endpoint_id))
+            || self.filter != Filter::All
+            || !self.search.trim().is_empty()
+        {
+            return;
+        }
+        let p = ui::pal(ui);
+        let (detail, button) = match &self.this_registered {
+            Some(name) => (
+                tf!(
+                    "Registered as {name}, but not on the server you are signed in to.",
+                    "Cadastrado como {name}, mas não no servidor em que você entrou."
+                ),
+                t!("Open", "Abrir"),
+            ),
+            None => (
+                t!(
+                    "Not registered on the server: register it to reach it from anywhere and choose who may.",
+                    "Não cadastrado no servidor: cadastre-o para acessá-lo de qualquer lugar e escolher quem pode."
+                )
+                .to_string(),
+                t!("Register…", "Cadastrar…"),
+            ),
+        };
+        let mut go = false;
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .corner_radius(egui::CornerRadius::same(ui::RADIUS))
+            .inner_margin(egui::Margin::symmetric(space::M as i8, space::S as i8))
+            .show(ui, |ui| {
+                ui::row(
+                    ui,
+                    |ui| {
+                        ui.label(RichText::new(icons::HOUSE).size(size::ICON + 2.0).color(p.muted));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new(t!("This computer", "Este computador")).strong());
+                            ui.add(egui::Label::new(RichText::new(&detail).size(size::SMALL).color(p.muted)).wrap());
+                        });
+                    },
+                    |ui| {
+                        if ui::secondary(ui, button).clicked() {
+                            go = true;
+                        }
+                    },
+                );
+            });
+        ui.add_space(space::XS);
+        if go {
+            self.register_here = self.this_registered.is_none();
+            #[cfg(feature = "host")]
+            {
+                self.go_to = Some(super::Page::ThisComputer);
+            }
+        }
     }
 
     /// The list and its empty states.
@@ -1761,7 +2009,7 @@ impl Computers {
                 access::Outcome::Closed => keep = false,
                 access::Outcome::Save(plan) => {
                     let id = d.machine_id();
-                    self.run(ctx, move |api| plan.apply(api));
+                    self.run_here(ctx, presence::manage_scope(d.machine()), move |api| plan.apply(api));
                     if let Some(det) = &mut self.detail
                         && det.id == id
                     {
@@ -1952,7 +2200,7 @@ impl Computers {
                 match ui::confirm(ctx, "computers-unregister", &title, body, t!("Unregister", "Descadastrar"), true) {
                     Some(true) => {
                         let (id, name) = (machine.id, machine.name.clone());
-                        self.run(ctx, move |api| async move {
+                        self.run_here(ctx, presence::remove_scope(machine), move |api| async move {
                             api.remove_machine(id).await?;
                             Ok(tf!("{name} was unregistered.", "{name} foi descadastrado."))
                         });
@@ -1960,6 +2208,27 @@ impl Computers {
                             self.selected = None;
                         }
                         keep = false;
+                    }
+                    Some(false) => keep = false,
+                    None => {}
+                }
+            }
+            Dialog::RestartAsAdmin => {
+                let (title, body) = presence::restart_question();
+                match ui::confirm(
+                    ctx,
+                    "computers-admin",
+                    title,
+                    body,
+                    t!("Open as administrator", "Abrir como administrador"),
+                    false,
+                ) {
+                    Some(true) => {
+                        keep = false;
+                        match super::autostart::restart_as_admin(&self.exe) {
+                            Ok(()) => self.quit_requested = true,
+                            Err(e) => self.notify(format!("{e:#}"), true),
+                        }
                     }
                     Some(false) => keep = false,
                     None => {}
@@ -2205,9 +2474,10 @@ impl Computers {
         {
             self.selected = None;
         }
+        self.poll_gate(&ctx);
         let selected = self.selected.as_ref().and_then(|s| items.iter().find(|it| it.sel() == *s)).cloned();
         if let Some(Item::Server(m)) = &selected {
-            let need = m.can_manage
+            let need = (m.can_manage || m.can_access || m.here.is_some())
                 && match &self.detail {
                     Some(d) => d.id != m.id || (d.stale && d.job.is_none()),
                     None => true,
@@ -2265,7 +2535,7 @@ impl Computers {
         let compact = !wide;
         self.compact = compact;
         let visible = self.visible(&items, signed_in);
-        self.keys(&ctx, &visible, compact);
+        self.keys(&ctx, &visible);
 
         if wide && !items.is_empty() {
             let max = (ui.available_width() - LIST_MIN - PANEL_GAP).clamp(DETAIL_MIN, DETAIL_MAX);
@@ -2313,6 +2583,9 @@ impl Computers {
             }
             if loading && visible.is_empty() {
                 return;
+            }
+            if signed_in && matches!(&snap.machines, Some(Ok(_))) {
+                self.this_card(ui, &machines);
             }
             self.list_ui(ui, &items, &visible, compact, signed_in);
         });
@@ -2637,6 +2910,7 @@ mod sample {
             direct: false,
             version: "0.4.0".into(),
             ring: Default::default(),
+            here: None,
         }
     }
 
@@ -2891,6 +3165,41 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
         screen("computers-no-results", || {
             let mut c = Computers::sample_full();
             c.search = "k3f9@192.168.0.77".into();
+            page(c, true)
+        }),
+        // Signed in on a computer someone else registered and shared nothing with: listed
+        // first, no Connect or Files, its owner and who it is shared with, manageable here.
+        screen("computers-this-of-someone-else", || {
+            let mut list = sample::machines();
+            list[5].here = Some(Here::View);
+            list[5].can_access = false;
+            list[5].access = rdesk_proto::Access::NONE;
+            list[5].visibility = Visibility::Shared;
+            let mut c = Computers::sample(Some(Ok(list.clone())), Vec::new(), sample::locals());
+            c.this_host = Some(list[5].endpoint_id.clone());
+            c.select_sample(6);
+            c.detail.as_mut().unwrap().history = None;
+            page(c, true)
+        }),
+        screen("computers-this-mine", || {
+            let mut c = Computers::sample_full();
+            c.this_host = Some(sample::machines()[0].endpoint_id.clone());
+            page(c, true)
+        }),
+        screen("computers-this-not-registered", || {
+            let mut c = Computers::sample_full();
+            c.this_host = Some("ab".repeat(32));
+            page(c, true)
+        }),
+        screen("computers-this-other-server", || {
+            let mut c = Computers::sample_full();
+            c.this_host = Some("ab".repeat(32));
+            c.this_registered = Some("Notebook do escritório em rdesk da Família Santos".into());
+            page(c, true)
+        }),
+        screen("computers-restart-as-admin", || {
+            let mut c = Computers::sample_full();
+            c.dialog = Some(Dialog::RestartAsAdmin);
             page(c, true)
         }),
         screen("computers-empty", || page(Computers::sample(Some(Ok(Vec::new())), Vec::new(), Vec::new()), true)),
