@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rdesk_common::account::{NotSignedIn, Registration};
 use rdesk_common::transport::Endpoint;
+use rdesk_common::{t, tf};
 use rdesk_proto::api::AgentSync;
 
 use crate::control::Reporter;
@@ -21,7 +22,7 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
         }
     };
     let Some(policy) = server.ticket.clone() else { return };
-    let label = format!("{} on {}", reg.name, reg.server_name);
+    let label = tf!("{} on {}", "{} em {}", reg.name, reg.server_name);
     let mut cursor = 0;
     let mut backoff = Duration::from_secs(2);
     let mut reported_error = false;
@@ -76,7 +77,13 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                     {
                         r.server_key = hex::encode(keys[0]);
                         let _ = r.save();
-                        reporter.event("The server's ticket key changed (rotation)", false);
+                        reporter.event(
+                            t!(
+                                "The server's ticket key changed (rotation)",
+                                "A chave de tickets do servidor mudou (rotação)"
+                            ),
+                            false,
+                        );
                     }
                 }
                 server.enforce_revocations().await;
@@ -95,8 +102,14 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
             }
             Err(e) if e.downcast_ref::<NotSignedIn>().is_some() => {
                 // Unregistered (or registered again elsewhere): stop using this registration.
-                reporter.event(format!("The server no longer knows this computer ({e:#})"), true);
-                reporter.registration(Some(Err("unregistered on the server".into())));
+                reporter.event(
+                    tf!(
+                        "The server no longer knows this computer ({e:#})",
+                        "O servidor não conhece mais este computador ({e:#})"
+                    ),
+                    true,
+                );
+                reporter.registration(Some(Err(t!("unregistered on the server", "descadastrado no servidor").into())));
                 let _ = Registration::clear();
                 return;
             }
@@ -104,8 +117,11 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                 requeue(&server, req);
                 // Server unreachable: tickets already issued keep working (up to 12 h).
                 if !reported_error {
-                    reporter.event(format!("Cannot reach the rdesk server: {e:#}"), true);
-                    reporter.registration(Some(Err(format!("server unreachable: {e:#}"))));
+                    reporter.event(
+                        tf!("Cannot reach the rdesk server: {e:#}", "Não foi possível acessar o servidor rdesk: {e:#}"),
+                        true,
+                    );
+                    reporter.registration(Some(Err(tf!("server unreachable: {e:#}", "servidor inacessível: {e:#}"))));
                     reported_error = true;
                 }
                 tokio::time::sleep(backoff).await;

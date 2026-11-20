@@ -343,11 +343,19 @@ pub struct AppSettings {
     pub start_minimized: bool,
     /// Used without a server: only computers on this network (chosen on the sign-in page).
     pub local_only: bool,
+    /// The app's language (English or Brazilian Portuguese; the system's by default).
+    pub language: crate::i18n::LanguagePref,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { host_enabled: false, close_to_tray: true, start_minimized: false, local_only: false }
+        Self {
+            host_enabled: false,
+            close_to_tray: true,
+            start_minimized: false,
+            local_only: false,
+            language: Default::default(),
+        }
     }
 }
 

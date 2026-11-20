@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use egui::{Color32, RichText};
+use rdesk_common::{t, tf};
 
 pub use autostart::{Autostart, apply as apply_autostart, current as current_autostart};
 
@@ -261,13 +262,13 @@ impl App {
                     clicked = Some(page);
                 }
             };
-            tab(ui, Page::Computers, "🖥  Computers");
+            tab(ui, Page::Computers, t!("🖥  Computers", "🖥  Computadores"));
             #[cfg(feature = "host")]
-            tab(ui, Page::ThisComputer, "🏠  This computer");
+            tab(ui, Page::ThisComputer, t!("🏠  This computer", "🏠  Este computador"));
             if self.account.signed_in() {
-                tab(ui, Page::Groups, "👥  Groups");
+                tab(ui, Page::Groups, t!("👥  Groups", "👥  Grupos"));
             }
-            tab(ui, Page::Settings, "⚙  Settings");
+            tab(ui, Page::Settings, t!("⚙  Settings", "⚙  Configurações"));
             if self.account.is_admin() {
                 tab(ui, Page::Admin, "🛡  Admin");
             }
@@ -286,11 +287,14 @@ impl App {
                 let (color, text) = if on {
                     (Color32::from_rgb(46, 184, 92), format!("● Host {}", self.host.summary()))
                 } else {
-                    (Color32::GRAY, "○ Host off".to_string())
+                    (Color32::GRAY, t!("○ Host off", "○ Host desligado").to_string())
                 };
                 if ui
                     .add(egui::Button::new(RichText::new(text).color(color)).frame(false))
-                    .on_hover_text("Others can connect to this computer while the host is on")
+                    .on_hover_text(t!(
+                        "Others can connect to this computer while the host is on",
+                        "Outras pessoas podem se conectar a este computador enquanto o host está ligado"
+                    ))
                     .clicked()
                 {
                     self.page = Page::ThisComputer;
@@ -396,11 +400,13 @@ impl eframe::App for App {
                 self.account.login_screen(ui, |ui, _server| {
                     ui.add_space(10.0);
                     if ui
-                        .button("Use on this network, without a server")
-                        .on_hover_text(
+                        .button(t!("Use on this network, without a server", "Usar nesta rede, sem servidor"))
+                        .on_hover_text(t!(
                             "Only computers on the local network or Tailscale that let you in with their own \
                              password or SSH key",
-                        )
+                            "Só computadores da rede local ou do Tailscale que deixam você entrar com a senha ou \
+                             chave SSH deles"
+                        ))
                         .clicked()
                     {
                         go_local = true;
@@ -444,18 +450,30 @@ impl eframe::App for App {
                     }
                     None => {
                         ui.weak(match self.page {
-                            Page::Computers => "Double-click a computer to connect · right-click for more",
+                            Page::Computers => t!(
+                                "Double-click a computer to connect · right-click for more",
+                                "Clique duas vezes em um computador para conectar · botão direito para mais"
+                            ),
                             #[cfg(feature = "host")]
-                            Page::ThisComputer => "Others can connect to this computer while the host is on",
-                            Page::Settings => "Changes are saved immediately",
-                            Page::Admin => "Only these e-mails can sign in to your server",
-                            Page::Groups => "Share computers with a group from the Computers page",
+                            Page::ThisComputer => t!(
+                                "Others can connect to this computer while the host is on",
+                                "Outras pessoas podem se conectar a este computador enquanto o host está ligado"
+                            ),
+                            Page::Settings => t!("Changes are saved immediately", "As alterações são salvas na hora"),
+                            Page::Admin => t!(
+                                "Only these e-mails can sign in to your server",
+                                "Só estes e-mails podem entrar no seu servidor"
+                            ),
+                            Page::Groups => t!(
+                                "Share computers with a group from the Computers page",
+                                "Compartilhe computadores com um grupo na página Computadores"
+                            ),
                         });
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if sessions > 0 {
-                        ui.label(format!("{sessions} open session(s)"));
+                        ui.label(tf!("{sessions} open session(s)", "{sessions} sessão(ões) aberta(s)"));
                     }
                 });
             });
@@ -466,10 +484,13 @@ impl eframe::App for App {
             Page::ThisComputer => self.host.show(ui),
             Page::Settings => {
                 if self.local_mode && !self.account.signed_in() {
-                    ui.label(RichText::new("Account").strong().size(16.0));
+                    ui.label(RichText::new(t!("Account", "Conta")).strong().size(16.0));
                     ui.horizontal(|ui| {
-                        ui.label("Used without a server: only computers on this network.");
-                        if ui.button("Sign in to a server…").clicked() {
+                        ui.label(t!(
+                            "Used without a server: only computers on this network.",
+                            "Usado sem servidor: só computadores desta rede."
+                        ));
+                        if ui.button(t!("Sign in to a server…", "Entrar em um servidor…")).clicked() {
                             self.local_mode = false;
                             set_local_only(false);
                         }

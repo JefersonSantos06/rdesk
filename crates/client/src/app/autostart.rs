@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use rdesk_common::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Autostart {
@@ -58,7 +59,7 @@ pub fn apply_with_elevation(mode: Autostart, exe: &Path) -> Result<Autostart> {
     imp::apply_with_elevation(mode, exe)?;
     let now = current();
     if now != mode {
-        bail!("the change did not take effect (now: {})", now.arg());
+        bail!(tf!("the change did not take effect (now: {})", "a mudança não teve efeito (agora: {})", now.arg()));
     }
     Ok(now)
 }
@@ -72,7 +73,7 @@ pub fn service_action(exe: &Path, install: bool) -> Result<String> {
 
 #[cfg(all(not(windows), feature = "host"))]
 pub fn service_action(_exe: &Path, _install: bool) -> Result<String> {
-    bail!("the rdesk service exists only on Windows")
+    bail!(t!("the rdesk service exists only on Windows", "o serviço do rdesk só existe no Windows"))
 }
 
 /// Start a new elevated copy of the app that takes over from this one.
@@ -137,7 +138,10 @@ mod imp {
             )
         };
         if rc != ERROR_SUCCESS {
-            bail!("writing the Run registry key failed (error {rc})");
+            bail!(tf!(
+                "writing the Run registry key failed (error {rc})",
+                "falha ao gravar a chave Run do registro (erro {rc})"
+            ));
         }
         Ok(())
     }
@@ -165,7 +169,7 @@ mod imp {
         let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
             (Ok(d), Ok(u)) => format!("{d}\\{u}"),
             (_, Ok(u)) => u,
-            _ => bail!("cannot tell the current user name"),
+            _ => bail!(t!("cannot tell the current user name", "não foi possível saber o nome do usuário atual")),
         };
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -257,9 +261,9 @@ mod imp {
             let e = std::io::Error::last_os_error();
             // ERROR_CANCELLED: the user said no to the UAC prompt.
             if e.raw_os_error() == Some(1223) {
-                bail!("administrator permission was not given");
+                bail!(t!("administrator permission was not given", "a permissão de administrador não foi dada"));
             }
-            return Err(anyhow!(e).context("starting as administrator"));
+            return Err(anyhow!(e).context(t!("starting as administrator", "iniciando como administrador")));
         }
         let mut code = 0u32;
         if !info.hProcess.is_null() {
@@ -292,7 +296,10 @@ mod imp {
         }
         let code = run_elevated(exe, &format!("autostart {}", mode.arg()), false, true)?;
         if code != 0 {
-            bail!("the elevated helper failed (exit code {code})");
+            bail!(tf!(
+                "the elevated helper failed (exit code {code})",
+                "o auxiliar como administrador falhou (código de saída {code})"
+            ));
         }
         Ok(())
     }
@@ -318,9 +325,17 @@ mod imp {
         }
         let code = run_elevated(exe, if install { "install" } else { "uninstall" }, false, true)?;
         if code != 0 {
-            bail!("the elevated helper failed (exit code {code}); `rdesk service status` in a terminal says more");
+            bail!(tf!(
+                "the elevated helper failed (exit code {code}); `rdesk service status` in a terminal says more",
+                "o auxiliar como administrador falhou (código de saída {code}); `rdesk service status` num \n                 terminal dá mais detalhes"
+            ));
         }
-        Ok(if install { "The rdesk service is installed and running." } else { "The rdesk service is removed." }.into())
+        Ok(if install {
+            t!("The rdesk service is installed and running.", "O serviço do rdesk está instalado e em execução.")
+        } else {
+            t!("The rdesk service is removed.", "O serviço do rdesk foi removido.")
+        }
+        .into())
     }
 }
 
@@ -330,7 +345,10 @@ mod imp {
     use anyhow::Context;
 
     fn plist() -> Result<std::path::PathBuf> {
-        let home = directories::BaseDirs::new().context("no home folder")?.home_dir().to_path_buf();
+        let home = directories::BaseDirs::new()
+            .context(t!("no home folder", "pasta pessoal não encontrada"))?
+            .home_dir()
+            .to_path_buf();
         Ok(home.join("Library/LaunchAgents/dev.rdesk.app.plist"))
     }
 
@@ -369,7 +387,7 @@ mod imp {
                 std::fs::write(&p, xml)?;
                 Ok(())
             }
-            Autostart::LoginAdmin => bail!("not available on macOS"),
+            Autostart::LoginAdmin => bail!(t!("not available on macOS", "não disponível no macOS")),
         }
     }
 
@@ -379,7 +397,7 @@ mod imp {
 
     #[cfg_attr(not(feature = "host"), allow(dead_code))]
     pub fn restart_as_admin(_exe: &Path) -> Result<()> {
-        bail!("not available on macOS")
+        bail!(t!("not available on macOS", "não disponível no macOS"))
     }
 }
 
@@ -389,7 +407,10 @@ mod imp {
     use anyhow::Context;
 
     fn entry() -> Result<std::path::PathBuf> {
-        let cfg = directories::BaseDirs::new().context("no home folder")?.config_dir().to_path_buf();
+        let cfg = directories::BaseDirs::new()
+            .context(t!("no home folder", "pasta pessoal não encontrada"))?
+            .config_dir()
+            .to_path_buf();
         Ok(cfg.join("autostart/rdesk.desktop"))
     }
 
@@ -416,7 +437,7 @@ mod imp {
                 std::fs::write(&p, text)?;
                 Ok(())
             }
-            Autostart::LoginAdmin => bail!("not available on Linux"),
+            Autostart::LoginAdmin => bail!(t!("not available on Linux", "não disponível no Linux")),
         }
     }
 
@@ -426,6 +447,6 @@ mod imp {
 
     #[cfg_attr(not(feature = "host"), allow(dead_code))]
     pub fn restart_as_admin(_exe: &Path) -> Result<()> {
-        bail!("not available on Linux")
+        bail!(t!("not available on Linux", "não disponível no Linux"))
     }
 }

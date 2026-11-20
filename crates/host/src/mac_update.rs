@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use rdesk_common::release::{check_file, download, file_for, verify_manifest};
+use rdesk_common::tf;
 use rdesk_proto::api::UpdateOffer;
 use rdesk_proto::release::FileKind;
 
@@ -38,7 +39,13 @@ static TRIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub(crate) async fn install(offer: UpdateOffer, server: Arc<Server>, reporter: Reporter) {
     let version = offer.version.clone();
     let Some(app) = bundle() else {
-        reporter.event(format!("rdesk {version} is available: download it from the release page"), false);
+        reporter.event(
+            tf!(
+                "rdesk {version} is available: download it from the release page",
+                "rdesk {version} está disponível: baixe-o na página de versões"
+            ),
+            false,
+        );
         return;
     };
     {
@@ -51,17 +58,32 @@ pub(crate) async fn install(offer: UpdateOffer, server: Arc<Server>, reporter: R
     let staged = match prepare(&offer, &app).await {
         Ok(p) => p,
         Err(e) => {
-            reporter.event(format!("Could not download rdesk {version}: {e:#}"), true);
+            reporter.event(
+                tf!("Could not download rdesk {version}: {e:#}", "Não foi possível baixar o rdesk {version}: {e:#}"),
+                true,
+            );
             return;
         }
     };
-    reporter.event(format!("rdesk {version} downloaded; it installs when nobody is connected"), false);
+    reporter.event(
+        tf!(
+            "rdesk {version} downloaded; it installs when nobody is connected",
+            "rdesk {version} baixado; ele é instalado quando ninguém estiver conectado"
+        ),
+        false,
+    );
     while server.in_session().await {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
     match swap(&app, &staged) {
-        Ok(()) => reporter.event(format!("Installed rdesk {version}; the app starts again"), false),
-        Err(e) => reporter.event(format!("Could not install rdesk {version}: {e:#}"), true),
+        Ok(()) => reporter.event(
+            tf!("Installed rdesk {version}; the app starts again", "rdesk {version} instalado; o app inicia de novo"),
+            false,
+        ),
+        Err(e) => reporter.event(
+            tf!("Could not install rdesk {version}: {e:#}", "Não foi possível instalar o rdesk {version}: {e:#}"),
+            true,
+        ),
     }
 }
 

@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use rdesk_common::t;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -39,7 +40,7 @@ pub async fn request(req: &Request) -> Result<Response> {
     #[cfg(not(windows))]
     {
         let _ = req;
-        Err(anyhow!("the rdesk service exists only on Windows"))
+        Err(anyhow!(t!("the rdesk service exists only on Windows", "o serviço do rdesk só existe no Windows")))
     }
 }
 
@@ -47,7 +48,7 @@ async fn expect_ok(req: Request) -> Result<()> {
     match request(&req).await? {
         Response::Ok => Ok(()),
         Response::Error(e) => Err(anyhow!(e)),
-        Response::Status(_) => Err(anyhow!("unexpected answer from the host")),
+        Response::Status(_) => Err(anyhow!(t!("unexpected answer from the host", "resposta inesperada do host"))),
     }
 }
 
@@ -64,7 +65,11 @@ impl RemoteHost {
                     Ok(Ok(Response::Status(s))) => *s,
                     _ => HostStatus {
                         state: HostState::Failed(
-                            "The rdesk service is not answering (it may be starting, or stopped).".into(),
+                            t!(
+                                "The rdesk service is not answering (it may be starting, or stopped).",
+                                "O serviço do rdesk não está respondendo (pode estar iniciando ou parado)."
+                            )
+                            .into(),
                         ),
                         ..Default::default()
                     },
@@ -211,11 +216,20 @@ mod imp {
                 Response::Ok
             }
             Ok(Request::Restart) if client_is_admin(&pipe) => {
-                reporter.event("Restarting with the new settings", false);
+                reporter.event(
+                    rdesk_common::t!("Restarting with the new settings", "Reiniciando com as novas configurações"),
+                    false,
+                );
                 let _ = ctl.send(Ctl::Stop);
                 Response::Ok
             }
-            Ok(Request::Restart) => Response::Error("only an administrator can restart the host".into()),
+            Ok(Request::Restart) => Response::Error(
+                rdesk_common::t!(
+                    "only an administrator can restart the host",
+                    "só um administrador pode reiniciar o host"
+                )
+                .into(),
+            ),
             Err(e) => Response::Error(format!("bad request: {e}")),
         };
         let mut out = serde_json::to_string(&resp)?;

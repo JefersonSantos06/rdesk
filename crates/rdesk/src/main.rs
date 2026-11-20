@@ -779,6 +779,18 @@ fn main() -> Result<()> {
     } else {
         init_logging(cli.verbose)
     }
+    // The language of what people read: the app (and its helpers in the user's session)
+    // follows Settings, the service the system's; the command line stays in English.
+    // The file and terminal helper runs as the signed-in person, for the service.
+    #[cfg(feature = "host")]
+    let helper = matches!(cli.cmd, Some(Command::Host(HostCmd::FileHelper(_))));
+    #[cfg(not(feature = "host"))]
+    let helper = false;
+    if app || agent || helper {
+        rdesk_common::i18n::init_from_config();
+    } else if service {
+        rdesk_common::i18n::set(rdesk_common::i18n::system());
+    }
     let Some(cmd) = cli.cmd else {
         return no_command();
     };
@@ -1616,6 +1628,8 @@ fn connect(a: ConnectArgs) -> Result<()> {
             },
         );
     }
+    // The session window speaks the app's language.
+    rdesk_common::i18n::init_from_config();
     let swap = a.swap_cmd_ctrl || t.cfg.swap_cmd_ctrl || (cfg!(target_os = "macos") && !a.no_swap_cmd_ctrl);
     let download_dir = directories::UserDirs::new()
         .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))

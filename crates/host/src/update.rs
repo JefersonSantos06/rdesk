@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use rdesk_common::{t, tf};
 use rdesk_proto::api::UpdateOffer;
 use rdesk_proto::release::parse_version;
 
@@ -31,13 +32,16 @@ pub(crate) fn offered(offer: UpdateOffer, server: &Arc<Server>, reporter: &Repor
     }
     let _ = server;
     let how = if cfg!(windows) {
-        "install the rdesk service (This computer) to get updates by itself"
+        t!(
+            "install the rdesk service (This computer) to get updates by itself",
+            "instale o serviço do rdesk (Este computador) para receber atualizações sozinho"
+        )
     } else if cfg!(target_os = "linux") {
-        "the rdesk-update timer installs it, if set up"
+        t!("the rdesk-update timer installs it, if set up", "o timer rdesk-update o instala, se estiver configurado")
     } else {
-        "download it from the release page"
+        t!("download it from the release page", "baixe-o na página de versões")
     };
-    reporter.event(format!("rdesk {} is available: {how}", offer.version), false);
+    reporter.event(tf!("rdesk {} is available: {how}", "rdesk {} está disponível: {how}", offer.version), false);
 }
 
 #[cfg(test)]

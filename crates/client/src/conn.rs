@@ -16,6 +16,7 @@ use rdesk_common::config::{AuthPref, HostEntry, NetworkConfig, TransportTuning};
 use rdesk_common::files;
 use rdesk_common::tiles::{Frame, TileRect};
 use rdesk_common::transport::{self, Connection, ConnectionError, Endpoint, RecvStream, Role, SendStream, close};
+use rdesk_common::{t, tf};
 use rdesk_proto::{
     ClientMsg, DirEntry, FrameAck, FrameHeader, HostInfo, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_VIDEO_MSG,
     MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg, write_msg,
@@ -48,9 +49,39 @@ impl PasswordReply {
     }
 }
 
+/// Where the connection stands, in a word (the window title, the connecting card).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    Connecting,
+    Reconnecting,
+    Authenticating,
+    Connected {
+        host: String,
+    },
+    /// The connection dropped (why, as people read it) and is being tried again.
+    Retrying(String),
+    /// Ended for good (the window shows why).
+    Disconnected,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Status::Connecting => f.write_str(t!("Connecting…", "Conectando…")),
+            Status::Reconnecting => f.write_str(t!("Reconnecting…", "Reconectando…")),
+            Status::Authenticating => f.write_str(t!("Authenticating…", "Autenticando…")),
+            Status::Connected { host } => f.write_str(&tf!("Connected to {host}", "Conectado a {host}")),
+            Status::Retrying(reason) => {
+                f.write_str(&tf!("Disconnected ({reason}). Reconnecting…", "Desconectado ({reason}). Reconectando…"))
+            }
+            Status::Disconnected => f.write_str(t!("Disconnected", "Desconectado")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    Status(String),
+    Status(Status),
     /// Show a password dialog for `host`; `error` explains a previous failed attempt.
     PasswordNeeded {
         host: String,
@@ -225,7 +256,14 @@ pub async fn get_ticket(machine: i64, client: &[u8; 32], cache: &mut CachedTicke
         return Ok(t.clone());
     }
     let Some(session) = Session::load() else {
-        return Err((true, "Not signed in to rdesk: sign in in the app (or `rdesk login`).".into()));
+        return Err((
+            true,
+            t!(
+                "Not signed in to rdesk: sign in in the app (or `rdesk login`).",
+                "Você não entrou no rdesk: entre pelo app (ou `rdesk login`)."
+            )
+            .into(),
+        ));
     };
     let api = session.api().map_err(|e| (true, format!("{e:#}")))?;
     match api.ticket(machine, client).await {
@@ -233,9 +271,13 @@ pub async fn get_ticket(machine: i64, client: &[u8; 32], cache: &mut CachedTicke
             *cache = Some((bytes.clone(), r.expires_at));
             Ok(bytes)
         }
-        Err(e) if e.downcast_ref::<NotSignedIn>().is_some() => {
-            Err((true, format!("The server ended your sign-in ({e:#}): sign in again in the app.")))
-        }
+        Err(e) if e.downcast_ref::<NotSignedIn>().is_some() => Err((
+            true,
+            tf!(
+                "The server ended your sign-in ({e:#}): sign in again in the app.",
+                "O servidor encerrou seu acesso ({e:#}): entre de novo pelo app."
+            ),
+        )),
         Err(e) => {
             let msg = format!("{e:#}");
             // No access (any more) or the computer is gone: retrying will not help.
@@ -268,12 +310,12 @@ pub fn spawn(opts: ConnectOpts, notify: impl Fn(UiEvent) + Send + Sync + 'static
     Handle { cmd: cmd_tx, view, thread }
 }
 
-const WRONG_PASSWORD: &str = "wrong password";
-
 enum End {
     Quit,
     Fatal(String),
     Retry(String),
+    /// The typed (or saved) password was rejected: ask again right away.
+    WrongPassword,
 }
 
 pub type Notify = Arc<dyn Fn(UiEvent) + Send + Sync>;
@@ -303,7 +345,7 @@ async fn reconnect_loop(
     let mut failures = 0u32;
     let mut password_hint: Option<String> = None;
     loop {
-        notify(UiEvent::Status(if failures == 0 { "Connecting…".into() } else { "Reconnecting…".into() }));
+        notify(UiEvent::Status(if failures == 0 { Status::Connecting } else { Status::Reconnecting }));
         let started = Instant::now();
         let end = once(
             &opts,
@@ -331,18 +373,24 @@ async fn reconnect_loop(
                 }
                 failures = 0;
             }
-            End::Retry(msg) => {
+            end @ (End::Retry(_) | End::WrongPassword) => {
                 // A session that lasted a while resets the backoff.
                 if started.elapsed() > Duration::from_secs(10) {
                     failures = 0;
                 }
                 let delay = [0, 250, 500, 1000, 2000][(failures as usize).min(4)];
                 failures += 1;
-                tracing::info!("disconnected: {msg}; retrying in {delay} ms");
-                notify(UiEvent::Status(format!("Disconnected ({msg}). Reconnecting…")));
-                // A rejected password is asked again right away: the session was not lost.
-                if msg != WRONG_PASSWORD {
-                    notify(UiEvent::Reconnecting { reason: msg, attempt: failures });
+                match end {
+                    End::Retry(msg) => {
+                        tracing::info!("disconnected: {msg}; retrying in {delay} ms");
+                        notify(UiEvent::Status(Status::Retrying(msg.clone())));
+                        notify(UiEvent::Reconnecting { reason: msg, attempt: failures });
+                    }
+                    // A rejected password is asked again right away: the session was not lost.
+                    _ => {
+                        tracing::info!("disconnected: wrong password; retrying in {delay} ms");
+                        notify(UiEvent::Status(Status::Retrying(t!("wrong password", "senha incorreta").into())));
+                    }
                 }
                 let sleep = tokio::time::sleep(Duration::from_millis(delay));
                 tokio::pin!(sleep);
@@ -418,7 +466,7 @@ pub fn password_asker(
                     }
                 }
                 None => {
-                    let prompt = format!("rdesk password for {target}: ");
+                    let prompt = tf!("rdesk password for {target}: ", "Senha do rdesk para {target}: ");
                     let p = tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt)).await??;
                     (Zeroizing::new(p), false)
                 }
@@ -482,9 +530,17 @@ pub async fn settle_password(target: &str, used: Option<PasswordUse>, ok: bool) 
         }
         (Some(PasswordUse::Keychain), false) => {
             let _ = tokio::task::spawn_blocking(move || crate::secrets::forget(&t)).await;
-            Ok(Some("The saved password was not accepted. Type it again.".into()))
+            Ok(Some(
+                t!(
+                    "The saved password was not accepted. Type it again.",
+                    "A senha salva não foi aceita. Digite-a de novo."
+                )
+                .into(),
+            ))
         }
-        (Some(PasswordUse::Typed { .. }), false) => Ok(Some("Wrong password, try again.".into())),
+        (Some(PasswordUse::Typed { .. }), false) => {
+            Ok(Some(t!("Wrong password, try again.", "Senha incorreta, tente de novo.").into()))
+        }
         _ => Ok(None),
     }
 }
@@ -559,7 +615,7 @@ async fn once(
         Ok(s) => s,
         Err(e) => return End::Retry(e.to_string()),
     };
-    notify(UiEvent::Status("Authenticating…".into()));
+    notify(UiEvent::Status(Status::Authenticating));
     let used: PasswordUsed = Arc::new(Mutex::new(None));
     let ui = opts.ask_password_in_ui.then(|| (notify.clone(), password_hint.take()));
     let asker = password_asker(&opts.name, &opts.entry, used.clone(), ui);
@@ -575,14 +631,17 @@ async fn once(
     let ok = match result {
         Ok(Ok(ok)) => {
             if let Err(e) = settle_password(&opts.name, use_, true).await {
-                notify(UiEvent::Notice(format!("Could not remember the password: {e}")));
+                notify(UiEvent::Notice(tf!(
+                    "Could not remember the password: {e}",
+                    "Não foi possível guardar a senha: {e}"
+                )));
             }
             ok
         }
         Ok(Err(e)) => {
             conn.close(close::NORMAL, b"");
             if e.downcast_ref::<PasswordCancelled>().is_some() {
-                return End::Fatal("Login cancelled.".into());
+                return End::Fatal(t!("Login cancelled.", "Login cancelado.").into());
             }
             if e.downcast_ref::<PasswordUnavailable>().is_some() {
                 return End::Fatal(format!("{e:#}"));
@@ -594,7 +653,7 @@ async fn once(
                 if retry {
                     // Ask again; the host's per-IP backoff keeps this from becoming a guessing loop.
                     *password_hint = hint;
-                    return End::Retry(WRONG_PASSWORD.into());
+                    return End::WrongPassword;
                 }
                 return End::Fatal(format!("{e:#}"));
             }
@@ -605,14 +664,14 @@ async fn once(
         }
         Err(_) => {
             conn.close(close::NORMAL, b"");
-            return End::Retry("authentication timed out".into());
+            return End::Retry(t!("authentication timed out", "a autenticação expirou").into());
         }
     };
     *resume = Some((ok.session_id, ok.resume_token));
     notify(UiEvent::Connected(ok.host.clone()));
     let access: rdesk_proto::Access = ok.access.into();
     notify(UiEvent::Access(access));
-    notify(UiEvent::Status(format!("Connected to {}", ok.host.hostname)));
+    notify(UiEvent::Status(Status::Connected { host: ok.host.hostname.clone() }));
 
     // The clipboard goes both ways: only with full control.
     let clipboard = opts.clipboard && access.input;
@@ -622,17 +681,22 @@ async fn once(
             End::Quit
         }
         Ok(false) | Err(_) => match conn.close_reason() {
-            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::REPLACED => {
-                End::Fatal("Another rdesk client connected to this host; this session was closed.".into())
-            }
-            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::KICKED => {
-                End::Fatal("The session was ended from the host computer.".into())
-            }
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::REPLACED => End::Fatal(
+                t!(
+                    "Another rdesk client connected to this host; this session was closed.",
+                    "Outro cliente rdesk se conectou a este host; esta sessão foi fechada."
+                )
+                .into(),
+            ),
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::KICKED => End::Fatal(
+                t!("The session was ended from the host computer.", "A sessão foi encerrada no computador host.")
+                    .into(),
+            ),
             Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::SHUTDOWN => {
-                End::Retry("host restarting".into())
+                End::Retry(t!("host restarting", "o host está reiniciando").into())
             }
             Some(e) => End::Retry(e.to_string()),
-            None => End::Retry("connection lost".into()),
+            None => End::Retry(t!("connection lost", "conexão perdida").into()),
         },
     }
 }

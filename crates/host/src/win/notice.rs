@@ -9,6 +9,7 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use rdesk_common::t;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -44,7 +45,10 @@ const PILL_H: i32 = 28;
 const PAD: i32 = 10;
 const DOT: i32 = 8;
 const GAP: i32 = 8;
+/// The narrowest the button gets; wider when its label needs it.
 const BUTTON_W: i32 = 48;
+/// Space on each side of the button's label.
+const BUTTON_PAD: i32 = 10;
 const BUTTON_H: i32 = 20;
 const MAX_TEXT_W: i32 = 300;
 const TAB_W: i32 = 48;
@@ -76,6 +80,8 @@ struct State {
     font: HFONT,
     bold: HFONT,
     text_w: i32,
+    /// The button's width in pixels (fits its label).
+    button_w: i32,
     /// The mouse is over the window (a leave notification is pending).
     tracking: bool,
     over_button: bool,
@@ -89,7 +95,7 @@ impl State {
 
     fn size(&self) -> (i32, i32) {
         if self.open {
-            (self.px(PAD + DOT + GAP) + self.text_w + self.px(GAP + BUTTON_W + 4), self.px(PILL_H))
+            (self.px(PAD + DOT + GAP + GAP + 4) + self.text_w + self.button_w, self.px(PILL_H))
         } else {
             (self.px(TAB_W), self.px(TAB_H))
         }
@@ -98,7 +104,7 @@ impl State {
     fn button(&self) -> RECT {
         let (w, _) = self.size();
         let top = self.px((PILL_H - BUTTON_H) / 2);
-        RECT { left: w - self.px(4 + BUTTON_W), top, right: w - self.px(4), bottom: top + self.px(BUTTON_H) }
+        RECT { left: w - self.px(4) - self.button_w, top, right: w - self.px(4), bottom: top + self.px(BUTTON_H) }
     }
 
     fn on_button(&self, x: i32, y: i32) -> bool {
@@ -121,16 +127,9 @@ impl State {
     }
 
     fn measure(&mut self) {
-        let w = wide(&self.text);
-        let mut size = SIZE { cx: 0, cy: 0 };
-        unsafe {
-            let dc = GetDC(null_mut());
-            let old = SelectObject(dc, self.font as HGDIOBJ);
-            GetTextExtentPoint32W(dc, w.as_ptr(), w.len() as i32 - 1, &mut size);
-            SelectObject(dc, old);
-            ReleaseDC(null_mut(), dc);
-        }
-        self.text_w = size.cx.min(self.px(MAX_TEXT_W));
+        self.text_w = text_width(&self.text, self.font).min(self.px(MAX_TEXT_W));
+        let label = text_width(end_label(), self.bold) + self.px(2 * BUTTON_PAD);
+        self.button_w = label.max(self.px(BUTTON_W));
     }
 }
 
@@ -142,6 +141,25 @@ thread_local! {
 /// can send a message back to the window (it would find the state borrowed).
 fn with<R: Default>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| s.borrow_mut().as_mut().map(f).unwrap_or_default())
+}
+
+/// The button's label (measured: "Encerrar" is wider than "End").
+fn end_label() -> &'static str {
+    t!("End", "Encerrar")
+}
+
+/// How wide `text` is in `font`, in pixels.
+fn text_width(text: &str, font: HFONT) -> i32 {
+    let w = wide(text);
+    let mut size = SIZE { cx: 0, cy: 0 };
+    unsafe {
+        let dc = GetDC(null_mut());
+        let old = SelectObject(dc, font as HGDIOBJ);
+        GetTextExtentPoint32W(dc, w.as_ptr(), w.len() as i32 - 1, &mut size);
+        SelectObject(dc, old);
+        ReleaseDC(null_mut(), dc);
+    }
+    size.cx
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -238,6 +256,7 @@ unsafe fn window_thread() {
             font: null_mut(),
             bold: null_mut(),
             text_w: 0,
+            button_w: 0,
             tracking: false,
             over_button: false,
             pressed: false,
@@ -320,7 +339,7 @@ unsafe fn paint(s: &State, dc: HDC, rc: &RECT) {
         // The button.
         fill_round(&button, if s.over_button { END_HOVER } else { END }, s.px(6));
         SelectObject(dc, s.bold as HGDIOBJ);
-        let mut label = wide("End");
+        let mut label = wide(end_label());
         let mut label_rc = button;
         DrawTextW(
             dc,

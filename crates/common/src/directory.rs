@@ -4,14 +4,13 @@
 /// "just now", "5 min ago", "3 h ago", "2 days ago" (Unix seconds).
 pub fn ago(then: i64, now: i64) -> String {
     let s = (now - then).max(0);
+    let (m, h, d) = (s / 60, s / 3600, s / 86_400);
     match s {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", s / 60),
-        3600..86_400 => format!("{} h ago", s / 3600),
-        _ => {
-            let d = s / 86_400;
-            if d == 1 { "1 day ago".into() } else { format!("{d} days ago") }
-        }
+        0..60 => crate::t!("just now", "agora há pouco").into(),
+        60..3600 => crate::tf!("{m} min ago", "há {m} min"),
+        3600..86_400 => crate::tf!("{h} h ago", "há {h} h"),
+        _ if d == 1 => crate::t!("1 day ago", "há 1 dia").into(),
+        _ => crate::tf!("{d} days ago", "há {d} dias"),
     }
 }
 
@@ -21,6 +20,7 @@ mod tests {
 
     #[test]
     fn ago_texts() {
+        let _lang = crate::i18n::TEST_LOCK.lock().unwrap();
         assert_eq!(ago(100, 130), "just now");
         assert_eq!(ago(0, 7200), "2 h ago");
         assert_eq!(ago(0, 86_400), "1 day ago");

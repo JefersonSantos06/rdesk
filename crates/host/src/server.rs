@@ -13,6 +13,7 @@ use rdesk_common::auth::{self, AuthKind, FailureLimiter, HostAuthConfig, OpaqueS
 use rdesk_common::config::{self, DirectConfig, HostConfig, format_host_id};
 use rdesk_common::ticket::{TicketPolicy, TicketUser};
 use rdesk_common::transport::{self, Connection, HostIdentity, Incoming, IncomingAddr, Role, close};
+use rdesk_common::{t, tf};
 use rdesk_proto::{ClientMsg, HostInfo, HostMsg, MAX_CONTROL_MSG, expect_msg, write_msg};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex, Semaphore, mpsc};
@@ -89,7 +90,14 @@ impl Server {
             && let Some(u) = &c.user
             && policy.is_revoked(u)
         {
-            self.reporter.event(format!("{}: access removed on the server, session ended", u.email), true);
+            self.reporter.event(
+                tf!(
+                    "{}: access removed on the server, session ended",
+                    "{}: acesso removido no servidor, sessão encerrada",
+                    u.email
+                ),
+                true,
+            );
             c.conn.close(close::KICKED, b"your access to this computer was removed");
             *cur = None;
         }
@@ -174,7 +182,8 @@ fn start_notice(reporter: &Reporter, ctl: mpsc::UnboundedSender<Ctl>) {
         let mut shown: Option<String> = None;
         loop {
             // A new terminal (or one as administrator) changes the text: the bar opens again.
-            let text = reporter.snapshot().session.map(|s| format!("{} connected{}", s.client, s.extras()));
+            let text =
+                reporter.snapshot().session.map(|s| tf!("{} connected{}", "{} conectado{}", s.client, s.extras()));
             if text != shown {
                 crate::win::notice::show(text.clone());
                 shown = text;
@@ -269,7 +278,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         match crate::enroll::until_registered(&identity, &e, &reporter, &mut ctl).await? {
             Some(r) => registration = Some(r),
             None => {
-                reporter.event("Host stopped", false);
+                reporter.event(t!("Host stopped", "O host parou"), false);
                 return Ok(());
             }
         }
@@ -283,30 +292,38 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         }),
         None => None,
     };
-    reporter.registration(registration.as_ref().map(|r| Ok(format!("{} on {}", r.name, r.server_name))));
+    reporter.registration(registration.as_ref().map(|r| Ok(tf!("{} on {}", "{} em {}", r.name, r.server_name))));
 
     let auth_cfg = load_auth_config(host_fp, ticket.clone(), cfg.require_local)?;
     let local = !auth_cfg.authorized_keys.is_empty() || auth_cfg.opaque.is_some();
     let direct = cfg.direct.is_on(ticket.is_some());
     if ticket.is_none() && !direct {
-        bail!("direct access is off and this computer is not registered with a server: nobody could reach it");
+        bail!(t!(
+            "direct access is off and this computer is not registered with a server: nobody could reach it",
+            "o acesso direto está desligado e este computador não está cadastrado em um servidor: ninguém conseguiria acessá-lo"
+        ));
     }
     if direct && ticket.is_some() {
         reporter.event(
-            format!(
+            tf!(
                 "Direct access is on: this computer's own password or key also open it from {}",
-                cfg.direct.from.join(" and ")
+                "Acesso direto ligado: a senha ou chave deste computador também o abrem a partir de {}",
+                cfg.direct.from.join(t!(" and ", " e "))
             ),
             false,
         );
     }
     if ticket.is_none() && !local {
-        bail!(
-            "no way to log in yet: add this computer to your rdesk server (`rdesk host enroll`, or register it              in the app), or set a password"
-        );
+        bail!(t!(
+            "no way to log in yet: add this computer to your rdesk server (`rdesk host enroll`, or register it              in the app), or set a password",
+            "ainda não há como entrar: adicione este computador ao seu servidor rdesk (`rdesk host enroll`, ou              cadastre-o no app), ou defina uma senha"
+        ));
     }
     if ticket.is_some() && cfg.require_local && !local {
-        bail!("the extra lock is on but this computer has no password or SSH key: set one, or turn it off");
+        bail!(t!(
+            "the extra lock is on but this computer has no password or SSH key: set one, or turn it off",
+            "o cadeado extra está ligado, mas este computador não tem senha nem chave SSH: defina uma ou desligue-o"
+        ));
     }
 
     let shared = Arc::new(Shared {
@@ -332,7 +349,9 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
                 );
             }
         }
-        Err(e) => reporter.event(format!("Cannot list monitors yet: {e:#}"), true),
+        Err(e) => {
+            reporter.event(tf!("Cannot list monitors yet: {e:#}", "Ainda não é possível listar as telas: {e:#}"), true)
+        }
     }
 
     let server = Arc::new(Server {
@@ -356,15 +375,23 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
     // Announced on the local network (opt-in): others connect with the host ID alone.
     if server.direct.as_ref().is_some_and(|d| d.mdns) {
         match transport::local_discovery(&ep, true) {
-            Ok(_) => reporter.event("Announced on the local network (mDNS)", false),
-            Err(e) => reporter.event(format!("Could not announce on the local network: {e:#}"), true),
+            Ok(_) => {
+                reporter.event(t!("Announced on the local network (mDNS)", "Anunciado na rede local (mDNS)"), false)
+            }
+            Err(e) => reporter.event(
+                tf!("Could not announce on the local network: {e:#}", "Não foi possível anunciar na rede local: {e:#}"),
+                true,
+            ),
         }
     }
     let bound = ep.bound_sockets();
     tracing::info!("host {} listening on {:?}", format_host_id(&host_fp), bound);
     reporter.state(HostState::Listening(bound.clone()));
     let port = bound.first().map(|a| a.port()).unwrap_or_default();
-    reporter.event(format!("Host ready (direct connections on UDP {port})"), false);
+    reporter.event(
+        tf!("Host ready (direct connections on UDP {port})", "Host pronto (conexões diretas na porta UDP {port})"),
+        false,
+    );
     println!("rdesk host ready. ID: {}", format_host_id(&host_fp));
     {
         let (ep, net, reporter) = (ep.clone(), net.clone(), reporter.clone());
@@ -373,15 +400,27 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
             match transport::wait_relay(&ep, &net, Duration::from_secs(10)).await {
                 Ok(true) => {
                     reporter.relay(Some(Ok(relay.clone())));
-                    reporter.event(format!("Connected to the relay {relay}"), false);
+                    reporter.event(tf!("Connected to the relay {relay}", "Conectado ao relay {relay}"), false);
                 }
                 Ok(false) => {
                     reporter.relay(None);
-                    reporter.event("Not registered with an rdesk server: reachable only by address (LAN)", true);
+                    reporter.event(
+                        t!(
+                            "Not registered with an rdesk server: reachable only by address (LAN)",
+                            "Não cadastrado em um servidor rdesk: acessível só pelo endereço (rede local)"
+                        ),
+                        true,
+                    );
                 }
                 Err(e) => {
                     reporter.relay(Some(Err(format!("{e:#}"))));
-                    reporter.event(format!("Relay {relay}: {e:#} (direct connections still work)"), true);
+                    reporter.event(
+                        tf!(
+                            "Relay {relay}: {e:#} (direct connections still work)",
+                            "Relay {relay}: {e:#} (conexões diretas continuam funcionando)"
+                        ),
+                        true,
+                    );
                 }
             }
         });
@@ -406,7 +445,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
     // Anything but Disconnect (Stop, or the controller going away) ends the host.
     while let Some(Ctl::Disconnect) = ctl.recv().await {
         if let Some(cur) = server.current.lock().await.take() {
-            reporter.event("Session ended from this computer", false);
+            reporter.event(t!("Session ended from this computer", "Sessão encerrada neste computador"), false);
             cur.conn.close(close::KICKED, b"the host ended the session");
         }
     }
@@ -415,7 +454,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
     }
     // Closes what is left gracefully and releases the sockets.
     let _ = tokio::time::timeout(Duration::from_secs(3), ep.close()).await;
-    reporter.event("Host stopped", false);
+    reporter.event(t!("Host stopped", "O host parou"), false);
     Ok(())
 }
 
@@ -498,13 +537,13 @@ impl Server {
                 let _ = w.finish();
                 let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
                 conn.close(close::AUTH_FAILED, b"authentication failed");
-                self.reporter.event(format!("Failed login from {peer}: {e:#}"), true);
+                self.reporter.event(tf!("Failed login from {peer}: {e:#}", "Falha de login de {peer}: {e:#}"), true);
                 bail!("{peer}: {e:#}");
             }
             Err(_) => {
                 self.limiter.failure(ip);
                 conn.close(close::AUTH_FAILED, b"authentication timed out");
-                self.reporter.event(format!("Login from {peer} timed out"), true);
+                self.reporter.event(tf!("Login from {peer} timed out", "O login de {peer} expirou"), true);
                 bail!("{peer}: authentication timed out");
             }
         };
@@ -556,7 +595,10 @@ impl Server {
         };
         let info = SessionInfo { client, peer, method, since: SystemTime::now(), terminals: 0, admin_terminals: 0 };
         if !matches!(authed.kind, AuthKind::Resume) {
-            self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
+            self.reporter.event(
+                tf!("{} connected from {} ({})", "{} conectado de {} ({})", info.client, info.peer, info.method),
+                false,
+            );
         }
         self.reporter.session(Some(info.clone()));
         SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

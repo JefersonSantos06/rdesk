@@ -6,24 +6,32 @@ use anyhow::{Result, anyhow};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
+use rdesk_common::i18n::{self, Lang};
+use rdesk_common::t;
+
 use super::AppCmd;
 
 #[cfg_attr(not(feature = "host"), allow(dead_code))]
 pub struct Tray {
     icon: TrayIcon,
+    open: MenuItem,
     status: MenuItem,
     toggle: MenuItem,
-    last: (String, bool),
+    fingerprint: MenuItem,
+    quit: MenuItem,
+    /// What the menu shows now: the host summary, whether it is on, and the language.
+    last: Option<(String, bool, Lang)>,
 }
 
 impl Tray {
     /// Must run on the main thread once the event loop is running (eframe's app creator).
     pub fn create(tx: Sender<AppCmd>, ctx: egui::Context, host_supported: bool) -> Result<Self> {
-        let open = MenuItem::with_id("open", "Open rdesk", true, None);
-        let status = MenuItem::with_id("status", "Host: off", false, None);
-        let toggle = MenuItem::with_id("toggle", "Turn host on", host_supported, None);
-        let fp = MenuItem::with_id("fingerprint", "Copy host ID", host_supported, None);
-        let quit = MenuItem::with_id("quit", "Quit rdesk", true, None);
+        // The texts are set by `update` (and again when the language changes).
+        let open = MenuItem::with_id("open", "rdesk", true, None);
+        let status = MenuItem::with_id("status", "", false, None);
+        let toggle = MenuItem::with_id("toggle", "", host_supported, None);
+        let fp = MenuItem::with_id("fingerprint", "", host_supported, None);
+        let quit = MenuItem::with_id("quit", "", true, None);
         let menu = Menu::new();
         menu.append_items(&[
             &open,
@@ -69,18 +77,30 @@ impl Tray {
                 ctx.request_repaint();
             }
         }));
-        Ok(Self { icon, status, toggle, last: (String::new(), false) })
+        let mut tray = Self { icon, open, status, toggle, fingerprint: fp, quit, last: None };
+        tray.update(t!("off", "desligado"), false);
+        Ok(tray)
     }
 
     /// Reflect the host state in the menu and tooltip (cheap to call every frame).
     #[cfg_attr(not(feature = "host"), allow(dead_code))]
     pub fn update(&mut self, summary: &str, host_on: bool) {
-        if self.last.0 == summary && self.last.1 == host_on {
+        let now = (summary.to_string(), host_on, i18n::lang());
+        if self.last.as_ref() == Some(&now) {
             return;
         }
-        self.last = (summary.to_string(), host_on);
+        if self.last.as_ref().is_none_or(|l| l.2 != now.2) {
+            self.open.set_text(t!("Open rdesk", "Abrir o rdesk"));
+            self.fingerprint.set_text(t!("Copy host ID", "Copiar o ID do host"));
+            self.quit.set_text(t!("Quit rdesk", "Sair do rdesk"));
+        }
         self.status.set_text(format!("Host: {summary}"));
-        self.toggle.set_text(if host_on { "Turn host off" } else { "Turn host on" });
+        self.toggle.set_text(if host_on {
+            t!("Turn host off", "Desligar o host")
+        } else {
+            t!("Turn host on", "Ligar o host")
+        });
         let _ = self.icon.set_tooltip(Some(format!("rdesk — host {summary}")));
+        self.last = Some(now);
     }
 }

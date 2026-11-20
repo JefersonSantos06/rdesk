@@ -7,6 +7,7 @@ use rdesk_common::agent;
 use rdesk_common::auth;
 use rdesk_common::config::{self, HostConfig};
 use rdesk_common::transport::{self, HostIdentity};
+use rdesk_common::{t, tf};
 use ssh_key::PublicKey;
 
 /// Create whatever is missing (identity, host.toml, OPAQUE setup) and return the fingerprint.
@@ -96,9 +97,15 @@ fn forget_enrollment() {
 
 /// Remove this computer from the server (only who registered it can) and forget it here.
 pub async fn unregister(session: &Session) -> Result<()> {
-    let Some(reg) = Registration::load() else { bail!("this computer is not registered") };
+    let Some(reg) = Registration::load() else {
+        bail!(t!("this computer is not registered", "este computador não está cadastrado"))
+    };
     if reg.server != session.server {
-        bail!("this computer is registered with {}, not with the server you are signed in to", reg.server);
+        bail!(tf!(
+            "this computer is registered with {}, not with the server you are signed in to",
+            "este computador está cadastrado em {}, não no servidor em que você entrou",
+            reg.server
+        ));
     }
     match session.api()?.remove_machine(reg.machine_id).await {
         Ok(()) => {}
@@ -138,7 +145,10 @@ pub fn parse_public_key(text_or_path: &str) -> Result<PublicKey> {
     } else {
         t.to_string()
     };
-    PublicKey::from_openssh(text.trim()).context("not an OpenSSH public key (expected `ssh-ed25519 AAAA… comment`)")
+    PublicKey::from_openssh(text.trim()).context(t!(
+        "not an OpenSSH public key (expected `ssh-ed25519 AAAA… comment`)",
+        "não é uma chave pública OpenSSH (esperado `ssh-ed25519 AAAA… comentário`)"
+    ))
 }
 
 /// Returns `false` when the key was already authorized.
@@ -157,7 +167,10 @@ pub fn remove_key(fingerprint: &str) -> Result<()> {
     let before = keys.len();
     keys.retain(|k| agent::key_fingerprint(k.key_data()) != fingerprint);
     if keys.len() == before {
-        return Err(anyhow!("no key with fingerprint {fingerprint}"));
+        return Err(anyhow!(tf!(
+            "no key with fingerprint {fingerprint}",
+            "nenhuma chave com a impressão digital {fingerprint}"
+        )));
     }
     save_keys(&keys)
 }
@@ -221,22 +234,41 @@ fn line(label: &str, value: impl Into<String>, ok: bool) -> CheckLine {
 pub async fn diagnose() -> Vec<CheckLine> {
     let mut out = Vec::new();
     match config::host_dir() {
-        Ok(d) => out.push(line("Host folder", d.display().to_string(), true)),
-        Err(e) => out.push(line("Host folder", format!("{e:#}"), false)),
+        Ok(d) => out.push(line(t!("Host folder", "Pasta do host"), d.display().to_string(), true)),
+        Err(e) => out.push(line(t!("Host folder", "Pasta do host"), format!("{e:#}"), false)),
     }
     match HostIdentity::load() {
-        Ok(id) => out.push(line("Host ID", config::format_host_id(&id.fingerprint()), true)),
-        Err(_) => out.push(line("Identity", "not created yet (starting the host creates it)", false)),
+        Ok(id) => out.push(line(t!("Host ID", "ID do host"), config::format_host_id(&id.fingerprint()), true)),
+        Err(_) => out.push(line(
+            t!("Identity", "Identidade"),
+            t!("not created yet (starting the host creates it)", "ainda não criada (iniciar o host a cria)"),
+            false,
+        )),
     }
     let keys = load_keys().map(|k| k.len()).unwrap_or(0);
     let pw = has_password();
-    out.push(line("SSH keys", format!("{keys} authorized"), keys > 0 || pw));
-    out.push(line("Password", if pw { "enabled" } else { "not set" }, keys > 0 || pw));
+    let authorized = if keys == 1 {
+        tf!("{keys} authorized", "{keys} autorizada")
+    } else {
+        tf!("{keys} authorized", "{keys} autorizadas")
+    };
+    out.push(line(t!("SSH keys", "Chaves SSH"), authorized, keys > 0 || pw));
+    let password = if pw { t!("enabled", "ativada") } else { t!("not set", "não definida") };
+    out.push(line(t!("Password", "Senha"), password, keys > 0 || pw));
     match Registration::load() {
-        Some(r) => {
-            out.push(line("Server", format!("registered as {} on {} ({})", r.name, r.server_name, r.server), true))
-        }
-        None => out.push(line("Server", "not registered: only direct connections on the LAN", false)),
+        Some(r) => out.push(line(
+            t!("Server", "Servidor"),
+            tf!("registered as {} on {} ({})", "cadastrado como {} em {} ({})", r.name, r.server_name, r.server),
+            true,
+        )),
+        None => out.push(line(
+            t!("Server", "Servidor"),
+            t!(
+                "not registered: only direct connections on the LAN",
+                "não cadastrado: só conexões diretas na rede local"
+            ),
+            false,
+        )),
     }
     let net = config::host_network();
     match transport::relay_url(&net) {
@@ -249,7 +281,7 @@ pub async fn diagnose() -> Vec<CheckLine> {
                 ok
             };
             match reach.await {
-                Ok(_) => out.push(line("Relay", format!("{url} (reachable)"), true)),
+                Ok(_) => out.push(line("Relay", tf!("{url} (reachable)", "{url} (acessível)"), true)),
                 Err(e) => out.push(line("Relay", format!("{url}: {e:#}"), false)),
             }
         }
@@ -257,27 +289,38 @@ pub async fn diagnose() -> Vec<CheckLine> {
     }
     let cap = crate::capture::Capturer::spawn(false);
     match cap.monitors().await {
-        Ok(ms) if ms.is_empty() => out.push(line("Screens", "none found", false)),
+        Ok(ms) if ms.is_empty() => {
+            out.push(line(t!("Screens", "Telas"), t!("none found", "nenhuma encontrada"), false))
+        }
         Ok(ms) => {
             for m in ms {
                 let t = std::time::Instant::now();
-                let label = format!("Screen {}", m.info.name);
+                let label = tf!("Screen {}", "Tela {}", m.info.name);
                 match cap.grab(m.info.id).await {
                     Ok(f) => out.push(line(
                         &label,
-                        format!("{}x{}, captured in {} ms", f.width, f.height, t.elapsed().as_millis()),
+                        tf!(
+                            "{}x{}, captured in {} ms",
+                            "{}x{}, capturada em {} ms",
+                            f.width,
+                            f.height,
+                            t.elapsed().as_millis()
+                        ),
                         true,
                     )),
-                    Err(e) => out.push(line(&label, format!("capture failed: {e:#}"), false)),
+                    Err(e) => out.push(line(&label, tf!("capture failed: {e:#}", "falha na captura: {e:#}"), false)),
                 }
             }
         }
-        Err(e) => out.push(line("Screens", format!("{e:#}"), false)),
+        Err(e) => out.push(line(t!("Screens", "Telas"), format!("{e:#}"), false)),
     }
     if cfg!(target_os = "macos") {
         out.push(line(
             "macOS",
-            "grant rdesk Screen Recording and Accessibility in System Settings → Privacy & Security",
+            t!(
+                "grant rdesk Screen Recording and Accessibility in System Settings → Privacy & Security",
+                "permita ao rdesk Gravação de Tela e Acessibilidade em Ajustes do Sistema → Privacidade e Segurança"
+            ),
             true,
         ));
     }
@@ -286,19 +329,29 @@ pub async fn diagnose() -> Vec<CheckLine> {
         // Wayland goes through the desktop portal, which asks once before sharing the screen.
         let wayland = crate::wayland::active();
         out.push(line(
-            "Session",
-            if wayland { "Wayland: screen and input through the desktop portal (allow it when asked)" } else { "X11" },
+            t!("Session", "Sessão"),
+            if wayland {
+                t!(
+                    "Wayland: screen and input through the desktop portal (allow it when asked)",
+                    "Wayland: tela e entrada pelo portal da área de trabalho (permita quando for perguntado)"
+                )
+            } else {
+                "X11"
+            },
             true,
         ));
     }
     if cfg!(windows) {
         let admin = crate::elevation::is_elevated();
         out.push(line(
-            "Administrator",
+            t!("Administrator", "Administrador"),
             if admin {
-                "yes: admin windows can be controlled"
+                t!("yes: admin windows can be controlled", "sim: janelas de administrador podem ser controladas")
             } else {
-                "no: admin windows (Task Manager…) ignore input"
+                t!(
+                    "no: admin windows (Task Manager…) ignore input",
+                    "não: janelas de administrador (Gerenciador de Tarefas…) ignoram a entrada"
+                )
             },
             admin,
         ));

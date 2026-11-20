@@ -7,6 +7,7 @@ use std::time::Instant;
 use egui::{Color32, RichText};
 use rdesk_common::account::{self, NotSignedIn, Session};
 use rdesk_common::config::{self, ClientConfig};
+use rdesk_common::{t, tf};
 
 const ERROR: Color32 = Color32::from_rgb(230, 70, 70);
 
@@ -118,7 +119,8 @@ impl Account {
                     let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG).unwrap_or_default();
                     cfg.server = Some(s.server.clone());
                     let _ = config::ensure_config_dir().and_then(|_| config::save_toml(config::CLIENT_CONFIG, &cfg));
-                    self.toast = Some((format!("Signed in as {}.", s.user.email), false, Instant::now()));
+                    self.toast =
+                        Some((tf!("Signed in as {}.", "Você entrou como {}.", s.user.email), false, Instant::now()));
                     self.session = Some(s);
                     self.error = None;
                     self.changed = true;
@@ -131,7 +133,7 @@ impl Account {
         {
             self.check_job = None;
             if let Check::SignedOut(why) = r {
-                self.signed_out(&format!("Signed out by the server: {why}"));
+                self.signed_out(&tf!("Signed out by the server: {why}", "O servidor encerrou sua sessão: {why}"));
             }
         }
         if let Some(rx) = &self.logout_job
@@ -141,7 +143,10 @@ impl Account {
         }
         // The 10 days are up.
         if self.session.as_ref().is_some_and(Session::expired) {
-            self.signed_out("Your sign-in expired (10 days). Sign in again.");
+            self.signed_out(t!(
+                "Your sign-in expired (10 days). Sign in again.",
+                "Seu acesso expirou (10 dias). Entre de novo."
+            ));
         }
     }
 
@@ -171,7 +176,7 @@ impl Account {
         }
         let _ = Session::clear();
         self.changed = true;
-        self.toast = Some(("Signed out.".into(), false, Instant::now()));
+        self.toast = Some((t!("Signed out.", "Você saiu.").into(), false, Instant::now()));
     }
 
     /// The whole window when nobody is signed in; `extra` draws below it (with the server
@@ -182,19 +187,29 @@ impl Account {
             ui.add_space((ui.available_height() * 0.18).max(20.0));
             ui.set_max_width(420.0);
             ui.label(RichText::new("rdesk").strong().size(34.0));
-            ui.label(RichText::new("Sign in to your rdesk server to use the app").size(15.0));
+            ui.label(
+                RichText::new(t!(
+                    "Sign in to your rdesk server to use the app",
+                    "Entre no seu servidor rdesk para usar o app"
+                ))
+                .size(15.0),
+            );
             ui.add_space(18.0);
             let busy = self.login_job.is_some();
             ui.add_enabled_ui(!busy, |ui| {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.server)
-                        .hint_text("Server, e.g. rdesk.example.com")
+                        .hint_text(t!("Server, e.g. rdesk.example.com", "Servidor, ex.: rdesk.exemplo.com.br"))
                         .desired_width(360.0),
                 );
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.add_space(8.0);
-                let go = ui
-                    .add_sized([360.0, 34.0], egui::Button::new(RichText::new("Sign in with the browser").size(15.0)));
+                let go = ui.add_sized(
+                    [360.0, 34.0],
+                    egui::Button::new(
+                        RichText::new(t!("Sign in with the browser", "Entrar pelo navegador")).size(15.0),
+                    ),
+                );
                 if (go.clicked() || enter) && !busy {
                     self.start_login(&ctx);
                 }
@@ -204,9 +219,12 @@ impl Account {
                 ui.horizontal(|ui| {
                     ui.add_space((ui.available_width() - 330.0).max(0.0) / 2.0);
                     ui.spinner();
-                    ui.label("Finish the sign-in in your browser (Google or GitHub, then the second factor)…");
+                    ui.label(t!(
+                        "Finish the sign-in in your browser (Google or GitHub, then the second factor)…",
+                        "Termine de entrar no navegador (Google ou GitHub, depois o segundo fator)…"
+                    ));
                 });
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel", "Cancelar")).clicked() {
                     // The browser's answer, if it still comes, is ignored.
                     self.login_job = None;
                 }
@@ -216,7 +234,10 @@ impl Account {
                 ui.colored_label(ERROR, e);
             }
             ui.add_space(18.0);
-            ui.weak("Only e-mails allowed by an admin of the server can sign in. The sign-in lasts 10 days.");
+            ui.weak(t!(
+                "Only e-mails allowed by an admin of the server can sign in. The sign-in lasts 10 days.",
+                "Só e-mails liberados por um admin do servidor podem entrar. O acesso dura 10 dias."
+            ));
             extra(ui, &self.server);
         });
     }
@@ -224,18 +245,23 @@ impl Account {
     /// The "Account" part of Settings.
     pub(super) fn settings_section(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui.label(RichText::new("Account").strong().size(16.0));
+        ui.label(RichText::new(t!("Account", "Conta")).strong().size(16.0));
         if let Some(s) = self.session.clone() {
-            ui.label(format!(
+            ui.label(tf!(
                 "Signed in as {}{} on {} ({}).",
+                "Você entrou como {}{} em {} ({}).",
                 s.user.email,
-                if s.user.is_admin { " (system admin)" } else { "" },
+                if s.user.is_admin { t!(" (system admin)", " (admin do sistema)") } else { "" },
                 s.server_name,
                 s.server
             ));
             ui.horizontal(|ui| {
-                ui.weak(format!("The sign-in ends in {} day(s); then you sign in again.", s.days_left()));
-                if ui.button("Sign out").clicked() {
+                ui.weak(tf!(
+                    "The sign-in ends in {} day(s); then you sign in again.",
+                    "O acesso termina em {} dia(s); depois você entra de novo.",
+                    s.days_left()
+                ));
+                if ui.button(t!("Sign out", "Sair")).clicked() {
                     self.sign_out(&ctx);
                 }
             });

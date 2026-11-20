@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod config;
 pub mod directory;
 pub mod files;
+pub mod i18n;
 pub mod release;
 pub mod ticket;
 pub mod tiles;

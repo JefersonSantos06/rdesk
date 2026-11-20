@@ -7,6 +7,7 @@ use std::num::NonZeroU16;
 use anyhow::Result;
 use egui::{Color32, FontId, Key, Modifiers, text::LayoutJob};
 use rdesk_common::transport::Connection;
+use rdesk_common::{t, tf};
 use rdesk_proto::{MAX_SMALL_MSG, StreamOpen, TermClient, TermHost, read_msg, write_msg};
 use tokio::sync::mpsc;
 
@@ -217,7 +218,7 @@ impl TermView {
         Self {
             parser: vt100::Parser::new(nz(rows), nz(cols), 5000),
             link: Some(link),
-            status: "Starting…".into(),
+            status: t!("Starting…", "Iniciando…").into(),
             ended: false,
             size: (cols, rows),
             font: FontId::monospace(14.0),
@@ -245,11 +246,11 @@ impl TermView {
                     changed = true;
                 }
                 Ok(TermHost::Started { shell, user }) => {
-                    self.status = if user.is_empty() { shell } else { format!("{shell} as {user}") };
+                    self.status = if user.is_empty() { shell } else { tf!("{shell} as {user}", "{shell} como {user}") };
                     changed = true;
                 }
                 Ok(TermHost::Exited(code)) => {
-                    self.status = format!("Ended (code {code})");
+                    self.status = tf!("Ended (code {code})", "Encerrado (código {code})");
                     self.ended = true;
                     changed = true;
                 }
@@ -261,7 +262,7 @@ impl TermView {
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     if !self.ended {
-                        self.status = "Disconnected".into();
+                        self.status = t!("Disconnected", "Desconectado").into();
                         self.ended = true;
                         changed = true;
                     }

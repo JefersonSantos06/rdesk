@@ -8,6 +8,8 @@ use std::time::Instant;
 use egui::{Color32, RichText};
 use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, ClientConfig};
+use rdesk_common::i18n::{self, LanguagePref};
+use rdesk_common::{t, tf};
 
 use super::autostart::{self, Autostart};
 
@@ -53,9 +55,11 @@ impl SettingsPage {
         let mut on_disk: ClientConfig = config::load_toml(config::CLIENT_CONFIG).unwrap_or_default();
         on_disk.app.close_to_tray = self.cfg.app.close_to_tray;
         on_disk.app.start_minimized = self.cfg.app.start_minimized;
+        on_disk.app.language = self.cfg.app.language;
         on_disk.swap_cmd_ctrl = self.cfg.swap_cmd_ctrl;
         if let Err(e) = config::ensure_config_dir().and_then(|_| config::save_toml(config::CLIENT_CONFIG, &on_disk)) {
-            self.toast = Some((format!("Saving settings: {e:#}"), true, Instant::now()));
+            self.toast =
+                Some((tf!("Saving settings: {e:#}", "Salvando as configurações: {e:#}"), true, Instant::now()));
         }
         self.cfg = on_disk;
     }
@@ -68,7 +72,8 @@ impl SettingsPage {
             match r {
                 Ok(m) => {
                     self.autostart = m;
-                    self.toast = Some(("Start-up setting saved.".into(), false, Instant::now()));
+                    self.toast =
+                        Some((t!("Start-up setting saved.", "Início automático salvo.").into(), false, Instant::now()));
                 }
                 Err(e) => {
                     self.autostart = autostart::current();
@@ -86,24 +91,37 @@ impl SettingsPage {
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(RichText::new("Start with the system").strong().size(16.0));
+            self.language_ui(ui);
+
+            ui.add_space(14.0);
+            ui.label(RichText::new(t!("Start with the system", "Iniciar com o sistema")).strong().size(16.0));
             let mut mode = self.autostart;
             ui.add_enabled_ui(self.autostart_job.is_none(), |ui| {
-                ui.radio_value(&mut mode, Autostart::Off, "Don't start automatically");
-                ui.radio_value(&mut mode, Autostart::Login, "Start when I log in (in the tray)");
+                ui.radio_value(&mut mode, Autostart::Off, t!("Don't start automatically", "Não iniciar automaticamente"));
+                ui.radio_value(
+                    &mut mode,
+                    Autostart::Login,
+                    t!("Start when I log in (in the tray)", "Iniciar quando eu entrar no computador (na bandeja)"),
+                );
                 // Replaced by the rdesk service (This computer); kept only to be turned off.
                 if autostart::supports_admin() && self.autostart == Autostart::LoginAdmin {
                     ui.radio_value(
                         &mut mode,
                         Autostart::LoginAdmin,
-                        "Start when I log in, as administrator (recommended to control admin windows; asks for permission once)",
+                        t!(
+                            "Start when I log in, as administrator (recommended to control admin windows; asks for permission once)",
+                            "Iniciar quando eu entrar no computador, como administrador (recomendado para controlar janelas de administrador; pede permissão uma vez)"
+                        ),
                     );
                 }
             });
             if self.autostart_job.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Applying… (Windows may ask for administrator permission)");
+                    ui.label(t!(
+                        "Applying… (Windows may ask for administrator permission)",
+                        "Aplicando… (o Windows pode pedir permissão de administrador)"
+                    ));
                 });
             }
             if mode != self.autostart && self.autostart_job.is_none() {
@@ -119,31 +137,44 @@ impl SettingsPage {
             }
 
             ui.add_space(14.0);
-            ui.label(RichText::new("Window").strong().size(16.0));
+            ui.label(RichText::new(t!("Window", "Janela")).strong().size(16.0));
             let mut changed = false;
             changed |= ui
-                .checkbox(&mut self.cfg.app.close_to_tray, "Closing the window keeps rdesk running in the tray")
+                .checkbox(
+                    &mut self.cfg.app.close_to_tray,
+                    t!("Closing the window keeps rdesk running in the tray", "Fechar a janela mantém o rdesk rodando na bandeja"),
+                )
                 .changed();
-            changed |= ui.checkbox(&mut self.cfg.app.start_minimized, "Start hidden in the tray").changed();
+            changed |= ui
+                .checkbox(&mut self.cfg.app.start_minimized, t!("Start hidden in the tray", "Iniciar escondido na bandeja"))
+                .changed();
 
             ui.add_space(14.0);
-            ui.label(RichText::new("Remote sessions").strong().size(16.0));
+            ui.label(RichText::new(t!("Remote sessions", "Sessões remotas")).strong().size(16.0));
             changed |= ui
-                .checkbox(&mut self.cfg.swap_cmd_ctrl, "Mac keys (for a Mac controlling Windows/Linux)")
-                .on_hover_text(
+                .checkbox(
+                    &mut self.cfg.swap_cmd_ctrl,
+                    t!("Mac keys (for a Mac controlling Windows/Linux)", "Teclas de Mac (para um Mac controlando Windows/Linux)"),
+                )
+                .on_hover_text(t!(
                     "Cmd → Ctrl, left Option → Windows key, Control → Alt; the right Option stays AltGr. \
                      On macOS this is on by default for each session window.",
-                )
+                    "Cmd → Ctrl, Option esquerdo → tecla Windows, Control → Alt; o Option direito continua AltGr. \
+                     No macOS isto vem ligado em cada janela de sessão."
+                ))
                 .changed();
             if changed {
                 self.save();
             }
 
             ui.add_space(14.0);
-            ui.label(RichText::new("My SSH keys").strong().size(16.0));
-            ui.label("Keys your SSH agent (1Password) offers. Add the public key on a computer to log in there with it.");
+            ui.label(RichText::new(t!("My SSH keys", "Minhas chaves SSH")).strong().size(16.0));
+            ui.label(t!(
+                "Keys your SSH agent (1Password) offers. Add the public key on a computer to log in there with it.",
+                "Chaves que o seu agente SSH (1Password) oferece. Adicione a chave pública em um computador para entrar nele com ela."
+            ));
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.keys_job.is_none(), egui::Button::new("Load from the agent")).clicked() {
+                if ui.add_enabled(self.keys_job.is_none(), egui::Button::new(t!("Load from the agent", "Carregar do agente"))).clicked() {
                     let (tx, rx) = channel();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
@@ -171,7 +202,7 @@ impl SettingsPage {
                         ui.horizontal(|ui| {
                             ui.label(label);
                             ui.label(RichText::new(fp).monospace().small().weak());
-                            if ui.small_button("Copy public key").clicked() {
+                            if ui.small_button(t!("Copy public key", "Copiar chave pública")).clicked() {
                                 ui.ctx().copy_text(line.clone());
                             }
                         });
@@ -180,19 +211,51 @@ impl SettingsPage {
             }
 
             ui.add_space(14.0);
-            ui.label(RichText::new("Files").strong().size(16.0));
+            ui.label(RichText::new(t!("Files", "Arquivos")).strong().size(16.0));
             if let Ok(dir) = config::config_dir() {
                 ui.horizontal(|ui| {
-                    ui.label("Settings and logs:");
+                    ui.label(t!("Settings and logs:", "Configurações e logs:"));
                     ui.label(RichText::new(dir.display().to_string()).monospace().small());
-                    if ui.small_button("Open").clicked() {
+                    if ui.small_button(t!("Open", "Abrir")).clicked() {
                         open_folder(&dir);
                     }
                 });
             }
             ui.add_space(14.0);
-            ui.weak("Everything here is also available from the command line: run `rdesk --help`.");
+            ui.weak(t!(
+                "Everything here is also available from the command line: run `rdesk --help`.",
+                "Tudo aqui também existe na linha de comando (em inglês): rode `rdesk --help`."
+            ));
         });
+    }
+}
+
+impl SettingsPage {
+    /// The app's language: applies at once (this window and the tray; session windows
+    /// opened from now on too).
+    fn language_ui(&mut self, ui: &mut egui::Ui) {
+        // In both languages, so it can be found in either.
+        ui.label(RichText::new("Language · Idioma").strong().size(16.0));
+        let system = match i18n::system() {
+            i18n::Lang::Pt => "Português (Brasil)",
+            i18n::Lang::En => "English",
+        };
+        let name = |p: LanguagePref| match p {
+            LanguagePref::System => tf!("System ({system})", "Do sistema ({system})"),
+            LanguagePref::English => "English".to_string(),
+            LanguagePref::Portuguese => "Português (Brasil)".to_string(),
+        };
+        let mut pref = self.cfg.app.language;
+        egui::ComboBox::from_id_salt("language").selected_text(name(pref)).width(220.0).show_ui(ui, |ui| {
+            for p in [LanguagePref::System, LanguagePref::English, LanguagePref::Portuguese] {
+                ui.selectable_value(&mut pref, p, name(p));
+            }
+        });
+        if pref != self.cfg.app.language {
+            self.cfg.app.language = pref;
+            i18n::set(i18n::resolve(pref));
+            self.save();
+        }
     }
 }
 
@@ -200,7 +263,7 @@ async fn load_agent_keys() -> AgentKeys {
     let mut a = Agent::connect(None).await.map_err(|e| format!("{e:#}"))?;
     let keys = a.identities().await.map_err(|e| format!("{e:#}"))?;
     if keys.is_empty() {
-        return Err(format!("the SSH agent at {} offers no keys", a.path));
+        return Err(tf!("the SSH agent at {} offers no keys", "o agente SSH em {} não oferece chaves", a.path));
     }
     Ok(keys
         .iter()

@@ -8,6 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use rdesk_common::config::{self, EnrollConfig};
+use rdesk_common::{t, tf};
 
 use super::service;
 
@@ -73,13 +74,18 @@ pub fn install(o: &InstallOpts) -> Result<String> {
         };
         crate::enroll::save(enroll)?;
         service::restart()?;
-        msg.push_str(&format!(
+        msg.push_str(&tf!(
             " It asks {server} to add it{}.",
-            if o.key.is_some() { " with the enrollment key" } else { "; its owner approves it in their app" }
+            " Ele pede a {server} para adicioná-lo{}.",
+            if o.key.is_some() {
+                t!(" with the enrollment key", " com a chave de cadastro")
+            } else {
+                t!("; its owner approves it in their app", "; o dono o aprova no app dele")
+            }
         ));
     }
     register_uninstall()?;
-    msg.push_str(" Listed in Settings → Apps.");
+    msg.push_str(t!(" Listed in Settings → Apps.", " Listado em Configurações → Aplicativos."));
     Ok(msg)
 }
 
@@ -98,5 +104,5 @@ pub fn uninstall() -> Result<String> {
             .creation_flags(0x0800_0008) // CREATE_NO_WINDOW | DETACHED_PROCESS
             .spawn();
     }
-    Ok(format!("{msg} rdesk is uninstalled."))
+    Ok(tf!("{msg} rdesk is uninstalled.", "{msg} O rdesk foi desinstalado."))
 }

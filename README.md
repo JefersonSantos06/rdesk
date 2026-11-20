@@ -56,7 +56,7 @@ Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo,
 - *This computer's own password and keys* (para a LAN sem servidor, ou como cadeado extra): **Set password…** (com *Generate a strong one* e *Read from 1Password*), chaves SSH (**Add SSH key…** do agente do 1Password ou colando a chave pública), remover.
 - *Options*: porta UDP, pasta dos arquivos recebidos, fps, qualidade, clipboard, **cadeado extra** (pedir também a senha ou chave deste computador depois da permissão do servidor). *Activity*: conexões e **logins que falharam**. *Diagnostics*: o mesmo que `rdesk host check`.
 
-**⚙ Settings**: **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login*, no tray; no Windows o host fica a cargo do serviço), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+**⚙ Settings**: **Idioma** (português do Brasil ou inglês; por padrão, o idioma de exibição do sistema), **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login*, no tray; no Windows o host fica a cargo do serviço), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
 
 **👥 Groups**: grupos de pessoas para compartilhar computadores. Quem cria vira admin do grupo; admins adicionam e removem membros e promovem outros admins.
 

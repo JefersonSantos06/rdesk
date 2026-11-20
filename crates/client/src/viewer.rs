@@ -11,6 +11,8 @@ use anyhow::Result;
 use egui::{Align2, Color32, ColorImage, TextureHandle, TextureOptions, ViewportId};
 use egui_wgpu::winit::Painter;
 use egui_winit::winit;
+use rdesk_common::i18n::access_label;
+use rdesk_common::{t, tf};
 use rdesk_proto::{DirEntry, HostInfo, InputEvent, MonitorInfo, MouseButton};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -18,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::conn::{self, Cmd, ConnectOpts, Handle, PasswordAnswer, PasswordReply, Raise, UiEvent, Update};
+use crate::conn::{self, Cmd, ConnectOpts, Handle, PasswordAnswer, PasswordReply, Raise, Status, UiEvent, Update};
 use crate::keys;
 
 const NOTICE_FOR: Duration = Duration::from_secs(12);
@@ -121,7 +123,7 @@ struct App {
     egui: egui::Context,
     gfx: Option<Gfx>,
     tex: Option<TextureHandle>,
-    status: String,
+    status: Status,
     /// Latest host notice and when it arrived (shown for [`NOTICE_FOR`]).
     notice: Option<(String, Instant)>,
     password: Option<PasswordPrompt>,
@@ -170,7 +172,7 @@ impl App {
             egui: egui::Context::default(),
             gfx: None,
             tex: None,
-            status: "Connecting…".into(),
+            status: Status::Connecting,
             notice: None,
             password: None,
             fatal: None,
@@ -237,7 +239,7 @@ impl App {
     /// Try again now (while waiting between attempts, or after the session ended).
     fn reconnect_now(&mut self) {
         if self.fatal.take().is_some() {
-            self.status = "Connecting…".into();
+            self.status = Status::Connecting;
             self.offline = None;
             self.update_title();
         }
@@ -411,7 +413,7 @@ impl App {
             // Without a picture (a terminal-only session) it takes the window.
             let size =
                 if self.tex.is_none() { screen.size() - egui::vec2(20.0, 50.0) } else { egui::vec2(900.0, 520.0) };
-            let admin = if self.terminal_admin { " (administrator)" } else { "" };
+            let admin = if self.terminal_admin { t!(" (administrator)", " (administrador)") } else { "" };
             let connected = self.connected;
             egui::Window::new(format!("Terminal{admin} · {}", t.status))
                 .id(egui::Id::unique("terminal"))
@@ -421,8 +423,9 @@ impl App {
                 .show(&ctx, |ui| {
                     if t.ended {
                         ui.horizontal(|ui| {
-                            ui.label("This shell has closed.");
-                            if ui.add_enabled(connected, egui::Button::new("Open a new terminal")).clicked() {
+                            ui.label(t!("This shell has closed.", "Este shell foi fechado."));
+                            let open_new = egui::Button::new(t!("Open a new terminal", "Abrir um novo terminal"));
+                            if ui.add_enabled(connected, open_new).clicked() {
                                 again = true;
                             }
                         });
@@ -484,7 +487,7 @@ impl App {
                 .interactable(false)
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(egui::RichText::new(&self.status).size(18.0));
+                        ui.label(egui::RichText::new(self.status.to_string()).size(18.0));
                     });
                 });
             return;
@@ -497,50 +500,66 @@ impl App {
                     Card::Connecting => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(egui::RichText::new(format!("Connecting to {host}…")).size(18.0));
+                            ui.label(
+                                egui::RichText::new(tf!("Connecting to {host}…", "Conectando a {host}…")).size(18.0),
+                            );
                         });
-                        if self.status != "Connecting…" {
-                            ui.weak(&self.status);
+                        if self.status != Status::Connecting {
+                            ui.weak(self.status.to_string());
                         }
                         ui.add_space(8.0);
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t!("Cancel", "Cancelar")).clicked() {
                             action = Some(false);
                         }
                     }
                     Card::Lost { since, attempt, reason } => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(egui::RichText::new(format!("Reconnecting to {host}…")).size(18.0));
+                            ui.label(
+                                egui::RichText::new(tf!("Reconnecting to {host}…", "Reconectando a {host}…"))
+                                    .size(18.0),
+                            );
                         });
-                        ui.label(format!("The connection was lost {} ago ({reason}).", seconds(*since)));
-                        ui.weak("Keyboard and mouse are paused until it is back.");
+                        let since_text = seconds(*since);
+                        ui.label(tf!(
+                            "The connection was lost {since_text} ago ({reason}).",
+                            "A conexão caiu há {since_text} ({reason})."
+                        ));
+                        ui.weak(t!(
+                            "Keyboard and mouse are paused until it is back.",
+                            "Teclado e mouse ficam pausados até ela voltar."
+                        ));
                         if *since >= OFFLINE_LONG {
                             ui.add_space(4.0);
-                            ui.label(format!(
+                            ui.label(tf!(
                                 "Still trying: {host} may be off, asleep or without network. rdesk keeps trying \
-                                 until you disconnect."
+                                 until you disconnect.",
+                                "Ainda tentando: {host} pode estar desligado, em suspensão ou sem rede. O rdesk \
+                                 continua tentando até você desconectar."
                             ));
                         }
-                        ui.weak(format!("Attempt {attempt}"));
+                        ui.weak(tf!("Attempt {attempt}", "Tentativa {attempt}"));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Try now").clicked() {
+                            if ui.button(t!("Try now", "Tentar agora")).clicked() {
                                 action = Some(true);
                             }
-                            if ui.button("Disconnect").clicked() {
+                            if ui.button(t!("Disconnect", "Desconectar")).clicked() {
                                 action = Some(false);
                             }
                         });
                     }
                     Card::Ended(msg) => {
-                        ui.label(egui::RichText::new(format!("Disconnected from {host}")).size(18.0));
+                        ui.label(
+                            egui::RichText::new(tf!("Disconnected from {host}", "Desconectado de {host}")).size(18.0),
+                        );
                         ui.label(msg);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Reconnect").clicked() {
+                            if ui.button(t!("Reconnect", "Reconectar")).clicked() {
                                 action = Some(true);
                             }
-                            if ui.button("Close").clicked() {
+                            if ui.button(t!("Close", "Fechar")).clicked() {
                                 action = Some(false);
                             }
                         });
@@ -594,29 +613,56 @@ impl App {
         let shell = self.terminal.as_ref().map(|t| t.status.clone()).unwrap_or_default();
         let (title, text, ok) = match c {
             Confirm::CloseTerminal => (
-                "Close the terminal?".to_string(),
-                format!(
+                t!("Close the terminal?", "Fechar o terminal?").to_string(),
+                tf!(
                     "The shell ({shell}) ends, and anything running in it stops. Hide keeps it running: open it \
-                     again with Terminal in the ▼ rdesk menu."
+                     again with Terminal in the ▼ rdesk menu.",
+                    "O shell ({shell}) é encerrado, e o que estiver rodando nele para. Ocultar o mantém rodando: \
+                     abra-o de novo com Terminal no menu ▼ rdesk."
                 ),
-                "End the shell",
+                t!("End the shell", "Encerrar o shell"),
             ),
             Confirm::ReplaceTerminal { admin } => (
-                if admin { "Open a terminal as administrator?" } else { "Open a regular terminal?" }.to_string(),
-                format!("Only one terminal at a time: the open one ({shell}) ends, and anything running in it stops."),
-                "End it and open",
+                if admin {
+                    t!("Open a terminal as administrator?", "Abrir um terminal como administrador?")
+                } else {
+                    t!("Open a regular terminal?", "Abrir um terminal comum?")
+                }
+                .to_string(),
+                tf!(
+                    "Only one terminal at a time: the open one ({shell}) ends, and anything running in it stops.",
+                    "Um terminal por vez: o que está aberto ({shell}) é encerrado, e o que estiver rodando nele para."
+                ),
+                t!("End it and open", "Encerrar e abrir"),
             ),
             Confirm::Disconnect => {
                 let mut lines = Vec::new();
                 if self.terminal_live() {
-                    lines.push(format!("The terminal ({shell}) ends, and anything running in it stops."));
+                    lines.push(tf!(
+                        "The terminal ({shell}) ends, and anything running in it stops.",
+                        "O terminal ({shell}) é encerrado, e o que estiver rodando nele para."
+                    ));
                 }
                 match self.transfers_running() {
                     0 => {}
-                    1 => lines.push("1 file transfer stops before it finishes.".to_string()),
-                    n => lines.push(format!("{n} file transfers stop before they finish.")),
+                    1 => lines.push(
+                        t!(
+                            "1 file transfer stops before it finishes.",
+                            "1 transferência de arquivo para antes de terminar."
+                        )
+                        .to_string(),
+                    ),
+                    n => lines.push(tf!(
+                        "{n} file transfers stop before they finish.",
+                        "{n} transferências de arquivos param antes de terminar."
+                    )),
                 }
-                (format!("Disconnect from {}?", self.host_name()), lines.join("\n"), "Disconnect")
+                let host = self.host_name();
+                (
+                    tf!("Disconnect from {host}?", "Desconectar de {host}?"),
+                    lines.join("\n"),
+                    t!("Disconnect", "Desconectar"),
+                )
             }
         };
         let mut answer = None;
@@ -630,11 +676,11 @@ impl App {
                 if ui.add(danger).clicked() {
                     answer = Some(true);
                 }
-                if c == Confirm::CloseTerminal && ui.button("Hide").clicked() {
+                if c == Confirm::CloseTerminal && ui.button(t!("Hide", "Ocultar")).clicked() {
                     self.terminal_open = false;
                     answer = Some(false);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel", "Cancelar")).clicked() {
                     answer = Some(false);
                 }
             });
@@ -662,7 +708,7 @@ impl App {
         let mut answer: Option<Option<PasswordAnswer>> = None;
         egui::Modal::new(egui::Id::unique("password")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading(format!("Password for {}", p.host));
+            ui.heading(tf!("Password for {}", "Senha de {}", p.host));
             if let Some(e) = &p.error {
                 ui.colored_label(Color32::LIGHT_RED, e);
             }
@@ -672,17 +718,17 @@ impl App {
                 p.focused = true;
             }
             if p.can_remember {
-                ui.checkbox(&mut p.remember, format!("Remember in {}", crate::secrets::store_name()));
+                ui.checkbox(&mut p.remember, tf!("Remember in {}", "Guardar em {}", crate::secrets::store_name()));
             }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
-                if (ui.button("Log in").clicked() || enter) && !p.text.is_empty() {
+                if (ui.button(t!("Log in", "Entrar")).clicked() || enter) && !p.text.is_empty() {
                     answer = Some(Some(PasswordAnswer {
                         password: zeroize::Zeroizing::new(std::mem::take(&mut *p.text)),
                         remember: p.remember,
                     }));
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button(t!("Cancel", "Cancelar")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     answer = Some(None);
                 }
             });
@@ -697,15 +743,25 @@ impl App {
         if let Some(h) = &self.host {
             ui.label(format!("{} ({})", h.hostname, h.os));
         }
-        if ui.button("Terminal").on_hover_text("A shell on that computer, as whoever is signed in there").clicked() {
+        if ui
+            .button(t!("Terminal", "Terminal"))
+            .on_hover_text(t!(
+                "A shell on that computer, as whoever is signed in there",
+                "Um shell nesse computador, como quem estiver conectado nele"
+            ))
+            .clicked()
+        {
             self.open_terminal(false);
         }
         // Administrator rights in a terminal exist on Windows hosts, with full control.
         if self.access == rdesk_proto::Access::FULL
             && self.host_is_windows()
             && ui
-                .button("Terminal (admin)")
-                .on_hover_text("A shell with the administrator rights of whoever is signed in there")
+                .button(t!("Terminal (admin)", "Terminal (admin)"))
+                .on_hover_text(t!(
+                    "A shell with the administrator rights of whoever is signed in there",
+                    "Um shell com os direitos de administrador de quem estiver conectado nele"
+                ))
                 .clicked()
         {
             self.open_terminal(true);
@@ -714,14 +770,19 @@ impl App {
             "{} · RTT {} ms{} · {:.0} fps · {:.0} kbit/s",
             self.status,
             self.stats.0,
-            if self.stats.3.is_empty() { String::new() } else { format!(" ({})", self.stats.3) },
+            match self.stats.3 {
+                "" => String::new(),
+                "direct" => format!(" ({})", t!("direct", "direta")),
+                "relay" => format!(" ({})", t!("relay", "relay")),
+                route => format!(" ({route})"),
+            },
             self.stats.1,
             self.stats.2
         ));
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Monitor:");
+            ui.label(t!("Monitor:", "Monitor:"));
             for m in self.monitors.clone() {
                 let text = format!("{}{} {}x{}", if m.primary { "★ " } else { "" }, m.name, m.width, m.height);
                 if ui.selectable_label(m.id == self.active, text).clicked() && m.id != self.active {
@@ -730,30 +791,35 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label("FPS");
+            ui.label(t!("FPS", "FPS"));
             ui.add(egui::Slider::new(&mut self.fps, 5..=60));
-            ui.label("Quality");
+            ui.label(t!("Quality", "Qualidade"));
             ui.add(egui::Slider::new(&mut self.quality, 30..=95));
-            if ui.button("Apply").clicked() {
+            if ui.button(t!("Apply", "Aplicar")).clicked() {
                 self.send(Cmd::SetQuality { max_fps: self.fps, jpeg_quality: self.quality });
             }
         });
         ui.horizontal(|ui| {
-            if ui.button("Full screen").clicked()
+            if ui.button(t!("Full screen", "Tela cheia")).clicked()
                 && let Some(g) = &self.gfx
             {
                 let fs = g.window.fullscreen().is_some();
                 g.window.set_fullscreen(if fs { None } else { Some(Fullscreen::Borderless(None)) });
             }
-            if ui.button("Refresh picture").clicked() {
+            if ui.button(t!("Refresh picture", "Atualizar imagem")).clicked() {
                 self.send(Cmd::FullFrame);
             }
-            ui.checkbox(&mut self.swap_cmd_ctrl, "Mac keys")
-                .on_hover_text("Cmd → Ctrl, left Option → Windows key, Control → Alt");
+            ui.checkbox(&mut self.swap_cmd_ctrl, t!("Mac keys", "Teclas de Mac")).on_hover_text(t!(
+                "Cmd → Ctrl, left Option → Windows key, Control → Alt",
+                "Cmd → Ctrl, Option esquerdo → tecla Windows, Control → Alt"
+            ));
             if self.host_is_windows()
                 && ui
                     .button("Ctrl+Alt+Del")
-                    .on_hover_text("Works when the computer runs rdesk as a service (installed)")
+                    .on_hover_text(t!(
+                        "Works when the computer runs rdesk as a service (installed)",
+                        "Funciona quando o computador roda o rdesk como serviço (instalado)"
+                    ))
                     .clicked()
             {
                 use rdesk_proto::Key::*;
@@ -767,21 +833,23 @@ impl App {
         });
         ui.separator();
 
-        ui.heading("Files");
+        ui.heading(t!("Files", "Arquivos"));
         ui.horizontal(|ui| {
-            if ui.button("Send files…").clicked()
+            if ui.button(t!("Send files…", "Enviar arquivos…")).clicked()
                 && let Some(paths) = rfd::FileDialog::new().pick_files()
             {
                 for p in paths {
                     self.send(Cmd::Push(p));
                 }
             }
-            ui.label("(or drop files on the window)");
+            ui.label(t!("(or drop files on the window)", "(ou solte arquivos na janela)"));
         });
         ui.horizontal(|ui| {
-            ui.label("Host path:");
+            ui.label(t!("Host path:", "Caminho no host:"));
             let resp = ui.text_edit_singleline(&mut self.remote_path);
-            if ui.button("List").clicked() || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+            if ui.button(t!("List", "Listar")).clicked()
+                || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            {
                 self.send(Cmd::ListDir(self.remote_path.clone()));
             }
         });
@@ -806,7 +874,7 @@ impl App {
                                 }
                             } else {
                                 ui.label(format!("📄 {} ({})", e.name, human(e.size)));
-                                if ui.small_button("Download").clicked() {
+                                if ui.small_button(t!("Download", "Baixar")).clicked() {
                                     let _ = self
                                         .handle
                                         .cmd
@@ -822,7 +890,7 @@ impl App {
             self.remote_path = p.clone();
             self.send(Cmd::ListDir(p));
         }
-        ui.label(format!("Downloads go to {}", self.download_dir.display()));
+        ui.label(tf!("Downloads go to {}", "Os downloads vão para {}", self.download_dir.display()));
 
         if !self.transfers.is_empty() {
             ui.separator();
@@ -845,7 +913,7 @@ impl App {
                     }
                 }
             }
-            if ui.small_button("Clear finished").clicked() {
+            if ui.small_button(t!("Clear finished", "Limpar concluídos")).clicked() {
                 self.transfers.retain(|_, t| t.finished.is_none());
             }
         }
@@ -1035,7 +1103,7 @@ impl ApplicationHandler<UiEvent> for App {
                     self.send(Cmd::ListDir(self.remote_path.clone()));
                 }
                 if a != rdesk_proto::Access::FULL {
-                    self.notice = Some((format!("This session: {}", a.label()), Instant::now()));
+                    self.notice = Some((tf!("This session: {}", "Esta sessão: {}", access_label(a)), Instant::now()));
                 }
             }
             UiEvent::Connected(h) => {
@@ -1045,7 +1113,9 @@ impl ApplicationHandler<UiEvent> for App {
                 self.connected = true;
                 if let Some(o) = self.offline.take() {
                     if o.since.elapsed() >= OFFLINE_GRACE {
-                        self.info = Some((format!("Reconnected after {}", seconds(o.since.elapsed())), Instant::now()));
+                        let after = seconds(o.since.elapsed());
+                        self.info =
+                            Some((tf!("Reconnected after {after}", "Reconectado após {after}"), Instant::now()));
                     }
                     // The file panel showed the old connection's listing: read it again.
                     if self.menu_open && self.listing.is_some() {
@@ -1078,7 +1148,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Stats { rtt_ms, fps, kbps, route } => self.stats = (rtt_ms, fps, kbps, route),
             UiEvent::Fatal(msg) => {
-                self.status = "Disconnected".into();
+                self.status = Status::Disconnected;
                 self.connected = false;
                 self.offline = None;
                 self.confirm = None;

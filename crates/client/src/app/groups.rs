@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use egui::{Color32, RichText};
 use rdesk_common::account::{Api, Session};
+use rdesk_common::{t, tf};
 use rdesk_proto::api::{Group, GroupRole, UserRef};
 
 use super::account::spawn;
@@ -104,7 +105,7 @@ impl GroupsPage {
             }
             Some(Err(e)) => {
                 ui.colored_label(ERROR, e);
-                if ui.button("Try again").clicked() {
+                if ui.button(t!("Try again", "Tentar de novo")).clicked() {
                     self.reload(&ctx);
                 }
                 return;
@@ -116,12 +117,12 @@ impl GroupsPage {
             // ---- the list ----
             ui.vertical(|ui| {
                 ui.set_width(220.0);
-                ui.label(RichText::new("My groups").strong().size(16.0));
+                ui.label(RichText::new(t!("My groups", "Meus grupos")).strong().size(16.0));
                 for g in &groups {
                     let role = match g.my_role {
                         Some(GroupRole::Admin) => " · admin",
                         Some(GroupRole::Member) => "",
-                        None => " · (not a member)",
+                        None => t!(" · (not a member)", " · (não é membro)"),
                     };
                     if ui.selectable_label(self.selected == Some(g.id), format!("{}{role}", g.name)).clicked() {
                         self.selected = Some(g.id);
@@ -130,17 +131,17 @@ impl GroupsPage {
                     }
                 }
                 if groups.is_empty() {
-                    ui.weak("You are in no group yet.");
+                    ui.weak(t!("You are in no group yet.", "Você ainda não está em nenhum grupo."));
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.new_group).hint_text("New group").desired_width(130.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.new_group).hint_text(t!("New group", "Novo grupo")).desired_width(130.0));
                     let ok = !busy && !self.new_group.trim().is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Create")).clicked() {
+                    if ui.add_enabled(ok, egui::Button::new(t!("Create", "Criar"))).clicked() {
                         let name = self.new_group.trim().to_string();
                         self.run(&ctx, move |api| async move {
                             let g = api.create_group(&name).await?;
-                            Ok(format!("Created {}.", g.name))
+                            Ok(tf!("Created {}.", "{} criado.", g.name))
                         });
                     }
                 });
@@ -152,7 +153,7 @@ impl GroupsPage {
             // ---- the selected group ----
             ui.vertical(|ui| {
                 let Some(g) = groups.iter().find(|g| Some(g.id) == self.selected).cloned() else {
-                    ui.weak("Select or create a group.");
+                    ui.weak(t!("Select or create a group.", "Escolha ou crie um grupo."));
                     return;
                 };
                 let admin = g.my_role == Some(GroupRole::Admin);
@@ -161,20 +162,20 @@ impl GroupsPage {
                 ui.horizontal(|ui| match &mut self.rename {
                     Some(name) => {
                         ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
-                        if ui.button("Save").clicked() {
+                        if ui.button(t!("Save", "Salvar")).clicked() {
                             let (id, n) = (g.id, name.trim().to_string());
                             self.rename = None;
                             self.run(&ctx, move |api| async move {
-                                Ok(format!("Renamed to {}.", api.rename_group(id, &n).await?.name))
+                                Ok(tf!("Renamed to {}.", "Renomeado para {}.", api.rename_group(id, &n).await?.name))
                             });
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t!("Cancel", "Cancelar")).clicked() {
                             self.rename = None;
                         }
                     }
                     None => {
                         ui.label(RichText::new(&g.name).strong().size(18.0));
-                        if manage && ui.small_button("Rename").clicked() {
+                        if manage && ui.small_button(t!("Rename", "Renomear")).clicked() {
                             self.rename = Some(g.name.clone());
                         }
                     }
@@ -187,24 +188,28 @@ impl GroupsPage {
                         } else {
                             format!("{} ({})", m.user.name, m.user.email)
                         };
-                        ui.label(if m.user.id == me { format!("{label} · you") } else { label });
-                        ui.label(if m.role == GroupRole::Admin { "admin" } else { "member" });
+                        ui.label(if m.user.id == me { tf!("{label} · you", "{label} · você") } else { label });
+                        ui.label(if m.role == GroupRole::Admin { "admin" } else { t!("member", "membro") });
                         ui.horizontal(|ui| {
                             ui.add_enabled_ui(manage && !busy, |ui| {
                                 let (gid, uid, email) = (g.id, m.user.id, m.user.email.clone());
                                 let to = if m.role == GroupRole::Admin { GroupRole::Member } else { GroupRole::Admin };
-                                let label = if to == GroupRole::Admin { "Make admin" } else { "Make member" };
+                                let label = if to == GroupRole::Admin {
+                                    t!("Make admin", "Tornar admin")
+                                } else {
+                                    t!("Make member", "Tornar membro")
+                                };
                                 if ui.small_button(label).clicked() {
                                     self.run(&ctx, move |api| async move {
                                         api.set_member_role(gid, uid, to).await?;
-                                        Ok(format!("Updated {email}."))
+                                        Ok(tf!("Updated {email}.", "{email} atualizado."))
                                     });
                                 }
-                                if m.user.id != me && ui.small_button("Remove").clicked() {
+                                if m.user.id != me && ui.small_button(t!("Remove", "Remover")).clicked() {
                                     let email = m.user.email.clone();
                                     self.run(&ctx, move |api| async move {
                                         api.remove_member(gid, uid).await?;
-                                        Ok(format!("Removed {email}."))
+                                        Ok(tf!("Removed {email}.", "{email} removido."))
                                     });
                                 }
                             });
@@ -219,7 +224,7 @@ impl GroupsPage {
                             people.iter().filter(|p| !g.members.iter().any(|m| m.user.id == p.id)).collect();
                         egui::ComboBox::from_id_salt("add-member")
                             .selected_text(if self.new_member.is_empty() {
-                                "Add a person…"
+                                t!("Add a person…", "Adicionar uma pessoa…")
                             } else {
                                 &self.new_member
                             })
@@ -231,40 +236,43 @@ impl GroupsPage {
                             });
                         ui.checkbox(&mut self.new_member_admin, "admin");
                         let ok = !busy && !self.new_member.is_empty();
-                        if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new(t!("Add", "Adicionar"))).clicked() {
                             let (gid, email) = (g.id, self.new_member.clone());
                             let role = if self.new_member_admin { GroupRole::Admin } else { GroupRole::Member };
                             self.run(&ctx, move |api| async move {
                                 api.add_member(gid, &email, role).await?;
-                                Ok(format!("Added {email}."))
+                                Ok(tf!("Added {email}.", "{email} adicionado."))
                             });
                         }
                     });
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if g.my_role.is_some() && ui.add_enabled(!busy, egui::Button::new("Leave the group")).clicked() {
+                    if g.my_role.is_some() && ui.add_enabled(!busy, egui::Button::new(t!("Leave the group", "Sair do grupo"))).clicked() {
                         let gid = g.id;
                         self.run(&ctx, move |api| async move {
                             api.remove_member(gid, me).await?;
-                            Ok("You left the group.".into())
+                            Ok(t!("You left the group.", "Você saiu do grupo.").into())
                         });
                     }
                     if manage {
                         if self.confirm_delete {
-                            ui.label("Delete it? Computers shared with it stop being shared with its members.");
-                            if ui.button("Delete").clicked() {
+                            ui.label(t!(
+                                "Delete it? Computers shared with it stop being shared with its members.",
+                                "Excluir? Os computadores compartilhados com o grupo deixam de estar acessíveis aos membros dele."
+                            ));
+                            if ui.button(t!("Delete", "Excluir")).clicked() {
                                 self.confirm_delete = false;
                                 let (gid, name) = (g.id, g.name.clone());
                                 self.run(&ctx, move |api| async move {
                                     api.delete_group(gid).await?;
-                                    Ok(format!("Deleted {name}."))
+                                    Ok(tf!("Deleted {name}.", "{name} excluído."))
                                 });
                             }
-                            if ui.button("Cancel").clicked() {
+                            if ui.button(t!("Cancel", "Cancelar")).clicked() {
                                 self.confirm_delete = false;
                             }
-                        } else if ui.add_enabled(!busy, egui::Button::new("Delete group…")).clicked() {
+                        } else if ui.add_enabled(!busy, egui::Button::new(t!("Delete group…", "Excluir grupo…"))).clicked() {
                             self.confirm_delete = true;
                         }
                     }

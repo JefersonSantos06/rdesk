@@ -4,6 +4,7 @@
 //! The service turns that policy on when it starts and the uninstall turns it back off.
 
 use anyhow::{Context, Result, bail};
+use rdesk_common::tf;
 use std::path::PathBuf;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -93,7 +94,10 @@ pub fn revert() {
 /// Send Ctrl+Alt+Del to the session this process runs in.
 pub fn send() -> Result<()> {
     if policy().unwrap_or(0) & SERVICES == 0 {
-        bail!("Windows does not let services send Ctrl+Alt+Del ({POLICY_VALUE}); restart the rdesk service");
+        bail!(tf!(
+            "Windows does not let services send Ctrl+Alt+Del ({POLICY_VALUE}); restart the rdesk service",
+            "O Windows não deixa serviços enviarem Ctrl+Alt+Del ({POLICY_VALUE}); reinicie o serviço do rdesk"
+        ));
     }
     unsafe {
         let lib = LoadLibraryW(wide("sas.dll").as_ptr());

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rdesk_common::config;
+use rdesk_common::{t, tf};
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
     ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
@@ -67,7 +68,10 @@ pub fn state() -> Result<State> {
 
 fn require_admin() -> Result<()> {
     if !crate::elevation::is_elevated() {
-        bail!("this needs administrator rights: run it from an elevated terminal (or the app's button)");
+        bail!(t!(
+            "this needs administrator rights: run it from an elevated terminal (or the app's button)",
+            "isto precisa de direitos de administrador: rode a partir de um terminal elevado (ou pelo botão do app)"
+        ));
     }
     Ok(())
 }
@@ -236,13 +240,28 @@ pub fn install() -> Result<String> {
     service.start::<&str>(&[])?;
     wait_for(&service, ServiceState::Running, Duration::from_secs(20))?;
 
-    let mut msg = format!("The rdesk service is installed and running ({}).", exe.display());
+    let mut msg = tf!(
+        "The rdesk service is installed and running ({}).",
+        "O serviço do rdesk está instalado e rodando ({}).",
+        exe.display()
+    );
     match firewall {
-        Ok(()) => msg.push_str(" Firewall: reachable from the local network and Tailscale."),
-        Err(e) => msg.push_str(&format!(" Firewall rule not created ({e:#}): other computers may not reach it.")),
+        Ok(()) => msg.push_str(t!(
+            " Firewall: reachable from the local network and Tailscale.",
+            " Firewall: acessível pela rede local e pelo Tailscale."
+        )),
+        Err(e) => msg.push_str(&tf!(
+            " Firewall rule not created ({e:#}): other computers may not reach it.",
+            " Regra de firewall não criada ({e:#}): outros computadores podem não conseguir acessá-lo."
+        )),
     }
     if !moved.is_empty() {
-        msg.push_str(&format!(" Moved this computer's {} to {}.", moved.join(", "), machine.display()));
+        msg.push_str(&tf!(
+            " Moved this computer's {0} to {1}.",
+            " Arquivos deste computador movidos para {1}: {0}.",
+            moved.join(", "),
+            machine.display()
+        ));
     }
     Ok(msg)
 }
@@ -272,12 +291,17 @@ pub fn uninstall() -> Result<String> {
     }
     firewall_remove();
     super::sas::revert();
-    let mut msg = "The rdesk service is removed.".to_string();
+    let mut msg = t!("The rdesk service is removed.", "O serviço do rdesk foi removido.").to_string();
     if let Some(machine) = config::service_dir().filter(|d| d.is_dir()) {
         let back = config::config_dir()?;
         let moved = move_host_files(&machine, &back)?;
         if !moved.is_empty() {
-            msg.push_str(&format!(" Moved this computer's {} back to {}.", moved.join(", "), back.display()));
+            msg.push_str(&tf!(
+                " Moved this computer's {0} back to {1}.",
+                " Arquivos deste computador devolvidos para {1}: {0}.",
+                moved.join(", "),
+                back.display()
+            ));
         }
         std::fs::remove_dir_all(&machine).with_context(|| format!("removing {}", machine.display()))?;
     }

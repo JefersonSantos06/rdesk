@@ -8,6 +8,7 @@ use anyhow::Result;
 use rdesk_common::account::{Api, Registration, normalize_server};
 use rdesk_common::config::{self, EnrollConfig, HostConfig};
 use rdesk_common::transport::HostIdentity;
+use rdesk_common::{t, tf};
 use rdesk_proto::api::{ENROLL_MAX_WAIT_SECS, EnrollReply};
 use tokio::sync::mpsc;
 
@@ -27,7 +28,7 @@ impl Enrollment {
     pub fn approver(&self) -> String {
         match &self.owner {
             Some(o) => o.clone(),
-            None => "an admin of the server".into(),
+            None => t!("an admin of the server", "um administrador do servidor").into(),
         }
     }
 }
@@ -128,22 +129,30 @@ pub(crate) async fn until_registered(
                 reg.save()?;
                 forget_used_key();
                 reporter.enrollment(None);
-                reporter.event(format!("Added to {} as {}", reg.server_name, reg.name), false);
+                reporter.event(tf!("Added to {} as {}", "Adicionado a {} como {}", reg.server_name, reg.name), false);
                 return Ok(Some(reg));
             }
             Ok(EnrollReply::Pending { code }) => {
                 backoff = Duration::from_secs(5);
-                let text = format!("Waiting for {} to approve this computer (code {code}) on {server}", e.approver());
+                let text = tf!(
+                    "Waiting for {} to approve this computer (code {code}) on {server}",
+                    "Aguardando a aprovação de {} para este computador (código {code}) em {server}",
+                    e.approver()
+                );
                 note(text, false, true);
                 // The server held the request open; ask again right away unless it answered early.
                 Duration::from_secs(3).saturating_sub(started.elapsed())
             }
             Ok(EnrollReply::Rejected) => {
-                note(format!("{} refused this computer on {server}", e.approver()), true, true);
+                note(
+                    tf!("{} refused this computer on {server}", "{} recusou este computador em {server}", e.approver()),
+                    true,
+                    true,
+                );
                 Duration::from_secs(30 * 60)
             }
             Err(err) => {
-                note(format!("Cannot join {server}: {err:#}"), true, false);
+                note(tf!("Cannot join {server}: {err:#}", "Não foi possível entrar em {server}: {err:#}"), true, false);
                 let w = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(300));
                 w

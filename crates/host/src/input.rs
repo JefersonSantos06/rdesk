@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use rdesk_common::tf;
 use rdesk_proto::{InputEvent, Key, MouseButton};
 use tokio::sync::broadcast;
 
@@ -67,7 +68,10 @@ impl Injector {
                             let msg = match (&blocked_by, watch_uipi) {
                                 (Some(app), _) => elevation::blocked_message(Some(app)),
                                 (None, true) => elevation::blocked_message(None),
-                                (None, false) => format!("Remote input failed on the host: {e:#}"),
+                                (None, false) => tf!(
+                                    "Remote input failed on the host: {e:#}",
+                                    "A entrada remota falhou no host: {e:#}"
+                                ),
                             };
                             reporter.report(msg, Some(&e));
                         }

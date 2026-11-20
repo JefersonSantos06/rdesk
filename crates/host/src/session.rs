@@ -9,6 +9,7 @@ use rdesk_common::clipboard::ClipboardSync;
 use rdesk_common::config::HostConfig;
 use rdesk_common::files;
 use rdesk_common::transport;
+use rdesk_common::{t, tf};
 use rdesk_proto::{
     ClientMsg, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MonitorInfo, StreamOpen, TermClient,
     expect_msg, read_msg, write_msg,
@@ -143,7 +144,9 @@ pub async fn run(
                             settings_tx.send_modify(|s| s.monitor = id);
                             let _ = out.send(HostMsg::Monitors { monitors: infos(&list), active: id });
                         } else {
-                            let _ = out.send(HostMsg::Notice { text: format!("monitor {id} not found") });
+                            let _ = out.send(HostMsg::Notice {
+                                text: tf!("monitor {id} not found", "tela {id} não encontrada"),
+                            });
                         }
                     }
                     ClientMsg::SetQuality { max_fps, jpeg_quality } => {
@@ -159,7 +162,9 @@ pub async fn run(
                         }
                     }
                     ClientMsg::ListDir { req, path } if !access.files => {
-                        let result = Err("this session may not access files".to_string());
+                        let result =
+                            Err(t!("this session may not access files", "esta sessão não pode acessar arquivos")
+                                .to_string());
                         let _ = out.send(HostMsg::DirListing { req, path, result });
                     }
                     ClientMsg::ListDir { req, path } => {
@@ -248,9 +253,15 @@ pub async fn run(
         let chosen_inbox = shared.cfg.inbox_dir.clone();
         // Administrator rights in a terminal: only with every other right too.
         let admin_refused = if !shared.cfg.admin_terminal {
-            Some("this computer does not allow a terminal as administrator")
+            Some(t!(
+                "this computer does not allow a terminal as administrator",
+                "este computador não permite um terminal como administrador"
+            ))
         } else if access != rdesk_proto::Access::FULL {
-            Some("a terminal as administrator needs full control")
+            Some(t!(
+                "a terminal as administrator needs full control",
+                "um terminal como administrador precisa de controle total"
+            ))
         } else {
             None
         };
@@ -271,7 +282,11 @@ pub async fn run(
                             }
                             StreamOpen::File => files::serve(&mut r, &mut w, &inbox).await,
                             StreamOpen::Terminal if !access.terminal => {
-                                let reason = "this session may not open a terminal".to_string();
+                                let reason = t!(
+                                    "this session may not open a terminal",
+                                    "esta sessão não pode abrir um terminal"
+                                )
+                                .to_string();
                                 write_msg(&mut w, &rdesk_proto::TermHost::Error(reason)).await?;
                                 Ok(())
                             }
@@ -282,8 +297,12 @@ pub async fn run(
                                     write_msg(&mut w, &rdesk_proto::TermHost::Error(why.into())).await?;
                                     return Ok(());
                                 }
-                                let what = if admin { "a terminal as administrator" } else { "a terminal" };
-                                reporter.event(format!("{who} opened {what}"), false);
+                                let what = if admin {
+                                    t!("a terminal as administrator", "um terminal como administrador")
+                                } else {
+                                    t!("a terminal", "um terminal")
+                                };
+                                reporter.event(tf!("{who} opened {what}", "{who} abriu {what}"), false);
                                 reporter.terminal(1, admin);
                                 let r2 = if files_as_user {
                                     terminal_as_user(first, &mut r, &mut w).await

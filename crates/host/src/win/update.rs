@@ -16,6 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, ensure};
 use rdesk_common::config;
 use rdesk_common::release::{check_file, download, file_for, verify_manifest};
+use rdesk_common::tf;
 use rdesk_proto::api::UpdateOffer;
 use rdesk_proto::release::FileKind;
 
@@ -38,16 +39,34 @@ pub(crate) async fn install(offer: UpdateOffer, server: Arc<Server>, reporter: R
     match prepare(&offer).await {
         Ok(None) => {}
         Ok(Some(exe)) => {
-            reporter.event(format!("rdesk {version} downloaded; it installs when nobody is connected"), false);
+            reporter.event(
+                tf!(
+                    "rdesk {version} downloaded; it installs when nobody is connected",
+                    "rdesk {version} baixado; ele é instalado quando ninguém estiver conectado"
+                ),
+                false,
+            );
             while server.in_session().await {
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
-            reporter.event(format!("Installing rdesk {version}; the host restarts"), false);
+            reporter.event(
+                tf!("Installing rdesk {version}; the host restarts", "Instalando o rdesk {version}; o host reinicia"),
+                false,
+            );
             if let Err(e) = launch_applier(&exe, &version) {
-                reporter.event(format!("Could not install rdesk {version}: {e:#}"), true);
+                reporter.event(
+                    tf!(
+                        "Could not install rdesk {version}: {e:#}",
+                        "Não foi possível instalar o rdesk {version}: {e:#}"
+                    ),
+                    true,
+                );
             }
         }
-        Err(e) => reporter.event(format!("Could not download rdesk {version}: {e:#}"), true),
+        Err(e) => reporter.event(
+            tf!("Could not download rdesk {version}: {e:#}", "Não foi possível baixar o rdesk {version}: {e:#}"),
+            true,
+        ),
     }
 }
 

@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 
 use anyhow::{Result, anyhow};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use rdesk_common::{t, tf};
 use rdesk_proto::{MAX_SMALL_MSG, TermClient, TermHost, expect_msg, read_msg, write_msg};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -62,9 +63,15 @@ where
     // (the service starts it so; see `win::files::terminal_as_user`).
     if admin && !(cfg!(windows) && crate::elevation::is_elevated()) {
         let why = if cfg!(windows) {
-            "a terminal as administrator needs rdesk installed as a service on that computer"
+            t!(
+                "a terminal as administrator needs rdesk installed as a service on that computer",
+                "um terminal como administrador precisa do rdesk instalado como serviço nesse computador"
+            )
         } else {
-            "a terminal as administrator is only for Windows (use sudo)"
+            t!(
+                "a terminal as administrator is only for Windows (use sudo)",
+                "um terminal como administrador é só para Windows (use sudo)"
+            )
         };
         write_msg(w, &TermHost::Error(why.into())).await?;
         return Ok(());
@@ -88,7 +95,7 @@ where
     let mut killer = child.clone_killer();
     // Resizing happens between awaits; the lock is never held across one.
     let master = std::sync::Mutex::new(master);
-    let user = if admin { format!("{} (administrator)", user()) } else { user() };
+    let user = if admin { tf!("{} (administrator)", "{} (administrador)", user()) } else { user() };
     write_msg(w, &TermHost::Started { shell: name, user }).await?;
 
     // The pty's blocking ends, on their own threads.

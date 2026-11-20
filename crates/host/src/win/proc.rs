@@ -9,6 +9,7 @@ use std::ptr::{null, null_mut};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use rdesk_common::t;
 use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -93,7 +94,7 @@ pub fn system_token_in(session: u32) -> Result<OwnedHandle> {
 pub fn user_token(session: u32) -> Result<OwnedHandle> {
     let mut token: HANDLE = null_mut();
     if unsafe { WTSQueryUserToken(session, &mut token) } == 0 {
-        bail!("nobody is signed in on this computer");
+        bail!(t!("nobody is signed in on this computer", "nenhum usuário entrou neste computador"));
     }
     Ok(owned(token))
 }
@@ -134,7 +135,10 @@ pub fn admin_token(session: u32) -> Result<OwnedHandle> {
             k if k == TokenElevationTypeFull => Ok(token),
             // No split token: UAC is off, or this is a standard user.
             _ if is_admin(&token) => Ok(token),
-            _ => bail!("the person signed in on that computer is not an administrator"),
+            _ => bail!(t!(
+                "the person signed in on that computer is not an administrator",
+                "quem entrou nesse computador não é administrador"
+            )),
         }
     }
 }

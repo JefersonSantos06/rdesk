@@ -15,6 +15,7 @@ use rdesk_common::account::{Registration, Session};
 use rdesk_common::agent::{self, Agent};
 use rdesk_common::config::{self, HostConfig, format_host_id};
 use rdesk_common::directory;
+use rdesk_common::{t, tf};
 use rdesk_host::admin::{self, CheckLine};
 use rdesk_host::ipc::RemoteHost;
 use rdesk_host::{HostHandle, HostState, HostStatus, Reporter, RunOpts};
@@ -163,8 +164,17 @@ impl HostPage {
     fn restart_service_host(&mut self) {
         if let Some(remote) = &self.service {
             match self.rt.block_on(remote.restart()) {
-                Ok(()) => self.notify("Applied: the service's host is restarting.", false),
-                Err(e) => self.notify(format!("Saved, but the host could not be restarted: {e:#}"), true),
+                Ok(()) => self.notify(
+                    t!("Applied: the service's host is restarting.", "Aplicado: o host do serviço está reiniciando."),
+                    false,
+                ),
+                Err(e) => self.notify(
+                    tf!(
+                        "Saved, but the host could not be restarted: {e:#}",
+                        "Salvo, mas não foi possível reiniciar o host: {e:#}"
+                    ),
+                    true,
+                ),
             }
         }
     }
@@ -191,16 +201,18 @@ impl HostPage {
         self.handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 
-    /// One word for the tray: "on", "off", "in use", "waiting", "error".
+    /// One word for the tray: "on", "off", "in use", "waiting", "error" (shown, never compared).
     pub(super) fn summary(&self) -> String {
         let st = self.status();
         match (&st.state, &st.session) {
-            (_, Some(s)) if self.running() => format!("in use by {}", s.client),
-            (HostState::Starting, _) if st.enrollment.is_some() => "waiting for approval".into(),
-            (HostState::Listening(_), _) => "on".into(),
-            (HostState::Starting, _) => "starting".into(),
-            (HostState::Failed(_), _) => "error".into(),
-            (HostState::Stopped, _) => "off".into(),
+            (_, Some(s)) if self.running() => tf!("in use by {}", "em uso por {}", s.client),
+            (HostState::Starting, _) if st.enrollment.is_some() => {
+                t!("waiting for approval", "aguardando aprovação").into()
+            }
+            (HostState::Listening(_), _) => t!("on", "ligado").into(),
+            (HostState::Starting, _) => t!("starting", "iniciando").into(),
+            (HostState::Failed(_), _) => t!("error", "erro").into(),
+            (HostState::Stopped, _) => t!("off", "desligado").into(),
         }
     }
 
@@ -216,7 +228,7 @@ impl HostPage {
         match admin::ensure_initialized() {
             Ok(fp) => self.fingerprint = Some(fp),
             Err(e) => {
-                self.notify(format!("Cannot set up the host: {e:#}"), true);
+                self.notify(tf!("Cannot set up the host: {e:#}", "Não foi possível configurar o host: {e:#}"), true);
                 return;
             }
         }
@@ -226,7 +238,13 @@ impl HostPage {
 
     pub(super) fn stop(&mut self) {
         if self.service.is_some() {
-            self.notify("The rdesk service runs this computer's host: it is always on.", false);
+            self.notify(
+                t!(
+                    "The rdesk service runs this computer's host: it is always on.",
+                    "O serviço do rdesk executa o host deste computador: ele fica sempre ligado."
+                ),
+                false,
+            );
             return;
         }
         if let Some(h) = self.handle.take() {
@@ -267,25 +285,28 @@ impl HostPage {
 
     fn register(&mut self, ctx: &egui::Context) {
         let Some(s) = Session::load() else {
-            self.notify("Sign in first.", true);
+            self.notify(t!("Sign in first.", "Entre na sua conta primeiro."), true);
             return;
         };
         let (name, vis) = (self.reg_name.trim().to_string(), self.reg_visibility);
         self.reg_job = Some(super::account::spawn(ctx, move || async move {
             admin::register(&s, &name, vis)
                 .await
-                .map(|r| format!("Registered as {} on {}.", r.name, r.server_name))
+                .map(|r| tf!("Registered as {} on {}.", "Cadastrado como {} em {}.", r.name, r.server_name))
                 .map_err(|e| format!("{e:#}"))
         }));
     }
 
     fn unregister(&mut self, ctx: &egui::Context) {
         let Some(s) = Session::load() else {
-            self.notify("Sign in first.", true);
+            self.notify(t!("Sign in first.", "Entre na sua conta primeiro."), true);
             return;
         };
         self.reg_job = Some(super::account::spawn(ctx, move || async move {
-            admin::unregister(&s).await.map(|_| "Unregistered.".to_string()).map_err(|e| format!("{e:#}"))
+            admin::unregister(&s)
+                .await
+                .map(|_| t!("Unregistered.", "Descadastrado.").to_string())
+                .map_err(|e| format!("{e:#}"))
         }));
     }
 
@@ -323,7 +344,7 @@ impl HostPage {
                 Job::PasswordSet(Ok(())) => {
                     self.has_password = true;
                     self.dialog = None;
-                    self.notify("Password saved.", false);
+                    self.notify(t!("Password saved.", "Senha salva."), false);
                     // A host waiting for a first login method can start now.
                     if self.service.is_some() {
                         self.restart_service_host();
@@ -383,21 +404,21 @@ impl HostPage {
 
     fn server_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
         let ctx = ui.ctx().clone();
-        ui.label(RichText::new("On your rdesk server").strong().size(16.0));
+        ui.label(RichText::new(t!("On your rdesk server", "No seu servidor rdesk")).strong().size(16.0));
         let busy = self.reg_job.is_some();
         // The service's files are for administrators only: its status says it instead.
         let registered = match (&self.service, &st.registration) {
             (Some(_), Some(Ok(name))) => Some(name.clone()),
             (Some(_), _) => None,
-            (None, _) => Registration::load().map(|r| format!("{} on {}", r.name, r.server_name)),
+            (None, _) => Registration::load().map(|r| tf!("{} on {}", "{} em {}", r.name, r.server_name)),
         };
         match registered {
             Some(name) => {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Registered as {name}."));
+                    ui.label(tf!("Registered as {name}.", "Cadastrado como {name}."));
                     match &st.registration {
                         Some(Ok(_)) if self.running() => {
-                            ui.colored_label(GREEN, "✔ in touch with the server");
+                            ui.colored_label(GREEN, t!("✔ in touch with the server", "✔ em contato com o servidor"));
                         }
                         Some(Err(e)) if self.running() => {
                             ui.colored_label(ORANGE, e);
@@ -405,18 +426,25 @@ impl HostPage {
                         _ => {}
                     }
                 });
-                ui.weak("Who may reach it (only you, shared, everyone) is set on the Computers page.");
+                ui.weak(t!(
+                    "Who may reach it (only you, shared, everyone) is set on the Computers page.",
+                    "Quem pode acessá-lo (só você, compartilhado, todos) é definido na página Computadores."
+                ));
                 ui.horizontal(|ui| {
                     if self.confirm_unregister {
-                        ui.label("Unregister? Nobody will reach it through the server any more.");
-                        if ui.add_enabled(!busy, egui::Button::new("Unregister")).clicked() {
+                        ui.label(t!(
+                            "Unregister? Nobody will reach it through the server any more.",
+                            "Descadastrar? Ninguém mais vai acessá-lo pelo servidor."
+                        ));
+                        if ui.add_enabled(!busy, egui::Button::new(t!("Unregister", "Descadastrar"))).clicked() {
                             self.confirm_unregister = false;
                             self.unregister(&ctx);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t!("Cancel", "Cancelar")).clicked() {
                             self.confirm_unregister = false;
                         }
-                    } else if ui.add_enabled(!busy, egui::Button::new("Unregister…")).clicked() {
+                    } else if ui.add_enabled(!busy, egui::Button::new(t!("Unregister…", "Descadastrar…"))).clicked()
+                    {
                         self.confirm_unregister = true;
                     }
                     if busy {
@@ -430,26 +458,42 @@ impl HostPage {
                         ui.spinner();
                         ui.label(msg);
                     });
-                    ui.weak("Or register it yourself below (it becomes yours at once).");
+                    ui.weak(t!(
+                        "Or register it yourself below (it becomes yours at once).",
+                        "Ou cadastre-o você mesmo abaixo (ele passa a ser seu na hora)."
+                    ));
                     ui.add_space(4.0);
                 }
-                ui.label(
+                ui.label(t!(
                     "Not registered: others reach it only on the LAN by address. Register it to reach it \
                      from anywhere, with access controlled by the server.",
-                );
+                    "Não cadastrado: outros só o acessam na rede local, pelo endereço. Cadastre-o para \
+                     acessá-lo de qualquer lugar, com o acesso controlado pelo servidor."
+                ));
                 ui.horizontal(|ui| {
-                    ui.label("Name");
+                    ui.label(t!("Name", "Nome"));
                     ui.add(egui::TextEdit::singleline(&mut self.reg_name).desired_width(200.0));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Who can reach it");
-                    ui.radio_value(&mut self.reg_visibility, Visibility::Private, "only me");
-                    ui.radio_value(&mut self.reg_visibility, Visibility::Shared, "shared (choose later)");
-                    ui.radio_value(&mut self.reg_visibility, Visibility::Everyone, "everyone on the server");
+                    ui.label(t!("Who can reach it", "Quem pode acessar"));
+                    ui.radio_value(&mut self.reg_visibility, Visibility::Private, t!("only me", "só eu"));
+                    ui.radio_value(
+                        &mut self.reg_visibility,
+                        Visibility::Shared,
+                        t!("shared (choose later)", "compartilhado (escolha depois)"),
+                    );
+                    ui.radio_value(
+                        &mut self.reg_visibility,
+                        Visibility::Everyone,
+                        t!("everyone on the server", "todos do servidor"),
+                    );
                 });
                 ui.horizontal(|ui| {
                     let ok = !busy && !self.reg_name.trim().is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Register this computer")).clicked() {
+                    if ui
+                        .add_enabled(ok, egui::Button::new(t!("Register this computer", "Cadastrar este computador")))
+                        .clicked()
+                    {
                         self.register(&ctx);
                     }
                     if busy {
@@ -468,28 +512,45 @@ impl HostPage {
         ui.add_space(8.0);
         let st = self.status();
         if self.service.is_some() {
-            ui.label(RichText::new("This computer").strong());
-            ui.label(format!("Run by the rdesk service · host {}.", self.summary()));
+            ui.label(RichText::new(t!("This computer", "Este computador")).strong());
+            ui.label(tf!(
+                "Run by the rdesk service · host {}.",
+                "Executado pelo serviço do rdesk · host {}.",
+                self.summary()
+            ));
             return;
         }
         if let Some(r) = Registration::load() {
-            ui.label(RichText::new("This computer").strong());
-            ui.label(format!("Reachable as {} on {} · host {}.", r.name, r.server_name, self.summary()));
-            let label = if self.running() { "Turn the host off" } else { "Turn the host on" };
+            ui.label(RichText::new(t!("This computer", "Este computador")).strong());
+            ui.label(tf!(
+                "Reachable as {} on {} · host {}.",
+                "Acessível como {} em {} · host {}.",
+                r.name,
+                r.server_name,
+                self.summary()
+            ));
+            let label = if self.running() {
+                t!("Turn the host off", "Desligar o host")
+            } else {
+                t!("Turn the host on", "Ligar o host")
+            };
             if ui.button(label).clicked() {
                 self.toggle();
             }
             return;
         }
         if let Some(msg) = st.enrollment.as_ref().filter(|_| self.running()) {
-            ui.label(RichText::new("This computer").strong());
+            ui.label(RichText::new(t!("This computer", "Este computador")).strong());
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 380.0).max(0.0) / 2.0);
                 ui.spinner();
                 ui.label(msg);
             });
-            ui.weak("Keep rdesk running (it can stay in the tray) until it is approved.");
-            if ui.button("Cancel").clicked() {
+            ui.weak(t!(
+                "Keep rdesk running (it can stay in the tray) until it is approved.",
+                "Deixe o rdesk aberto (ele pode ficar na bandeja) até ser aprovado."
+            ));
+            if ui.button(t!("Cancel", "Cancelar")).clicked() {
                 self.stop();
                 if let Err(e) = rdesk_host::enroll::save(Default::default()) {
                     self.notify(format!("{e:#}"), true);
@@ -500,27 +561,38 @@ impl HostPage {
         if let HostState::Failed(e) = &st.state {
             ui.colored_label(ORANGE, e);
         }
-        egui::CollapsingHeader::new("Only share this computer (no sign-in)").show(ui, |ui| {
-            ui.label(
+        let header = t!("Only share this computer (no sign-in)", "Só compartilhar este computador (sem entrar)");
+        egui::CollapsingHeader::new(header).id_salt("host-join").show(ui, |ui| {
+            ui.label(t!(
                 "For a computer that is only accessed, never used to reach others: it joins the server \
                  above, and its owner approves it in their rdesk app.",
-            );
+                "Para um computador que só é acessado, nunca usado para acessar outros: ele entra no \
+                 servidor acima, e o dono o aprova no app rdesk dele."
+            ));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.join_use_key, false, "Owner's e-mail");
-                ui.radio_value(&mut self.join_use_key, true, "Enrollment key");
+                ui.radio_value(&mut self.join_use_key, false, t!("Owner's e-mail", "E-mail do dono"));
+                ui.radio_value(&mut self.join_use_key, true, t!("Enrollment key", "Chave de cadastro"));
             });
             let (value, hint) = if self.join_use_key {
-                (&mut self.join_key, "rdk_… (from Computers → Add a computer)")
+                (
+                    &mut self.join_key,
+                    t!("rdk_… (from Computers → Add a computer)", "rdk_… (em Computadores → Adicionar um computador)"),
+                )
             } else {
-                (&mut self.join_owner, "who will own it, e.g. ana@gmail.com")
+                (
+                    &mut self.join_owner,
+                    t!("who will own it, e.g. ana@gmail.com", "quem será o dono, ex.: ana@gmail.com"),
+                )
             };
             ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(360.0));
             ui.add(
-                egui::TextEdit::singleline(&mut self.reg_name).hint_text("Name of this computer").desired_width(360.0),
+                egui::TextEdit::singleline(&mut self.reg_name)
+                    .hint_text(t!("Name of this computer", "Nome deste computador"))
+                    .desired_width(360.0),
             );
             let ready = !server.trim().is_empty() && !value.trim().is_empty();
-            if ui.add_enabled(ready, egui::Button::new("Ask to join")).clicked() {
+            if ui.add_enabled(ready, egui::Button::new(t!("Ask to join", "Pedir para entrar"))).clicked() {
                 let value = value.trim().to_string();
                 let cfg = rdesk_common::config::EnrollConfig {
                     server: Some(server.trim().to_string()),
@@ -539,7 +611,7 @@ impl HostPage {
                 }
             }
             if !server.trim().is_empty() {
-                ui.weak("The server address is the one typed above.");
+                ui.weak(t!("The server address is the one typed above.", "O endereço do servidor é o digitado acima."));
             }
         });
     }
@@ -547,13 +619,17 @@ impl HostPage {
     fn status_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
         let running = self.running();
         let (color, text) = match &st.state {
-            _ if !running && !matches!(st.state, HostState::Failed(_)) => {
-                (Color32::GRAY, "Off: nobody can connect to this computer".to_string())
+            _ if !running && !matches!(st.state, HostState::Failed(_)) => (
+                Color32::GRAY,
+                t!("Off: nobody can connect to this computer", "Desligado: ninguém pode se conectar a este computador")
+                    .to_string(),
+            ),
+            HostState::Listening(_) => {
+                (GREEN, t!("On: ready for connections", "Ligado: pronto para conexões").to_string())
             }
-            HostState::Listening(_) => (GREEN, "On: ready for connections".to_string()),
-            HostState::Starting => (ORANGE, "Starting…".to_string()),
-            HostState::Failed(e) => (RED, format!("Not running: {e}")),
-            HostState::Stopped => (Color32::GRAY, "Off".to_string()),
+            HostState::Starting => (ORANGE, t!("Starting…", "Iniciando…").to_string()),
+            HostState::Failed(e) => (RED, tf!("Not running: {e}", "Não está em execução: {e}")),
+            HostState::Stopped => (Color32::GRAY, t!("Off", "Desligado").to_string()),
         };
         egui::Frame::group(ui.style()).corner_radius(10.0).inner_margin(14.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -563,7 +639,7 @@ impl HostPage {
                 ui.label(RichText::new(text).size(17.0).strong());
                 if self.service.is_none() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = if running { "Turn off" } else { "Turn on" };
+                        let label = if running { t!("Turn off", "Desligar") } else { t!("Turn on", "Ligar") };
                         if ui.button(RichText::new(label).size(15.0)).clicked() {
                             self.toggle();
                         }
@@ -572,9 +648,16 @@ impl HostPage {
             });
             if let Some(fp) = self.fingerprint_text() {
                 ui.horizontal(|ui| {
-                    ui.label("Host ID:");
+                    ui.label(t!("Host ID:", "ID do host:"));
                     ui.label(RichText::new(&fp).monospace().small());
-                    if ui.small_button("Copy").on_hover_text("Others add this computer with this ID").clicked() {
+                    if ui
+                        .small_button(t!("Copy", "Copiar"))
+                        .on_hover_text(t!(
+                            "Others add this computer with this ID",
+                            "Outros adicionam este computador com este ID"
+                        ))
+                        .clicked()
+                    {
                         ui.ctx().copy_text(fp.clone());
                     }
                 });
@@ -585,14 +668,25 @@ impl HostPage {
                 let port = addrs.first().map(|a| a.port()).unwrap_or_default();
                 match &st.relay {
                     Some(Ok(url)) => {
-                        ui.label(format!("Reachable through the relay {url}; direct connections on UDP {port}."));
+                        ui.label(tf!(
+                            "Reachable through the relay {url}; direct connections on UDP {port}.",
+                            "Acessível pelo relay {url}; conexões diretas na porta UDP {port}."
+                        ));
                     }
                     Some(Err(e)) => {
-                        ui.colored_label(ORANGE, format!("Relay unreachable ({e}); direct connections on UDP {port}."));
+                        ui.colored_label(
+                            ORANGE,
+                            tf!(
+                                "Relay unreachable ({e}); direct connections on UDP {port}.",
+                                "Relay inacessível ({e}); conexões diretas na porta UDP {port}."
+                            ),
+                        );
                     }
                     None => {
-                        ui.label(format!(
-                            "No relay: others need this computer's address (LAN or port forwarding, UDP {port})."
+                        ui.label(tf!(
+                            "No relay: others need this computer's address (LAN or port forwarding, UDP {port}).",
+                            "Sem relay: outros precisam do endereço deste computador (rede local ou \
+                             redirecionamento de porta, UDP {port})."
                         ));
                     }
                 }
@@ -610,14 +704,24 @@ impl HostPage {
         if self.service.is_some() {
             ui.colored_label(
                 GREEN,
-                "✔ Run by the rdesk service: reachable before sign-in, on the lock screen and through UAC prompts.",
+                t!(
+                    "✔ Run by the rdesk service: reachable before sign-in, on the lock screen and through UAC prompts.",
+                    "✔ Executado pelo serviço do rdesk: acessível antes do login, na tela de bloqueio e nos avisos \
+                     do UAC."
+                ),
             );
             ui.horizontal(|ui| {
                 if elevated {
-                    ui.weak("You can change this computer's settings below.");
+                    ui.weak(t!(
+                        "You can change this computer's settings below.",
+                        "Você pode alterar as configurações deste computador abaixo."
+                    ));
                 } else {
-                    ui.weak("Changing this computer's settings needs administrator rights.");
-                    if ui.button("Manage as administrator").clicked() {
+                    ui.weak(t!(
+                        "Changing this computer's settings needs administrator rights.",
+                        "Alterar as configurações deste computador exige direitos de administrador."
+                    ));
+                    if ui.button(t!("Manage as administrator", "Gerenciar como administrador")).clicked() {
                         match autostart::restart_as_admin(&self.exe) {
                             Ok(()) => self.quit_requested = true,
                             Err(e) => self.notify(format!("{e:#}"), true),
@@ -625,8 +729,11 @@ impl HostPage {
                     }
                 }
                 if ui
-                    .add_enabled(!busy, egui::Button::new("Uninstall…"))
-                    .on_hover_text("This app runs the host again (only while it is open and you are signed in)")
+                    .add_enabled(!busy, egui::Button::new(t!("Uninstall…", "Desinstalar…")))
+                    .on_hover_text(t!(
+                        "This app runs the host again (only while it is open and you are signed in)",
+                        "Este app volta a executar o host (só enquanto estiver aberto e você estiver logado)"
+                    ))
                     .clicked()
                 {
                     self.service_action(ui.ctx(), false);
@@ -640,39 +747,64 @@ impl HostPage {
         ui.horizontal(|ui| {
             ui.colored_label(
                 ORANGE,
-                "⚠ Run by this app: not reachable before you sign in, and the lock screen and UAC prompts \
-                 cannot be controlled.",
+                t!(
+                    "⚠ Run by this app: not reachable before you sign in, and the lock screen and UAC prompts \
+                     cannot be controlled.",
+                    "⚠ Executado por este app: inacessível antes do login, e a tela de bloqueio e os avisos do \
+                     UAC não podem ser controlados."
+                ),
             );
         });
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!busy, egui::Button::new("Install rdesk on this computer (recommended)"))
-                .on_hover_text("Windows asks for administrator permission once")
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(t!(
+                        "Install rdesk on this computer (recommended)",
+                        "Instalar o rdesk neste computador (recomendado)"
+                    )),
+                )
+                .on_hover_text(t!(
+                    "Windows asks for administrator permission once",
+                    "O Windows pede permissão de administrador uma vez"
+                ))
                 .clicked()
             {
                 self.service_action(ui.ctx(), true);
             }
             if busy {
                 ui.spinner();
-                ui.label("Windows may ask for administrator permission…");
+                ui.label(t!(
+                    "Windows may ask for administrator permission…",
+                    "O Windows pode pedir permissão de administrador…"
+                ));
             }
         });
     }
 
     fn session_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
-        ui.label(RichText::new("Current session").strong().size(16.0));
+        ui.label(RichText::new(t!("Current session", "Sessão atual")).strong().size(16.0));
         match &st.session {
             Some(s) if self.running() => {
                 ui.horizontal(|ui| {
-                    ui.label(format!(
+                    // `ago` already says "5 min ago" / "há 5 min".
+                    ui.label(tf!(
                         "{} from {} · {} · since {}{}",
+                        "{} de {} · {} · conectado {}{}",
                         s.client,
                         s.peer,
                         s.method,
                         directory::ago(unix(s.since), unix(SystemTime::now())),
                         s.extras()
                     ));
-                    if ui.button("Disconnect").on_hover_text("End it; the other side will not reconnect").clicked() {
+                    if ui
+                        .button(t!("Disconnect", "Desconectar"))
+                        .on_hover_text(t!(
+                            "End it; the other side will not reconnect",
+                            "Encerra a sessão; o outro lado não vai reconectar"
+                        ))
+                        .clicked()
+                    {
                         if let Some(remote) = &self.service {
                             if let Err(e) = self.rt.block_on(remote.disconnect()) {
                                 self.notify(format!("{e:#}"), true);
@@ -684,37 +816,50 @@ impl HostPage {
                 });
             }
             _ => {
-                ui.weak("Nobody is connected.");
+                ui.weak(t!("Nobody is connected.", "Ninguém está conectado."));
             }
         }
     }
 
     fn login_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("This computer's own password and keys").strong().size(16.0));
-        ui.weak("Used on the LAN without the server, or as the extra lock (Options) after the server's permission.");
+        ui.label(
+            RichText::new(t!("This computer's own password and keys", "Senha e chaves próprias deste computador"))
+                .strong()
+                .size(16.0),
+        );
+        ui.weak(t!(
+            "Used on the LAN without the server, or as the extra lock (Options) after the server's permission.",
+            "Usadas na rede local sem o servidor, ou como cadeado extra (Opções) após a permissão do servidor."
+        ));
         if !self.has_password && self.keys.is_empty() && Registration::load().is_none() {
-            ui.colored_label(ORANGE, "Not registered and no password or key: the host cannot start.");
+            ui.colored_label(
+                ORANGE,
+                t!(
+                    "Not registered and no password or key: the host cannot start.",
+                    "Não cadastrado e sem senha ou chave: o host não pode iniciar."
+                ),
+            );
         }
         ui.horizontal(|ui| {
-            ui.label("Password:");
+            ui.label(t!("Password:", "Senha:"));
             if self.has_password {
-                ui.colored_label(GREEN, "set");
-                if ui.button("Change…").clicked() {
+                ui.colored_label(GREEN, t!("set", "definida"));
+                if ui.button(t!("Change…", "Alterar…")).clicked() {
                     self.dialog = Some(password_dialog());
                 }
-                if ui.button("Remove").clicked() {
+                if ui.button(t!("Remove", "Remover")).clicked() {
                     self.dialog = Some(Dialog::RemovePassword);
                 }
             } else {
-                ui.weak("not set");
-                if ui.button("Set password…").clicked() {
+                ui.weak(t!("not set", "não definida"));
+                if ui.button(t!("Set password…", "Definir senha…")).clicked() {
                     self.dialog = Some(password_dialog());
                 }
             }
         });
-        ui.label("SSH keys:");
+        ui.label(t!("SSH keys:", "Chaves SSH:"));
         if self.keys.is_empty() {
-            ui.weak("   none");
+            ui.weak(t!("   none", "   nenhuma"));
         }
         let mut remove = None;
         for k in &self.keys {
@@ -723,10 +868,10 @@ impl HostPage {
                 ui.label(format!(
                     "   {} {}",
                     k.algorithm(),
-                    if k.comment().is_empty() { "(no comment)" } else { k.comment() }
+                    if k.comment().is_empty() { t!("(no comment)", "(sem comentário)") } else { k.comment() }
                 ));
                 ui.label(RichText::new(&fp).monospace().small().weak());
-                if ui.small_button("Remove").clicked() {
+                if ui.small_button(t!("Remove", "Remover")).clicked() {
                     remove = Some(fp.clone());
                 }
             });
@@ -734,62 +879,91 @@ impl HostPage {
         if let Some(fp) = remove {
             self.dialog = Some(Dialog::RemoveKey(fp));
         }
-        if ui.button("＋ Add SSH key…").clicked() {
+        if ui.button(t!("＋ Add SSH key…", "＋ Adicionar chave SSH…")).clicked() {
             self.dialog = Some(Dialog::AddKey { text: String::new(), agent: None, error: None });
             self.load_agent_keys();
         }
     }
 
     fn options_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(RichText::new("Options").strong().size(16.0)).default_open(false).show(ui, |ui| {
+        let header = RichText::new(t!("Options", "Opções")).strong().size(16.0);
+        egui::CollapsingHeader::new(header).id_salt("host-options").default_open(false).show(ui, |ui| {
             egui::Grid::new("host-opts").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Port");
-                ui.add(egui::DragValue::new(&mut self.cfg.port).range(1..=65535))
-                    .on_hover_text("UDP port for direct connections (LAN, port forwarding)");
+                ui.label(t!("Port", "Porta"));
+                ui.add(egui::DragValue::new(&mut self.cfg.port).range(1..=65535)).on_hover_text(t!(
+                    "UDP port for direct connections (LAN, port forwarding)",
+                    "Porta UDP para conexões diretas (rede local, redirecionamento de porta)"
+                ));
                 ui.end_row();
-                ui.label("Received files");
+                ui.label(t!("Received files", "Arquivos recebidos"));
                 ui.horizontal(|ui| {
                     ui.label(self.cfg.inbox_dir().display().to_string());
-                    if ui.small_button("Change…").clicked()
+                    if ui.small_button(t!("Change…", "Alterar…")).clicked()
                         && let Some(d) = rfd::FileDialog::new().set_directory(self.cfg.inbox_dir()).pick_folder()
                     {
                         self.cfg.inbox_dir = Some(d);
                     }
                 });
                 ui.end_row();
-                ui.label("Max frame rate");
+                ui.label(t!("Max frame rate", "Taxa de quadros máxima"));
                 ui.add(egui::Slider::new(&mut self.cfg.max_fps, 5..=60).suffix(" fps"));
                 ui.end_row();
-                ui.label("Image quality in motion");
+                ui.label(t!("Image quality in motion", "Qualidade da imagem em movimento"));
                 ui.add(egui::Slider::new(&mut self.cfg.jpeg_quality, 30..=95));
                 ui.end_row();
-                ui.label("Clipboard");
-                ui.checkbox(&mut self.cfg.clipboard, "share text in both directions");
+                ui.label(t!("Clipboard", "Área de transferência"));
+                ui.checkbox(
+                    &mut self.cfg.clipboard,
+                    t!("share text in both directions", "compartilhar texto nos dois sentidos"),
+                );
                 ui.end_row();
                 // Administrator rights in a terminal exist only on Windows.
                 if cfg!(windows) {
-                    ui.label("Terminal");
-                    ui.checkbox(&mut self.cfg.admin_terminal, "full control may open it as administrator")
-                        .on_hover_text("With rdesk installed: the signed-in person's administrator rights");
+                    ui.label(t!("Terminal", "Terminal"));
+                    ui.checkbox(
+                        &mut self.cfg.admin_terminal,
+                        t!(
+                            "full control may open it as administrator",
+                            "controle total pode abri-lo como administrador"
+                        ),
+                    )
+                    .on_hover_text(t!(
+                        "With rdesk installed: the signed-in person's administrator rights",
+                        "Com o rdesk instalado: com os direitos de administrador de quem estiver logado"
+                    ));
                     ui.end_row();
                 }
-                ui.label("Extra lock");
-                ui.checkbox(&mut self.cfg.require_local, "also ask for this computer's password or SSH key")
-                    .on_hover_text("Besides the permission from the server (needs a password or key set above)");
+                ui.label(t!("Extra lock", "Cadeado extra"));
+                ui.checkbox(
+                    &mut self.cfg.require_local,
+                    t!(
+                        "also ask for this computer's password or SSH key",
+                        "pedir também a senha ou chave SSH deste computador"
+                    ),
+                )
+                .on_hover_text(t!(
+                    "Besides the permission from the server (needs a password or key set above)",
+                    "Além da permissão do servidor (precisa de uma senha ou chave definida acima)"
+                ));
                 ui.end_row();
-                ui.label("Direct access");
+                ui.label(t!("Direct access", "Acesso direto"));
                 ui.vertical(|ui| {
                     let registered = self.status().registration.is_some() || Registration::load().is_some();
                     let mut on = self.cfg.direct.is_on(registered);
-                    let text = "this computer's own password or SSH key open it without the server";
+                    let text = t!(
+                        "this computer's own password or SSH key open it without the server",
+                        "a senha ou chave SSH própria deste computador o abrem sem o servidor"
+                    );
                     if ui.checkbox(&mut on, text).changed() {
                         // Back to the default when it matches it (on only while unregistered).
                         self.cfg.direct.enabled = (on == registered).then_some(on);
                     }
                     if on {
                         ui.horizontal(|ui| {
-                            ui.label("from");
-                            for (class, label) in [("lan", "local network"), ("tailscale", "Tailscale")] {
+                            ui.label(t!("from", "de"));
+                            // The class ids go to the config; only the labels are translated.
+                            let classes = [("lan", t!("local network", "rede local")), ("tailscale", "Tailscale")];
+                            for (class, label) in classes {
                                 let mut has = self.cfg.direct.from.iter().any(|c| c == class);
                                 if ui.checkbox(&mut has, label).changed() {
                                     self.cfg.direct.from.retain(|c| c != class);
@@ -799,42 +973,64 @@ impl HostPage {
                                 }
                             }
                         });
-                        ui.checkbox(&mut self.cfg.direct.mdns, "announce it on the local network (mDNS)")
-                            .on_hover_text(
-                                "Others connect with the host ID alone; anyone on the network sees it is here",
-                            );
+                        ui.checkbox(
+                            &mut self.cfg.direct.mdns,
+                            t!("announce it on the local network (mDNS)", "anunciá-lo na rede local (mDNS)"),
+                        )
+                        .on_hover_text(t!(
+                            "Others connect with the host ID alone; anyone on the network sees it is here",
+                            "Outros se conectam só com o ID do host; qualquer um na rede vê que ele está aqui"
+                        ));
                         if registered {
                             ui.colored_label(
                                 ORANGE,
-                                "Registered: this is a second way in, besides the server's sharing. The owner sees it \
-                                 is on, and these sessions appear in the history.",
+                                t!(
+                                    "Registered: this is a second way in, besides the server's sharing. The owner \
+                                     sees it is on, and these sessions appear in the history.",
+                                    "Cadastrado: este é um segundo acesso, além do compartilhamento do servidor. O \
+                                     dono vê que está ligado, e essas sessões aparecem no histórico."
+                                ),
                             );
                         }
                     } else if !registered {
-                        ui.colored_label(ORANGE, "Not registered and direct access off: nobody can reach it.");
+                        ui.colored_label(
+                            ORANGE,
+                            t!(
+                                "Not registered and direct access off: nobody can reach it.",
+                                "Não cadastrado e acesso direto desligado: ninguém consegue acessá-lo."
+                            ),
+                        );
                     }
                 });
                 ui.end_row();
             });
             ui.horizontal(|ui| {
-                if ui.button("Save options").clicked() {
+                if ui.button(t!("Save options", "Salvar opções")).clicked() {
                     match admin::save_config(&self.cfg) {
                         Ok(()) => {
                             let was = self.running();
                             self.restart();
-                            self.notify(if was { "Saved; host restarted." } else { "Saved." }, false);
+                            let text = if was {
+                                t!("Saved; host restarted.", "Salvo; host reiniciado.")
+                            } else {
+                                t!("Saved.", "Salvo.")
+                            };
+                            self.notify(text, false);
                         }
-                        Err(e) => self.notify(format!("Saving: {e:#}"), true),
+                        Err(e) => self.notify(tf!("Saving: {e:#}", "Erro ao salvar: {e:#}"), true),
                     }
                 }
-                if ui.button("Revert").clicked() {
+                if ui.button(t!("Revert", "Desfazer")).clicked() {
                     self.reload();
                 }
             });
             ui.add_space(8.0);
             if ui
-                .button("New host identity…")
-                .on_hover_text("This computer gets a new host ID; others must be given the new one")
+                .button(t!("New host identity…", "Nova identidade do host…"))
+                .on_hover_text(t!(
+                    "This computer gets a new host ID; others must be given the new one",
+                    "Este computador ganha um novo ID do host; os outros precisam receber o novo"
+                ))
                 .clicked()
             {
                 self.dialog = Some(Dialog::NewIdentity);
@@ -843,9 +1039,10 @@ impl HostPage {
     }
 
     fn activity_section(&mut self, ui: &mut egui::Ui, st: &HostStatus) {
-        egui::CollapsingHeader::new(RichText::new("Activity").strong().size(16.0)).default_open(true).show(ui, |ui| {
+        let header = RichText::new(t!("Activity", "Atividade")).strong().size(16.0);
+        egui::CollapsingHeader::new(header).id_salt("host-activity").default_open(true).show(ui, |ui| {
             if st.events.is_empty() {
-                ui.weak("Nothing yet.");
+                ui.weak(t!("Nothing yet.", "Nada ainda."));
             }
             let now = unix(SystemTime::now());
             for e in st.events.iter().rev().take(30) {
@@ -862,9 +1059,10 @@ impl HostPage {
     }
 
     fn diagnostics_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(RichText::new("Diagnostics").strong().size(16.0)).show(ui, |ui| {
+        let header = RichText::new(t!("Diagnostics", "Diagnóstico")).strong().size(16.0);
+        egui::CollapsingHeader::new(header).id_salt("host-diagnostics").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.busy.is_none(), egui::Button::new("Run check")).clicked() {
+                if ui.add_enabled(self.busy.is_none(), egui::Button::new(t!("Run check", "Verificar"))).clicked() {
                     self.busy = Some("diagnose");
                     let tx = self.jobs.0.clone();
                     let ctx = ui.ctx().clone();
@@ -913,38 +1111,42 @@ impl HostPage {
             Dialog::Password { a, b, op_ref, shown, error } => {
                 let m = egui::Modal::new(egui::Id::unique("host-password")).show(ctx, |ui| {
                     ui.set_width(460.0);
-                    ui.heading("Password for this computer");
-                    ui.label("People who know it can control this computer.");
-                    ui.label(
+                    ui.heading(t!("Password for this computer", "Senha deste computador"));
+                    ui.label(t!(
+                        "People who know it can control this computer.",
+                        "Quem souber a senha pode controlar este computador."
+                    ));
+                    ui.label(t!(
                         "Only a derived record is stored (OPAQUE + Argon2id); the password itself never leaves the client.",
-                    );
+                        "Só um registro derivado é guardado (OPAQUE + Argon2id); a senha em si nunca sai do cliente."
+                    ));
                     ui.add_space(6.0);
                     egui::Grid::new("pw").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                        ui.label("Password");
+                        ui.label(t!("Password", "Senha"));
                         ui.add(egui::TextEdit::singleline(&mut **a).password(shown.is_none()).desired_width(280.0));
                         ui.end_row();
-                        ui.label("Repeat");
+                        ui.label(t!("Repeat", "Repetir"));
                         ui.add(egui::TextEdit::singleline(&mut **b).password(shown.is_none()).desired_width(280.0));
                         ui.end_row();
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Generate a strong one").clicked() {
+                        if ui.button(t!("Generate a strong one", "Gerar uma forte")).clicked() {
                             let p = admin::generate_password(24);
                             **a = p.clone();
                             **b = p.clone();
                             *shown = Some(p);
                         }
                         if let Some(p) = shown {
-                            if ui.small_button("Copy").clicked() {
+                            if ui.small_button(t!("Copy", "Copiar")).clicked() {
                                 ui.ctx().copy_text(p.clone());
                             }
-                            ui.weak("Save it in 1Password.");
+                            ui.weak(t!("Save it in 1Password.", "Salve-a no 1Password."));
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Or read from 1Password:");
+                        ui.label(t!("Or read from 1Password:", "Ou leia do 1Password:"));
                         ui.add(egui::TextEdit::singleline(op_ref).hint_text("op://Private/rdesk/password").desired_width(200.0));
-                        if ui.add_enabled(!op_ref.trim().is_empty(), egui::Button::new("Load")).clicked() {
+                        if ui.add_enabled(!op_ref.trim().is_empty(), egui::Button::new(t!("Load", "Carregar"))).clicked() {
                             let (tx, r) = (self.jobs.0.clone(), op_ref.trim().to_string());
                             self.rt.spawn(async move {
                                 let res = agent::op_read(&r).await.map_err(|e| format!("{e:#}"));
@@ -953,7 +1155,13 @@ impl HostPage {
                         }
                     });
                     if !a.is_empty() && a.chars().count() < 16 {
-                        ui.colored_label(ORANGE, "Short password: prefer 16+ characters (or Generate).");
+                        ui.colored_label(
+                            ORANGE,
+                            t!(
+                                "Short password: prefer 16+ characters (or Generate).",
+                                "Senha curta: prefira 16+ caracteres (ou gere uma forte)."
+                            ),
+                        );
                     }
                     if let Some(e) = error {
                         ui.colored_label(RED, e.as_str());
@@ -962,7 +1170,7 @@ impl HostPage {
                     let mut close = false;
                     ui.horizontal(|ui| {
                         let ready = !a.is_empty() && a == b && self.busy.is_none();
-                        if ui.add_enabled(ready, egui::Button::new("Save password")).clicked() {
+                        if ui.add_enabled(ready, egui::Button::new(t!("Save password", "Salvar senha"))).clicked() {
                             self.busy = Some("password");
                             let (tx, pw) = (self.jobs.0.clone(), a.clone());
                             let ctx = ui.ctx().clone();
@@ -973,12 +1181,12 @@ impl HostPage {
                         }
                         if self.busy == Some("password") {
                             ui.spinner();
-                            ui.label("Deriving (Argon2id)…");
+                            ui.label(t!("Deriving (Argon2id)…", "Derivando (Argon2id)…"));
                         }
                         if !a.is_empty() && a != b {
-                            ui.colored_label(RED, "The two passwords differ.");
+                            ui.colored_label(RED, t!("The two passwords differ.", "As duas senhas são diferentes."));
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t!("Cancel", "Cancelar")).clicked() {
                             close = true;
                         }
                     });
@@ -992,16 +1200,25 @@ impl HostPage {
                 let mut added: Option<PublicKey> = None;
                 let m = egui::Modal::new(egui::Id::unique("host-addkey")).show(ctx, |ui| {
                     ui.set_width(560.0);
-                    ui.heading("Add an SSH key");
-                    ui.label("Whoever holds the private key (e.g. in their 1Password) can log in to this computer.");
+                    ui.heading(t!("Add an SSH key", "Adicionar uma chave SSH"));
+                    ui.label(t!(
+                        "Whoever holds the private key (e.g. in their 1Password) can log in to this computer.",
+                        "Quem tiver a chave privada (ex.: no 1Password) pode entrar neste computador."
+                    ));
                     ui.add_space(6.0);
-                    ui.label(RichText::new("From the SSH agent on this computer (1Password):").strong());
+                    ui.label(
+                        RichText::new(t!(
+                            "From the SSH agent on this computer (1Password):",
+                            "Do agente SSH deste computador (1Password):"
+                        ))
+                        .strong(),
+                    );
                     match agent_keys {
                         None => {
                             ui.spinner();
                         }
                         Some(Err(e)) => {
-                            ui.weak(format!("Not available: {e}"));
+                            ui.weak(tf!("Not available: {e}", "Indisponível: {e}"));
                         }
                         Some(Ok(keys)) => {
                             for k in keys.iter() {
@@ -1011,8 +1228,8 @@ impl HostPage {
                                     ui.label(format!("{} {}", k.algorithm(), k.comment()));
                                     ui.label(RichText::new(&fp).monospace().small().weak());
                                     if already {
-                                        ui.weak("added");
-                                    } else if ui.small_button("Add").clicked() {
+                                        ui.weak(t!("added", "adicionada"));
+                                    } else if ui.small_button(t!("Add", "Adicionar")).clicked() {
                                         added = Some(k.clone());
                                     }
                                 });
@@ -1021,12 +1238,15 @@ impl HostPage {
                     }
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Or paste a public key (from `rdesk agent-keys` on the other computer):")
-                            .strong(),
+                        RichText::new(t!(
+                            "Or paste a public key (from `rdesk agent-keys` on the other computer):",
+                            "Ou cole uma chave pública (de `rdesk agent-keys` no outro computador):"
+                        ))
+                        .strong(),
                     );
                     ui.add(
                         egui::TextEdit::multiline(text)
-                            .hint_text("ssh-ed25519 AAAA… comment")
+                            .hint_text(t!("ssh-ed25519 AAAA… comment", "ssh-ed25519 AAAA… comentário"))
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
@@ -1035,13 +1255,14 @@ impl HostPage {
                     }
                     let mut close = false;
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!text.trim().is_empty(), egui::Button::new("Add pasted key")).clicked() {
+                        let add = egui::Button::new(t!("Add pasted key", "Adicionar chave colada"));
+                        if ui.add_enabled(!text.trim().is_empty(), add).clicked() {
                             match admin::parse_public_key(text) {
                                 Ok(k) => added = Some(k),
                                 Err(e) => *error = Some(format!("{e:#}")),
                             }
                         }
-                        if ui.button("Close").clicked() {
+                        if ui.button(t!("Close", "Fechar")).clicked() {
                             close = true;
                         }
                     });
@@ -1050,10 +1271,12 @@ impl HostPage {
                 if let Some(k) = added {
                     match admin::add_key(&k) {
                         Ok(true) => {
-                            self.notify(format!("Added {}.", agent::key_fingerprint(k.key_data())), false);
+                            let fp = agent::key_fingerprint(k.key_data());
+                            self.notify(tf!("Added {fp}.", "Chave {fp} adicionada."), false);
                             text.clear();
                         }
-                        Ok(false) => self.notify("That key was already authorized.", false),
+                        Ok(false) => self
+                            .notify(t!("That key was already authorized.", "Essa chave já estava autorizada."), false),
                         Err(e) => self.notify(format!("{e:#}"), true),
                     }
                     self.keys = admin::load_keys().unwrap_or_default();
@@ -1071,11 +1294,17 @@ impl HostPage {
                 }
             }
             Dialog::RemovePassword => {
-                let r = confirm(ctx, "Remove the password?", "Only SSH keys will be able to log in.", "Remove");
+                let r = confirm(
+                    ctx,
+                    "remove-password",
+                    t!("Remove the password?", "Remover a senha?"),
+                    t!("Only SSH keys will be able to log in.", "Só chaves SSH vão poder entrar."),
+                    t!("Remove", "Remover"),
+                );
                 if let Some(yes) = r {
                     if yes {
                         match admin::clear_password() {
-                            Ok(()) => self.notify("Password removed.", false),
+                            Ok(()) => self.notify(t!("Password removed.", "Senha removida."), false),
                             Err(e) => self.notify(format!("{e:#}"), true),
                         }
                         self.has_password = admin::has_password();
@@ -1084,7 +1313,13 @@ impl HostPage {
                 }
             }
             Dialog::RemoveKey(fp) => {
-                let r = confirm(ctx, "Remove this key?", &format!("{fp} will no longer be able to log in."), "Remove");
+                let r = confirm(
+                    ctx,
+                    "remove-key",
+                    t!("Remove this key?", "Remover esta chave?"),
+                    &tf!("{fp} will no longer be able to log in.", "{fp} não vai mais poder entrar."),
+                    t!("Remove", "Remover"),
+                );
                 if let Some(yes) = r {
                     if yes {
                         if let Err(e) = admin::remove_key(fp) {
@@ -1098,9 +1333,14 @@ impl HostPage {
             Dialog::NewIdentity => {
                 let r = confirm(
                     ctx,
-                    "Create a new host identity?",
-                    "This computer gets a new host ID. Others can no longer reach it until they are given the new ID.",
-                    "Create new identity",
+                    "new-identity",
+                    t!("Create a new host identity?", "Criar uma nova identidade do host?"),
+                    t!(
+                        "This computer gets a new host ID. Others can no longer reach it until they are given the new ID.",
+                        "Este computador ganha um novo ID do host. Os outros não conseguem mais acessá-lo até receberem \
+                         o novo ID."
+                    ),
+                    t!("Create new identity", "Criar nova identidade"),
                 );
                 if let Some(yes) = r {
                     if yes {
@@ -1108,7 +1348,7 @@ impl HostPage {
                             Ok(fp) => {
                                 self.fingerprint = Some(fp);
                                 self.restart();
-                                self.notify(format!("New host ID: {}", format_host_id(&fp)), false);
+                                self.notify(tf!("New host ID: {}", "Novo ID do host: {}", format_host_id(&fp)), false);
                             }
                             Err(e) => self.notify(format!("{e:#}"), true),
                         }
@@ -1127,9 +1367,10 @@ fn password_dialog() -> Dialog {
     Dialog::Password { a: Default::default(), b: Default::default(), op_ref: String::new(), shown: None, error: None }
 }
 
-/// `Some(true)` confirmed, `Some(false)` cancelled, `None` still open.
-fn confirm(ctx: &egui::Context, title: &str, text: &str, ok: &str) -> Option<bool> {
-    let m = egui::Modal::new(egui::Id::unique(title)).show(ctx, |ui| {
+/// `Some(true)` confirmed, `Some(false)` cancelled, `None` still open. `id` names the dialog
+/// (the texts change with the language).
+fn confirm(ctx: &egui::Context, id: &str, title: &str, text: &str, ok: &str) -> Option<bool> {
+    let m = egui::Modal::new(egui::Id::unique(("host-confirm", id))).show(ctx, |ui| {
         ui.set_max_width(420.0);
         ui.heading(title);
         ui.label(text);
@@ -1139,7 +1380,7 @@ fn confirm(ctx: &egui::Context, title: &str, text: &str, ok: &str) -> Option<boo
             if ui.button(ok).clicked() {
                 r = Some(true);
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(t!("Cancel", "Cancelar")).clicked() {
                 r = Some(false);
             }
         });

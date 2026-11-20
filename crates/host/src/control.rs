@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use rdesk_common::{t, tf};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -41,9 +42,9 @@ impl SessionInfo {
     /// What else is open in it, for the session bar: " · terminal", " · terminal as administrator".
     pub fn extras(&self) -> &'static str {
         if self.admin_terminals > 0 {
-            " · terminal as administrator"
+            t!(" · terminal as administrator", " · terminal como administrador")
         } else if self.terminals > 0 {
-            " · terminal"
+            t!(" · terminal", " · terminal")
         } else {
             ""
         }
@@ -199,7 +200,7 @@ impl HostHandle {
             match server::serve(opts, r.clone(), rx).await {
                 Ok(()) => r.state(HostState::Stopped),
                 Err(e) => {
-                    r.event(format!("Host stopped: {e:#}"), true);
+                    r.event(tf!("Host stopped: {e:#}", "O host parou: {e:#}"), true);
                     r.state(HostState::Failed(format!("{e:#}")));
                 }
             }

@@ -2,6 +2,8 @@
 //! to windows of elevated processes (UIPI): Task Manager, installers, admin terminals.
 //! On other systems there is no such split and everything reports "fine".
 
+use rdesk_common::{t, tf};
+
 /// Is this process running elevated ("as administrator")?
 pub fn is_elevated() -> bool {
     imp::is_elevated()
@@ -16,12 +18,20 @@ pub fn foreground_blocks_input() -> Option<String> {
 /// What to tell the remote user when Windows is eating their clicks.
 pub fn blocked_message(app: Option<&str>) -> String {
     let what = match app {
-        Some(a) => format!("\"{a}\" runs as administrator and is in front"),
-        None => "a window that runs as administrator is probably in front".to_string(),
+        Some(a) => {
+            tf!("\"{a}\" runs as administrator and is in front", "\"{a}\" roda como administrador e está na frente")
+        }
+        None => t!(
+            "a window that runs as administrator is probably in front",
+            "provavelmente há uma janela rodando como administrador na frente"
+        )
+        .to_string(),
     };
-    format!(
+    tf!(
         "Windows is blocking remote clicks and keys: {what}, and the rdesk host does not. \
-         Close that window at the computer, or run the host as administrator."
+         Close that window at the computer, or run the host as administrator.",
+        "O Windows está bloqueando cliques e teclas remotos: {what}, e o host do rdesk não. \
+         Feche essa janela no computador ou rode o host como administrador."
     )
 }
 
