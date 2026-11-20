@@ -518,6 +518,10 @@ struct ConnectArgs {
     /// Open a terminal on it right away.
     #[arg(long)]
     terminal: bool,
+    /// Started by the app: bring the window forward (and open files or a terminal) when the
+    /// app writes `show`, `files` or `terminal` to standard input.
+    #[arg(long, hide = true)]
+    controlled: bool,
 }
 
 /// The raw standard input and output: std's stdout is line-buffered, so binary replies
@@ -1622,6 +1626,7 @@ fn connect(a: ConnectArgs) -> Result<()> {
         download_dir,
         open_files: a.files,
         open_terminal: a.terminal,
+        control_stdin: a.controlled,
     })
 }
 

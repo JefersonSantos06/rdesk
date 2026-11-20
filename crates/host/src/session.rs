@@ -284,13 +284,13 @@ pub async fn run(
                                 }
                                 let what = if admin { "a terminal as administrator" } else { "a terminal" };
                                 reporter.event(format!("{who} opened {what}"), false);
-                                reporter.terminal(1);
+                                reporter.terminal(1, admin);
                                 let r2 = if files_as_user {
                                     terminal_as_user(first, &mut r, &mut w).await
                                 } else {
                                     crate::terminal::serve_from(first, &mut r, &mut w).await
                                 };
-                                reporter.terminal(-1);
+                                reporter.terminal(-1, admin);
                                 r2
                             }
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),

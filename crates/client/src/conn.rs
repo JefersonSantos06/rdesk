@@ -86,8 +86,16 @@ pub enum UiEvent {
         /// "direct" or "relay".
         route: &'static str,
     },
-    /// The connection will not be retried (auth failure, replaced by another client...).
+    /// The connection will not be retried (auth failure, replaced by another client...)
+    /// unless the UI asks with [`Cmd::Reconnect`].
     Fatal(String),
+    /// The connection dropped; trying again (`attempt` counts from 1 since it was last up).
+    Reconnecting {
+        reason: String,
+        attempt: u32,
+    },
+    /// The app asked this session window to come forward (the window is already open).
+    Raise(Raise),
     /// A terminal opened (or why not).
     Terminal(Result<crate::terminal::TermSlot, String>),
     /// Something to redraw (terminal output).
@@ -117,7 +125,38 @@ pub enum Cmd {
         /// With administrator rights (Windows hosts, full control).
         admin: bool,
     },
+    /// Try to connect again now: skips the wait between attempts, or starts over after a
+    /// [`UiEvent::Fatal`].
+    Reconnect,
     Quit,
+}
+
+/// What the app wants an already open session window to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raise {
+    Window,
+    Files,
+    Terminal,
+}
+
+impl Raise {
+    /// The line the app writes to the session's standard input.
+    pub fn parse(line: &str) -> Option<Self> {
+        match line.trim() {
+            "show" => Some(Raise::Window),
+            "files" => Some(Raise::Files),
+            "terminal" => Some(Raise::Terminal),
+            _ => None,
+        }
+    }
+
+    pub fn line(self) -> &'static str {
+        match self {
+            Raise::Window => "show",
+            Raise::Files => "files",
+            Raise::Terminal => "terminal",
+        }
+    }
 }
 
 /// The remote screen as last decoded, plus which parts changed since the UI looked.
@@ -229,6 +268,8 @@ pub fn spawn(opts: ConnectOpts, notify: impl Fn(UiEvent) + Send + Sync + 'static
     Handle { cmd: cmd_tx, view, thread }
 }
 
+const WRONG_PASSWORD: &str = "wrong password";
+
 enum End {
     Quit,
     Fatal(String),
@@ -280,13 +321,15 @@ async fn reconnect_loop(
             End::Quit => return,
             End::Fatal(msg) => {
                 notify(UiEvent::Fatal(msg));
-                // Stay alive until the UI quits so it can show the message.
-                while let Some(c) = cmd_rx.recv().await {
-                    if matches!(c, Cmd::Quit) {
-                        return;
+                // Stay alive until the UI quits (so it can show the message), or asks to try again.
+                loop {
+                    match cmd_rx.recv().await {
+                        None | Some(Cmd::Quit) => return,
+                        Some(Cmd::Reconnect) => break,
+                        Some(_) => {}
                     }
                 }
-                return;
+                failures = 0;
             }
             End::Retry(msg) => {
                 // A session that lasted a while resets the backoff.
@@ -297,14 +340,19 @@ async fn reconnect_loop(
                 failures += 1;
                 tracing::info!("disconnected: {msg}; retrying in {delay} ms");
                 notify(UiEvent::Status(format!("Disconnected ({msg}). Reconnecting…")));
+                // A rejected password is asked again right away: the session was not lost.
+                if msg != WRONG_PASSWORD {
+                    notify(UiEvent::Reconnecting { reason: msg, attempt: failures });
+                }
                 let sleep = tokio::time::sleep(Duration::from_millis(delay));
                 tokio::pin!(sleep);
-                // Drop input while offline, but honor Quit.
+                // Drop input while offline, but honor Quit and "try now".
                 loop {
                     tokio::select! {
                         _ = &mut sleep => break,
                         c = cmd_rx.recv() => match c {
                             None | Some(Cmd::Quit) => return,
+                            Some(Cmd::Reconnect) => break,
                             _ => {}
                         }
                     }
@@ -546,7 +594,7 @@ async fn once(
                 if retry {
                     // Ask again; the host's per-IP backoff keeps this from becoming a guessing loop.
                     *password_hint = hint;
-                    return End::Retry("wrong password".into());
+                    return End::Retry(WRONG_PASSWORD.into());
                 }
                 return End::Fatal(format!("{e:#}"));
             }
@@ -755,6 +803,8 @@ async fn run_session(
                 let Some(c) = c else { break Ok(true) };
                 match c {
                     Cmd::Quit => break Ok(true),
+                    // Already connected.
+                    Cmd::Reconnect => {}
                     // View-only sessions: the host would drop it anyway.
                     Cmd::Input(_) if !input_allowed => {}
                     Cmd::Input(ev) => {
@@ -914,4 +964,18 @@ pub fn take_updates(view: &SharedView) -> Update {
     };
     v.pending.store(false, Ordering::Release);
     upd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raise_lines_round_trip() {
+        for r in [Raise::Window, Raise::Files, Raise::Terminal] {
+            assert_eq!(Raise::parse(r.line()), Some(r));
+        }
+        assert_eq!(Raise::parse("terminal\r"), Some(Raise::Terminal), "Windows line ends");
+        assert_eq!(Raise::parse("quit"), None);
+    }
 }

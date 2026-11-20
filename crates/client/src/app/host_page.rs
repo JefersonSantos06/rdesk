@@ -665,11 +665,12 @@ impl HostPage {
             Some(s) if self.running() => {
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "{} from {} · {} · since {}",
+                        "{} from {} · {} · since {}{}",
                         s.client,
                         s.peer,
                         s.method,
-                        directory::ago(unix(s.since), unix(SystemTime::now()))
+                        directory::ago(unix(s.since), unix(SystemTime::now())),
+                        s.extras()
                     ));
                     if ui.button("Disconnect").on_hover_text("End it; the other side will not reconnect").clicked() {
                         if let Some(remote) = &self.service {
@@ -765,10 +766,13 @@ impl HostPage {
                 ui.label("Clipboard");
                 ui.checkbox(&mut self.cfg.clipboard, "share text in both directions");
                 ui.end_row();
-                ui.label("Terminal");
-                ui.checkbox(&mut self.cfg.admin_terminal, "full control may open it as administrator")
-                    .on_hover_text("Windows, with rdesk installed: the signed-in person's administrator rights");
-                ui.end_row();
+                // Administrator rights in a terminal exist only on Windows.
+                if cfg!(windows) {
+                    ui.label("Terminal");
+                    ui.checkbox(&mut self.cfg.admin_terminal, "full control may open it as administrator")
+                        .on_hover_text("With rdesk installed: the signed-in person's administrator rights");
+                    ui.end_row();
+                }
                 ui.label("Extra lock");
                 ui.checkbox(&mut self.cfg.require_local, "also ask for this computer's password or SSH key")
                     .on_hover_text("Besides the permission from the server (needs a password or key set above)");

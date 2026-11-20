@@ -18,10 +18,17 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::conn::{self, Cmd, ConnectOpts, Handle, PasswordAnswer, PasswordReply, UiEvent, Update};
+use crate::conn::{self, Cmd, ConnectOpts, Handle, PasswordAnswer, PasswordReply, Raise, UiEvent, Update};
 use crate::keys;
 
 const NOTICE_FOR: Duration = Duration::from_secs(12);
+/// A drop shorter than this is not worth a dialog (the picture just pauses).
+const OFFLINE_GRACE: Duration = Duration::from_millis(1500);
+/// After this long, say the computer may be off.
+const OFFLINE_LONG: Duration = Duration::from_secs(20);
+/// How long "Reconnected" stays up.
+const INFO_FOR: Duration = Duration::from_secs(4);
+const DANGER: Color32 = Color32::from_rgb(196, 43, 28);
 
 pub struct ViewerOpts {
     pub connect: ConnectOpts,
@@ -31,11 +38,27 @@ pub struct ViewerOpts {
     pub open_terminal: bool,
     pub swap_cmd_ctrl: bool,
     pub download_dir: PathBuf,
+    /// Started by the app: read `show`, `files` or `terminal` lines on standard input (the
+    /// app asks an open session window to come forward).
+    pub control_stdin: bool,
 }
 
 pub fn run(opts: ViewerOpts) -> Result<()> {
     let event_loop = EventLoop::<UiEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    if opts.control_stdin {
+        let proxy = event_loop.create_proxy();
+        std::thread::Builder::new().name("rdesk-control".into()).spawn(move || {
+            use std::io::BufRead as _;
+            // Ends when the app goes away (the pipe closes).
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if let Some(r) = Raise::parse(&line) {
+                    let _ = proxy.send_event(UiEvent::Raise(r));
+                }
+            }
+        })?;
+    }
     let name = opts.connect.name.clone();
     let handle = conn::spawn(opts.connect, move |ev| {
         let _ = proxy.send_event(ev);
@@ -74,6 +97,24 @@ struct Transfer {
     finished: Option<Result<String, String>>,
 }
 
+/// The connection dropped and is being retried.
+struct Offline {
+    since: Instant,
+    attempt: u32,
+    reason: String,
+}
+
+/// A question before something that cannot be undone.
+#[derive(Clone, Copy, PartialEq)]
+enum Confirm {
+    /// The terminal window's close button, with its shell still running.
+    CloseTerminal,
+    /// Open the other kind of terminal (only one at a time).
+    ReplaceTerminal { admin: bool },
+    /// The session window's close button, with a terminal or transfers going.
+    Disconnect,
+}
+
 struct App {
     handle: Handle,
     name: String,
@@ -110,6 +151,15 @@ struct App {
     terminal_on_connect: bool,
     /// The terminal window's shell has administrator rights.
     terminal_admin: bool,
+    /// Signed in to the host: keyboard and mouse go through. Off while connecting or
+    /// reconnecting, so nothing typed meanwhile is replayed once it is back.
+    connected: bool,
+    offline: Option<Offline>,
+    /// "Reconnected after 8 s".
+    info: Option<(String, Instant)>,
+    confirm: Option<Confirm>,
+    /// Close the window on the next turn of the event loop.
+    exit_requested: bool,
 }
 
 impl App {
@@ -145,6 +195,11 @@ impl App {
             terminal_open: false,
             terminal_on_connect: false,
             terminal_admin: false,
+            connected: false,
+            offline: None,
+            info: None,
+            confirm: None,
+            exit_requested: false,
         }
     }
 
@@ -153,9 +208,40 @@ impl App {
     }
 
     fn input(&self, ev: InputEvent) {
-        if self.access.input {
+        if self.access.input && self.connected {
             self.send(Cmd::Input(ev));
         }
+    }
+
+    fn host_name(&self) -> String {
+        self.host.as_ref().map(|h| h.hostname.clone()).unwrap_or_else(|| self.name.clone())
+    }
+
+    fn host_is_windows(&self) -> bool {
+        self.host.as_ref().is_some_and(|h| h.os == "windows")
+    }
+
+    fn terminal_live(&self) -> bool {
+        self.terminal.as_ref().is_some_and(|t| !t.ended)
+    }
+
+    fn transfers_running(&self) -> usize {
+        self.transfers.values().filter(|t| t.finished.is_none()).count()
+    }
+
+    /// The offline dialog is up (a drop that lasted past the grace period).
+    fn offline_shown(&self) -> bool {
+        self.offline.as_ref().is_some_and(|o| o.since.elapsed() >= OFFLINE_GRACE)
+    }
+
+    /// Try again now (while waiting between attempts, or after the session ended).
+    fn reconnect_now(&mut self) {
+        if self.fatal.take().is_some() {
+            self.status = "Connecting…".into();
+            self.offline = None;
+            self.update_title();
+        }
+        self.send(Cmd::Reconnect);
     }
 
     fn request_redraw(&self) {
@@ -259,22 +345,14 @@ impl App {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+            // The picture is stale while the connection is down: dim it.
+            if self.offline_shown() || self.fatal.is_some() {
+                ctx.layer_painter(egui::LayerId::background()).rect_filled(rect, 0.0, Color32::from_black_alpha(150));
+            }
             self.image_rect = Some(rect);
         }
 
-        // Status banner while not showing a picture or when something went wrong.
-        if self.tex.is_none() || self.fatal.is_some() || !self.status.starts_with("Connected") {
-            let text = self.fatal.clone().unwrap_or_else(|| self.status.clone());
-            egui::Area::new(egui::Id::unique("status"))
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .interactable(false)
-                .show(&ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(egui::RichText::new(text).size(18.0));
-                    });
-                });
-        }
-
+        self.connection_ui(&ctx);
         self.password_dialog(&ctx);
 
         // Host notice, e.g. "Windows is blocking remote clicks…".
@@ -289,6 +367,22 @@ impl App {
                 ctx.request_repaint_after(NOTICE_FOR.saturating_sub(at.elapsed()));
             } else {
                 self.notice = None;
+            }
+        }
+        // Good news, briefly ("Reconnected after 8 s").
+        if let Some((text, at)) = &self.info {
+            if at.elapsed() < INFO_FOR {
+                egui::Area::new(egui::Id::unique("info"))
+                    .anchor(Align2::CENTER_TOP, [0.0, 34.0])
+                    .interactable(false)
+                    .show(&ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(egui::RichText::new(format!("✔ {text}")).color(Color32::from_rgb(46, 184, 92)));
+                        });
+                    });
+                ctx.request_repaint_after(INFO_FOR.saturating_sub(at.elapsed()));
+            } else {
+                self.info = None;
             }
         }
 
@@ -308,6 +402,8 @@ impl App {
             self.menu_open = open;
         }
 
+        let mut closed = false;
+        let mut again = false;
         if self.terminal_open
             && let Some(t) = &mut self.terminal
         {
@@ -315,29 +411,250 @@ impl App {
             // Without a picture (a terminal-only session) it takes the window.
             let size =
                 if self.tex.is_none() { screen.size() - egui::vec2(20.0, 50.0) } else { egui::vec2(900.0, 520.0) };
-            egui::Window::new(format!("Terminal · {}", t.status))
+            let admin = if self.terminal_admin { " (administrator)" } else { "" };
+            let connected = self.connected;
+            egui::Window::new(format!("Terminal{admin} · {}", t.status))
                 .id(egui::Id::unique("terminal"))
                 .open(&mut open)
                 .resizable(true)
                 .default_size(size)
-                .show(&ctx, |ui| t.ui(ui));
-            self.terminal_open = open;
-            if !open {
-                // Closing the window ends the shell.
+                .show(&ctx, |ui| {
+                    if t.ended {
+                        ui.horizontal(|ui| {
+                            ui.label("This shell has closed.");
+                            if ui.add_enabled(connected, egui::Button::new("Open a new terminal")).clicked() {
+                                again = true;
+                            }
+                        });
+                    }
+                    t.ui(ui)
+                });
+            closed = !open;
+        }
+        if closed {
+            if self.terminal_live() {
+                // Closing ends the shell: ask first (Hide keeps it running).
+                self.confirm = Some(Confirm::CloseTerminal);
+            } else {
+                self.terminal_open = false;
                 self.terminal = None;
             }
+        }
+        if again {
+            let admin = self.terminal_admin;
+            self.start_terminal(admin);
+        }
+        self.confirm_dialog(&ctx);
+    }
+
+    /// Connecting, reconnecting or disconnected for good: say so, with what can be done.
+    fn connection_ui(&mut self, ctx: &egui::Context) {
+        enum Card {
+            Connecting,
+            Lost {
+                since: Duration,
+                attempt: u32,
+                reason: String,
+            },
+            Ended(String),
+            /// Connected, waiting for the first picture (or a session without one).
+            Waiting,
+        }
+        let card = if let Some(msg) = &self.fatal {
+            Card::Ended(msg.clone())
+        } else if let Some(o) = &self.offline {
+            if o.since.elapsed() < OFFLINE_GRACE {
+                // A short drop: the picture just pauses.
+                ctx.request_repaint_after(OFFLINE_GRACE.saturating_sub(o.since.elapsed()));
+                return;
+            }
+            ctx.request_repaint_after(Duration::from_secs(1));
+            Card::Lost { since: o.since.elapsed(), attempt: o.attempt, reason: o.reason.clone() }
+        } else if !self.connected {
+            Card::Connecting
+        } else if self.tex.is_none() && self.access.screen {
+            Card::Waiting
+        } else {
+            return;
+        };
+        let host = self.host_name();
+        if let Card::Waiting = card {
+            egui::Area::new(egui::Id::unique("status"))
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new(&self.status).size(18.0));
+                    });
+                });
+            return;
+        }
+        let mut action = None;
+        egui::Area::new(egui::Id::unique("connection")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(18.0).show(ui, |ui| {
+                ui.set_max_width(420.0);
+                match &card {
+                    Card::Connecting => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new(format!("Connecting to {host}…")).size(18.0));
+                        });
+                        if self.status != "Connecting…" {
+                            ui.weak(&self.status);
+                        }
+                        ui.add_space(8.0);
+                        if ui.button("Cancel").clicked() {
+                            action = Some(false);
+                        }
+                    }
+                    Card::Lost { since, attempt, reason } => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new(format!("Reconnecting to {host}…")).size(18.0));
+                        });
+                        ui.label(format!("The connection was lost {} ago ({reason}).", seconds(*since)));
+                        ui.weak("Keyboard and mouse are paused until it is back.");
+                        if *since >= OFFLINE_LONG {
+                            ui.add_space(4.0);
+                            ui.label(format!(
+                                "Still trying: {host} may be off, asleep or without network. rdesk keeps trying \
+                                 until you disconnect."
+                            ));
+                        }
+                        ui.weak(format!("Attempt {attempt}"));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Try now").clicked() {
+                                action = Some(true);
+                            }
+                            if ui.button("Disconnect").clicked() {
+                                action = Some(false);
+                            }
+                        });
+                    }
+                    Card::Ended(msg) => {
+                        ui.label(egui::RichText::new(format!("Disconnected from {host}")).size(18.0));
+                        ui.label(msg);
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Reconnect").clicked() {
+                                action = Some(true);
+                            }
+                            if ui.button("Close").clicked() {
+                                action = Some(false);
+                            }
+                        });
+                    }
+                    Card::Waiting => {}
+                }
+            });
+        });
+        match action {
+            Some(true) => self.reconnect_now(),
+            Some(false) => self.exit_requested = true,
+            None => {}
         }
     }
 
     fn open_terminal(&mut self, admin: bool) {
-        if self.terminal.as_ref().is_some_and(|t| !t.ended) && self.terminal_admin == admin {
-            self.terminal_open = true;
+        if self.terminal_live() {
+            if self.terminal_admin == admin {
+                self.terminal_open = true;
+            } else {
+                // One terminal at a time: the other kind would end this shell.
+                self.confirm = Some(Confirm::ReplaceTerminal { admin });
+            }
             return;
         }
-        // One terminal window: another kind replaces it (closing that shell).
+        self.start_terminal(admin);
+    }
+
+    /// Open a new shell (ending the current one, if any).
+    fn start_terminal(&mut self, admin: bool) {
         self.terminal = None;
         self.terminal_admin = admin;
         self.send(Cmd::OpenTerminal { cols: 100, rows: 30, admin });
+    }
+
+    /// The window's close button: ask first when closing would stop something.
+    fn close_requested(&mut self) {
+        if self.connected && (self.terminal_live() || self.transfers_running() > 0) {
+            self.confirm = Some(Confirm::Disconnect);
+            if let Some(g) = &self.gfx {
+                g.window.focus_window();
+            }
+            self.request_redraw();
+        } else {
+            self.exit_requested = true;
+        }
+    }
+
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.confirm else { return };
+        let shell = self.terminal.as_ref().map(|t| t.status.clone()).unwrap_or_default();
+        let (title, text, ok) = match c {
+            Confirm::CloseTerminal => (
+                "Close the terminal?".to_string(),
+                format!(
+                    "The shell ({shell}) ends, and anything running in it stops. Hide keeps it running: open it \
+                     again with Terminal in the ▼ rdesk menu."
+                ),
+                "End the shell",
+            ),
+            Confirm::ReplaceTerminal { admin } => (
+                if admin { "Open a terminal as administrator?" } else { "Open a regular terminal?" }.to_string(),
+                format!("Only one terminal at a time: the open one ({shell}) ends, and anything running in it stops."),
+                "End it and open",
+            ),
+            Confirm::Disconnect => {
+                let mut lines = Vec::new();
+                if self.terminal_live() {
+                    lines.push(format!("The terminal ({shell}) ends, and anything running in it stops."));
+                }
+                match self.transfers_running() {
+                    0 => {}
+                    1 => lines.push("1 file transfer stops before it finishes.".to_string()),
+                    n => lines.push(format!("{n} file transfers stop before they finish.")),
+                }
+                (format!("Disconnect from {}?", self.host_name()), lines.join("\n"), "Disconnect")
+            }
+        };
+        let mut answer = None;
+        let m = egui::Modal::new(egui::Id::unique("confirm")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading(title);
+            ui.label(text);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let danger = egui::Button::new(egui::RichText::new(ok).color(Color32::WHITE)).fill(DANGER);
+                if ui.add(danger).clicked() {
+                    answer = Some(true);
+                }
+                if c == Confirm::CloseTerminal && ui.button("Hide").clicked() {
+                    self.terminal_open = false;
+                    answer = Some(false);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if answer.is_none() && m.should_close() {
+            answer = Some(false);
+        }
+        let Some(yes) = answer else { return };
+        self.confirm = None;
+        if !yes {
+            return;
+        }
+        match c {
+            Confirm::CloseTerminal => {
+                self.terminal_open = false;
+                self.terminal = None;
+            }
+            Confirm::ReplaceTerminal { admin } => self.start_terminal(admin),
+            Confirm::Disconnect => self.exit_requested = true,
+        }
     }
 
     fn password_dialog(&mut self, ctx: &egui::Context) {
@@ -383,10 +700,12 @@ impl App {
         if ui.button("Terminal").on_hover_text("A shell on that computer, as whoever is signed in there").clicked() {
             self.open_terminal(false);
         }
+        // Administrator rights in a terminal exist on Windows hosts, with full control.
         if self.access == rdesk_proto::Access::FULL
+            && self.host_is_windows()
             && ui
                 .button("Terminal (admin)")
-                .on_hover_text("Windows: a shell with the administrator rights of whoever is signed in there")
+                .on_hover_text("A shell with the administrator rights of whoever is signed in there")
                 .clicked()
         {
             self.open_terminal(true);
@@ -431,10 +750,11 @@ impl App {
             }
             ui.checkbox(&mut self.swap_cmd_ctrl, "Mac keys")
                 .on_hover_text("Cmd → Ctrl, left Option → Windows key, Control → Alt");
-            if ui
-                .button("Ctrl+Alt+Del")
-                .on_hover_text("Works when the computer runs rdesk as a service (installed)")
-                .clicked()
+            if self.host_is_windows()
+                && ui
+                    .button("Ctrl+Alt+Del")
+                    .on_hover_text("Works when the computer runs rdesk as a service (installed)")
+                    .clicked()
             {
                 use rdesk_proto::Key::*;
                 for k in [ControlLeft, AltLeft, Delete] {
@@ -575,8 +895,11 @@ impl ApplicationHandler<UiEvent> for App {
         let wants_kb = self.egui.egui_wants_keyboard_input();
         match &event {
             WindowEvent::CloseRequested => {
-                self.send(Cmd::Quit);
-                el.exit();
+                self.close_requested();
+                if self.exit_requested {
+                    self.send(Cmd::Quit);
+                    el.exit();
+                }
                 return;
             }
             WindowEvent::RedrawRequested => {
@@ -661,6 +984,27 @@ impl ApplicationHandler<UiEvent> for App {
                 self.status = s;
                 self.update_title();
             }
+            UiEvent::Reconnecting { reason, attempt } => {
+                self.connected = false;
+                // Counted from the first drop, not from each attempt.
+                let since = self.offline.as_ref().map(|o| o.since).unwrap_or_else(Instant::now);
+                self.offline = Some(Offline { since, attempt, reason });
+            }
+            UiEvent::Raise(what) => {
+                if let Some(g) = &self.gfx {
+                    g.window.set_visible(true);
+                    g.window.set_minimized(false);
+                    g.window.focus_window();
+                }
+                match what {
+                    Raise::Window => {}
+                    Raise::Files => {
+                        self.menu_open = true;
+                        self.send(Cmd::ListDir(self.remote_path.clone()));
+                    }
+                    Raise::Terminal => self.open_terminal(false),
+                }
+            }
             UiEvent::PasswordNeeded { host, error, can_remember, reply } => {
                 // A newer request replaces an unanswered one (that login attempt is gone).
                 if let Some(old) = self.password.take() {
@@ -698,6 +1042,16 @@ impl ApplicationHandler<UiEvent> for App {
                 if std::mem::take(&mut self.terminal_on_connect) {
                     self.send(Cmd::OpenTerminal { cols: 100, rows: 30, admin: false });
                 }
+                self.connected = true;
+                if let Some(o) = self.offline.take() {
+                    if o.since.elapsed() >= OFFLINE_GRACE {
+                        self.info = Some((format!("Reconnected after {}", seconds(o.since.elapsed())), Instant::now()));
+                    }
+                    // The file panel showed the old connection's listing: read it again.
+                    if self.menu_open && self.listing.is_some() {
+                        self.send(Cmd::ListDir(self.remote_path.clone()));
+                    }
+                }
                 self.fatal = None;
                 self.monitors = h.monitors.clone();
                 self.active = h.active_monitor;
@@ -725,6 +1079,9 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Stats { rtt_ms, fps, kbps, route } => self.stats = (rtt_ms, fps, kbps, route),
             UiEvent::Fatal(msg) => {
                 self.status = "Disconnected".into();
+                self.connected = false;
+                self.offline = None;
+                self.confirm = None;
                 self.fatal = Some(msg);
                 self.update_title();
             }
@@ -737,6 +1094,11 @@ impl ApplicationHandler<UiEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.exit_requested {
+            self.send(Cmd::Quit);
+            el.exit();
+            return;
+        }
         if let Some(p) = self.pending_move.take() {
             self.input(InputEvent::MouseMove { x: p.0, y: p.1 });
         }
@@ -769,6 +1131,16 @@ fn parent_of(path: &str, sep: char) -> String {
     }
 }
 
+/// "8 s", "3 min", "1 h 5 min".
+fn seconds(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s / 60),
+        _ => format!("{} h {} min", s / 3600, s % 3600 / 60),
+    }
+}
+
 pub fn human(n: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
@@ -792,5 +1164,12 @@ mod tests {
         assert_eq!(parent_of("/home", '/'), "/");
         assert_eq!(parent_of("C:\\Users", '\\'), "C:\\");
         assert_eq!(human(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(seconds(Duration::from_secs(8)), "8 s");
+        assert_eq!(seconds(Duration::from_secs(185)), "3 min");
+        assert_eq!(seconds(Duration::from_secs(3900)), "1 h 5 min");
     }
 }

@@ -173,6 +173,8 @@ struct Session_ {
     target: String,
     label: String,
     child: std::process::Child,
+    /// The window's standard input: `show`, `files` or `terminal` bring it forward.
+    control: Option<std::process::ChildStdin>,
     started: Instant,
     log: PathBuf,
 }
@@ -446,12 +448,7 @@ impl Computers {
 
     fn spawn_session(&mut self, target: &str, label: &str, how: Open) {
         if self.session_open(target) {
-            let hint = match how {
-                Open::Screen => "",
-                Open::Files => " Use Files in its ▼ rdesk menu.",
-                Open::Terminal => " Use Terminal in its ▼ rdesk menu.",
-            };
-            self.notify(format!("A window for {label} is already open.{hint}"), false);
+            self.raise(target, label, how);
             return;
         }
         let log = match session_log(label) {
@@ -466,7 +463,7 @@ impl Computers {
             Err(_) => std::process::Stdio::null(),
         };
         let mut cmd = std::process::Command::new(&self.exe);
-        cmd.args(["connect", target]);
+        cmd.args(["connect", target, "--controlled"]);
         match how {
             Open::Screen => {}
             Open::Files => {
@@ -476,7 +473,7 @@ impl Computers {
                 cmd.arg("--terminal");
             }
         }
-        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
+        cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(stderr);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
@@ -484,10 +481,11 @@ impl Computers {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
                 self.sessions.push(Session_ {
                     target: target.to_string(),
                     label: label.to_string(),
+                    control: child.stdin.take(),
                     child,
                     started: Instant::now(),
                     log,
@@ -495,6 +493,26 @@ impl Computers {
                 self.notify(format!("Opening {label}…"), false);
             }
             Err(e) => self.notify(format!("Cannot start {}: {e}", self.exe.display()), true),
+        }
+    }
+
+    /// Bring an open session window forward (on its file panel or terminal if asked).
+    fn raise(&mut self, target: &str, label: &str, how: Open) {
+        use std::io::Write as _;
+        let what = match how {
+            Open::Screen => crate::conn::Raise::Window,
+            Open::Files => crate::conn::Raise::Files,
+            Open::Terminal => crate::conn::Raise::Terminal,
+        };
+        let Some(s) = self.sessions.iter_mut().find(|s| s.target == target) else { return };
+        // This app has the focus (it was just clicked): let the window take it.
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(s.child.id());
+        }
+        let sent = s.control.as_mut().is_some_and(|w| writeln!(w, "{}", what.line()).and_then(|_| w.flush()).is_ok());
+        if !sent {
+            self.notify(format!("A window for {label} is already open."), false);
         }
     }
 

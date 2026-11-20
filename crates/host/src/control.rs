@@ -32,6 +32,22 @@ pub struct SessionInfo {
     /// Terminals open in it now.
     #[serde(default)]
     pub terminals: u32,
+    /// How many of them have administrator rights.
+    #[serde(default)]
+    pub admin_terminals: u32,
+}
+
+impl SessionInfo {
+    /// What else is open in it, for the session bar: " · terminal", " · terminal as administrator".
+    pub fn extras(&self) -> &'static str {
+        if self.admin_terminals > 0 {
+            " · terminal as administrator"
+        } else if self.terminals > 0 {
+            " · terminal"
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,11 +139,15 @@ impl Reporter {
         self.update(|st| st.session = s);
     }
 
-    /// A terminal opened (+1) or closed (-1) in the current session.
-    pub fn terminal(&self, delta: i32) {
+    /// A terminal opened (+1) or closed (-1) in the current session (`admin`: with
+    /// administrator rights).
+    pub fn terminal(&self, delta: i32, admin: bool) {
         self.update(|st| {
             if let Some(s) = &mut st.session {
                 s.terminals = s.terminals.saturating_add_signed(delta);
+                if admin {
+                    s.admin_terminals = s.admin_terminals.saturating_add_signed(delta);
+                }
             }
         });
     }

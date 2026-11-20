@@ -173,10 +173,8 @@ fn start_notice(reporter: &Reporter, ctl: mpsc::UnboundedSender<Ctl>) {
     tokio::spawn(async move {
         let mut shown: Option<String> = None;
         loop {
-            let text = reporter.snapshot().session.map(|s| {
-                let terminal = if s.terminals > 0 { " · terminal" } else { "" };
-                format!("{} connected{terminal}", s.client)
-            });
+            // A new terminal (or one as administrator) changes the text: the bar opens again.
+            let text = reporter.snapshot().session.map(|s| format!("{} connected{}", s.client, s.extras()));
             if text != shown {
                 crate::win::notice::show(text.clone());
                 shown = text;
@@ -556,7 +554,7 @@ impl Server {
             Some(u) => format!("{} ({})", u.label(), authed.client_name),
             None => authed.client_name.clone(),
         };
-        let info = SessionInfo { client, peer, method, since: SystemTime::now(), terminals: 0 };
+        let info = SessionInfo { client, peer, method, since: SystemTime::now(), terminals: 0, admin_terminals: 0 };
         if !matches!(authed.kind, AuthKind::Resume) {
             self.reporter.event(format!("{} connected from {} ({})", info.client, info.peer, info.method), false);
         }

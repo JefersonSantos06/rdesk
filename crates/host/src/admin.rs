@@ -281,12 +281,14 @@ pub async fn diagnose() -> Vec<CheckLine> {
             true,
         ));
     }
-    if cfg!(target_os = "linux") {
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland goes through the desktop portal, which asks once before sharing the screen.
+        let wayland = crate::wayland::active();
         out.push(line(
             "Session",
-            if wayland { "Wayland (capture/input may not work; use X11)" } else { "X11" },
-            !wayland,
+            if wayland { "Wayland: screen and input through the desktop portal (allow it when asked)" } else { "X11" },
+            true,
         ));
     }
     if cfg!(windows) {
