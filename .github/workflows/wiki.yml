@@ -1,0 +1,49 @@
+name: Wiki
+
+# Copies the published docs (the guide, SERVER.md, RELEASE.md) to the GitHub wiki whenever
+# they change on main. docs/ is the source: edits made in the wiki are overwritten. A
+# commit with [skip ci] skips this too; run it by hand from the Actions page if needed.
+# The wiki repository exists only after its first page is created on the website.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/guia/**"
+      - "docs/SERVER.md"
+      - "docs/RELEASE.md"
+      - ".github/scripts/build-wiki.py"
+      - ".github/workflows/wiki.yml"
+  workflow_dispatch:
+
+# Each run rebuilds every page, so only the newest one matters.
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build pages
+        run: python3 .github/scripts/build-wiki.py "$RUNNER_TEMP/pages" --repo "$GITHUB_REPOSITORY" --ref main
+      - name: Push to the wiki
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+          cd wiki
+          git rm -rq --ignore-unmatch .
+          cp "$RUNNER_TEMP"/pages/*.md .
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qm "Docs from ${GITHUB_SHA::7}"
+          git push
