@@ -2,8 +2,12 @@
 //!
 //! The thread polls the local clipboard every 500 ms and reports changes; text
 //! received from the peer is set locally and remembered so it is not echoed back.
+//! Phones have none here (their app passes the text through the session).
+
+#![cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 
 use std::sync::mpsc;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,6 +21,15 @@ pub struct ClipboardSync {
 impl ClipboardSync {
     /// Start watching. Local changes are sent on `on_change`. Returns `None` if
     /// the platform clipboard is unavailable.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn spawn(_on_change: UnboundedSender<String>) -> Option<Self> {
+        // No clipboard to watch from here: a phone app passes text in and out itself.
+        None
+    }
+
+    /// Start watching. Local changes are sent on `on_change`. Returns `None` if
+    /// the platform clipboard is unavailable.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn spawn(on_change: UnboundedSender<String>) -> Option<Self> {
         let (set_tx, set_rx) = mpsc::channel::<String>();
         let (ready_tx, ready_rx) = mpsc::channel::<bool>();

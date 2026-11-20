@@ -13,7 +13,9 @@ pub mod localnet;
 pub mod mac_permissions;
 #[cfg(any(target_os = "macos", test))]
 pub mod mac_update;
+pub mod pointer;
 pub mod power;
+pub mod scale;
 pub mod server;
 pub mod session;
 pub mod sync;

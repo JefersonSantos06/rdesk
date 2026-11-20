@@ -27,6 +27,21 @@ pub enum InputCmd {
     /// Map normalized coordinates onto this rectangle from now on.
     Monitor(InputRect),
     Event(InputEvent),
+    /// Where the pointer is on the current monitor (see [`Pointer`]).
+    Pointer(tokio::sync::oneshot::Sender<Pointer>),
+}
+
+/// The pointer on the current monitor, normalized like input (0..=65535 per axis);
+/// `visible` is false when it is outside that monitor or cannot be known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pointer {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+}
+
+impl Pointer {
+    pub const UNKNOWN: Pointer = Pointer { x: 0, y: 0, visible: false };
 }
 
 #[derive(Clone)]
@@ -89,6 +104,13 @@ impl Injector {
 
     pub fn event(&self, ev: InputEvent) {
         self.send(InputCmd::Event(ev));
+    }
+
+    /// Where the pointer is now (see [`Pointer`]).
+    pub async fn pointer(&self) -> Pointer {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.send(InputCmd::Pointer(tx));
+        rx.await.unwrap_or(Pointer::UNKNOWN)
     }
 
     /// Human-readable problems worth telling the remote user (rate-limited).
@@ -155,6 +177,10 @@ pub trait Backend {
     fn secure_attention(&mut self) -> Result<bool> {
         Ok(false)
     }
+    /// The pointer in the same absolute coordinates as [`Backend::mouse_abs`], if known.
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -169,6 +195,13 @@ impl State {
     fn handle(&mut self, b: &mut dyn Backend, cmd: InputCmd) -> Result<()> {
         match cmd {
             InputCmd::Monitor(r) => self.rect = Some(r),
+            InputCmd::Pointer(reply) => {
+                let p = match (self.rect, b.pointer()) {
+                    (Some(r), Some((x, y))) => unmap_point(r, x, y),
+                    _ => Pointer::UNKNOWN,
+                };
+                let _ = reply.send(p);
+            }
             InputCmd::Event(ev) => match ev {
                 InputEvent::MouseMove { x, y } => {
                     if let Some(r) = self.rect {
@@ -243,6 +276,18 @@ pub fn map_point(r: InputRect, x: u16, y: u16) -> (i32, i32) {
     (px, py)
 }
 
+/// Absolute coordinates → normalized inside `r` (the inverse of [`map_point`]).
+pub fn unmap_point(r: InputRect, x: i32, y: i32) -> Pointer {
+    let inside = x >= r.x && y >= r.y && x < r.x + r.w as i32 && y < r.y + r.h as i32;
+    if !inside {
+        return Pointer::UNKNOWN;
+    }
+    let n = |v: i32, len: u32| {
+        ((v as f64 / len.saturating_sub(1).max(1) as f64) * 65535.0).round().clamp(0.0, 65535.0) as u16
+    };
+    Pointer { x: n(x - r.x, r.w), y: n(y - r.y, r.h), visible: true }
+}
+
 struct LogBackend;
 
 impl Backend for LogBackend {
@@ -283,7 +328,7 @@ mod win {
     use crate::keymap::{self, WinKey};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
     pub struct WinBackend;
@@ -385,6 +430,11 @@ mod win {
             }
             send(&v)
         }
+
+        fn pointer(&mut self) -> Option<(i32, i32)> {
+            let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+            (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+        }
     }
 }
 
@@ -455,12 +505,30 @@ impl Backend for EnigoBackend {
         use enigo::Keyboard;
         self.enigo.text(s).map_err(|e| anyhow::anyhow!("{e:?}"))
     }
+
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        use enigo::Mouse;
+        self.enigo.location().ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn pointer_maps_back_to_input_coordinates() {
+        let r = InputRect { x: 1920, y: -200, w: 2560, h: 1440 };
+        for (x, y) in [(0u16, 0u16), (65535, 65535), (32768, 1000), (12345, 54321)] {
+            let (px, py) = map_point(r, x, y);
+            let p = unmap_point(r, px, py);
+            assert!(p.visible);
+            assert!(p.x.abs_diff(x) <= 26 && p.y.abs_diff(y) <= 46, "{x},{y} → {px},{py} → {p:?}");
+        }
+        assert!(!unmap_point(r, 100, 100).visible, "on another monitor");
+        assert!(!unmap_point(r, 1920 + 2560, 0).visible, "just past the right edge");
+    }
 
     #[derive(Default, Clone)]
     struct Rec(Arc<Mutex<Vec<String>>>);

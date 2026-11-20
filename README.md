@@ -3,7 +3,7 @@
 Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punching ([iroh](https://www.iroh.computer))** e um **servidor privado** seu (contas com Google/GitHub + 2FA, e o relay), autenticação com **chave SSH do 1Password** (ou senha forte guardada no 1Password) e reconexão automática. Nada a instalar à parte.
 
 - **Host** (máquina controlada): Windows, macOS, Linux (X11).
-- **Cliente** (viewer): macOS, Linux, Windows.
+- **Cliente** (viewer): macOS, Linux, Windows, e o app do celular para **Android** e **iPhone** ([mobile/README.md](mobile/README.md)).
 - Tela + mouse + teclado, múltiplos monitores, clipboard de texto nos dois sentidos, envio/download de arquivos com retomada, terminal remoto.
 
 **Primeira vez? Leia o [Guia do rdesk](docs/guia/README.md)**: passo a passo para criar o servidor, instalar o app e montar cada caso (usar e ser acessado, só acessado, sem servidor, rede local, Tailscale…), em português simples.

@@ -6,6 +6,11 @@
 //! keyboard and pointer events for those monitors. The permission is kept with a restore
 //! token in the host's folder, so later sessions start without asking (where the desktop
 //! supports it: GNOME 46+, KDE Plasma 6.1+).
+//!
+//! The pointer comes as metadata beside the picture where the desktop offers it (GNOME,
+//! KDE): its position answers [`crate::input::Backend::pointer`] (the phone app draws it
+//! from there), and its image is drawn back into the picture for clients that do not
+//! (see [`crate::pointer`]). Elsewhere the desktop draws it into the picture itself.
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -25,6 +30,7 @@ use rdesk_common::tiles::Frame;
 use rdesk_proto::{Key, MonitorInfo, MouseButton};
 
 use crate::capture::{InputRect, MonitorDesc, Pixels, packed_to_rgba};
+use crate::pointer::{BitmapOrder, CursorImage};
 
 /// Is this a Wayland session? (`RDESK_WAYLAND=0` forces X11, `=1` Wayland.)
 pub fn active() -> bool {
@@ -103,8 +109,15 @@ async fn start() -> Result<Portal> {
         )
         .await
         .context("asking for keyboard and pointer")?;
-    let cursor = cast.available_cursor_modes().await.unwrap_or(CursorMode::HIDDEN);
-    let cursor = if cursor.contains(CursorMode::EMBEDDED) { CursorMode::EMBEDDED } else { CursorMode::HIDDEN };
+    let modes = cast.available_cursor_modes().await.unwrap_or(CursorMode::HIDDEN);
+    let cursor = if modes.contains(CursorMode::METADATA) {
+        CursorMode::METADATA
+    } else if modes.contains(CursorMode::EMBEDDED) {
+        CursorMode::EMBEDDED
+    } else {
+        CursorMode::HIDDEN
+    };
+    tracing::debug!("pointer from the desktop: {cursor:?} (offered: {modes:?})");
     cast.select_sources(
         &session,
         SelectSourcesOptions::default().set_sources(SourceType::MONITOR).set_multiple(true).set_cursor_mode(cursor),
@@ -150,6 +163,69 @@ struct Latest {
     frame: Mutex<(Option<Arc<Frame>>, u64)>,
     new: Condvar,
     ended: std::sync::atomic::AtomicBool,
+    /// The pointer on this monitor, when the desktop sends it as metadata.
+    cursor: Mutex<Pointer>,
+}
+
+#[derive(Default, Clone)]
+struct Pointer {
+    /// Where it is, in the picture's pixels; `None` while it is on another monitor (or the
+    /// desktop sends no pointer metadata).
+    at: Option<(i32, i32)>,
+    /// The picture's size those pixels refer to.
+    frame: (u32, u32),
+    /// Its image (sent only when it changes, so kept).
+    image: Option<Arc<CursorImage>>,
+}
+
+/// Room for the pointer metadata: its header, the bitmap's header and `w`×`h` RGBA pixels.
+fn cursor_meta_size(w: i32, h: i32) -> i32 {
+    (std::mem::size_of::<pipewire::spa::sys::spa_meta_cursor>()
+        + std::mem::size_of::<pipewire::spa::sys::spa_meta_bitmap>()) as i32
+        + w * h * 4
+}
+
+/// The pointer metadata of a buffer, applied to `p`; true if anything changed.
+fn read_cursor(meta: &pipewire::spa::buffer::meta::MetaCursor, frame: (u32, u32), p: &mut Pointer) -> bool {
+    use pipewire::spa::param::video::VideoFormat;
+    let before = (p.at, p.frame, p.image.as_ref().map(Arc::as_ptr));
+    if !meta.is_valid() {
+        // No pointer over this monitor.
+        p.at = None;
+    } else {
+        let pos = meta.position();
+        let inside = pos.x >= 0 && pos.y >= 0 && (pos.x as u32) < frame.0 && (pos.y as u32) < frame.1;
+        p.at = inside.then_some((pos.x, pos.y));
+        p.frame = frame;
+        if let Some(b) = meta.bitmap().filter(|b| b.is_valid() && b.size().width > 0 && b.size().height > 0) {
+            let order = match b.format() {
+                VideoFormat::RGBA => Some(BitmapOrder::Rgba),
+                VideoFormat::BGRA => Some(BitmapOrder::Bgra),
+                VideoFormat::ARGB => Some(BitmapOrder::Argb),
+                VideoFormat::ABGR => Some(BitmapOrder::Abgr),
+                _ => None,
+            };
+            let size = b.size();
+            if let (Some(order), Some(data)) = (order, b.bitmap_data())
+                && let Some(rgba) = crate::pointer::bitmap_to_rgba(
+                    order,
+                    size.width,
+                    size.height,
+                    b.stride().unsigned_abs() as usize,
+                    data,
+                )
+            {
+                let hot = meta.hotspot();
+                p.image = Some(Arc::new(CursorImage {
+                    width: size.width,
+                    height: size.height,
+                    hotspot: (hot.x, hot.y),
+                    rgba,
+                }));
+            }
+        }
+    }
+    before != (p.at, p.frame, p.image.as_ref().map(Arc::as_ptr))
 }
 
 static CAPTURES: Mutex<Vec<(u32, Arc<Latest>)>> = Mutex::new(Vec::new());
@@ -208,21 +284,64 @@ fn pipewire_thread(fd: OwnedFd, node: u32, latest: &Arc<Latest>) -> Result<()> {
                 quit.quit();
             }
         })
-        .param_changed(|_, format, id, param| {
+        .param_changed(|stream, format, id, param| {
             let Some(param) = param else { return };
             if id != ParamType::Format.as_raw() {
                 return;
             }
             if let Ok((MediaType::Video, MediaSubtype::Raw)) = format_utils::parse_format(param) {
                 let _ = format.parse(param);
+                // Ask for the pointer metadata (sent when the cursor mode is metadata).
+                let meta = pod::Object {
+                    type_: SpaTypes::ObjectParamMeta.as_raw(),
+                    id: ParamType::Meta.as_raw(),
+                    properties: vec![
+                        pod::Property::new(
+                            pipewire::spa::sys::SPA_PARAM_META_type,
+                            pod::Value::Id(pipewire::spa::utils::Id(pipewire::spa::sys::SPA_META_Cursor)),
+                        ),
+                        pod::Property::new(
+                            pipewire::spa::sys::SPA_PARAM_META_size,
+                            pod::Value::Choice(pod::ChoiceValue::Int(pipewire::spa::utils::Choice(
+                                pipewire::spa::utils::ChoiceFlags::empty(),
+                                pipewire::spa::utils::ChoiceEnum::Range {
+                                    default: cursor_meta_size(64, 64),
+                                    min: cursor_meta_size(1, 1),
+                                    max: cursor_meta_size(512, 512),
+                                },
+                            ))),
+                        ),
+                    ],
+                };
+                let bytes = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &pod::Value::Object(meta))
+                    .map(|(c, _)| c.into_inner());
+                if let Ok(bytes) = bytes
+                    && let Some(pod) = Pod::from_bytes(&bytes)
+                    && let Err(e) = stream.update_params(&mut [pod])
+                {
+                    tracing::debug!("asking for pointer metadata: {e}");
+                }
             }
         })
         .process(move |stream, format| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
+            let size = format.size();
+            // The pointer first: a buffer may carry only a pointer move and no new picture.
+            let moved = buffer
+                .find_meta::<pipewire::spa::buffer::meta::MetaCursor>()
+                .is_some_and(|m| read_cursor(m, (size.width, size.height), &mut sink.cursor.lock().unwrap()));
             let datas = buffer.datas_mut();
             let Some(d) = datas.first_mut() else { return };
+            if d.chunk().size() == 0 {
+                if moved {
+                    // Nothing new in the picture, but the pointer is drawn into it: show the move.
+                    let mut slot = sink.frame.lock().unwrap();
+                    slot.1 += 1;
+                    sink.new.notify_all();
+                }
+                return;
+            }
             let (offset, stride) = (d.chunk().offset() as usize, d.chunk().stride());
-            let size = format.size();
             let order = match format.format() {
                 VideoFormat::BGRx | VideoFormat::BGRA => Pixels::Bgrx,
                 VideoFormat::RGBx | VideoFormat::RGBA => Pixels::Rgbx,
@@ -346,7 +465,17 @@ impl Capture {
         drop(slot);
         self.seen.retain(|(n, _)| *n != id);
         self.seen.push((id, count));
-        Ok(Arc::unwrap_or_clone(frame))
+        let mut frame = Arc::unwrap_or_clone(frame);
+        // The pointer came as metadata: draw it in, unless the client draws it itself.
+        if !crate::pointer::client_draws() {
+            let p = latest.cursor.lock().unwrap().clone();
+            if let (Some((x, y)), Some(img)) = (p.at, p.image)
+                && p.frame == (frame.width, frame.height)
+            {
+                crate::pointer::blend(&mut frame, &img, x, y);
+            }
+        }
+        Ok(frame)
     }
 }
 
@@ -405,6 +534,20 @@ fn state(down: bool) -> KeyState {
 }
 
 impl crate::input::Backend for Input {
+    /// From the pointer metadata of the shared screens, in the desktop's coordinates (the
+    /// same as [`mouse_abs`](crate::input::Backend::mouse_abs)).
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        let captures = CAPTURES.lock().unwrap();
+        self.portal.screens.iter().find_map(|s| {
+            let (_, latest) = captures.iter().find(|(n, _)| *n == s.node)?;
+            let p = latest.cursor.lock().unwrap().clone();
+            let (x, y) = p.at?;
+            let (fw, fh) = (p.frame.0.max(1) as i64, p.frame.1.max(1) as i64);
+            // Picture pixels → the desktop's (logical) coordinates of this screen.
+            Some((s.x + (x as i64 * s.w as i64 / fw) as i32, s.y + (y as i64 * s.h as i64 / fh) as i32))
+        })
+    }
+
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         let Some(code) = crate::keymap::evdev(key) else { return Ok(()) };
         self.call(async |p| {

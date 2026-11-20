@@ -40,15 +40,23 @@ pub struct VideoSettings {
     pub jpeg_quality: u8,
     /// Incremented to force a full resend.
     pub epoch: u64,
+    /// The client's largest useful picture (0×0: the monitor's own size); bigger captures
+    /// are scaled down before they are cut into tiles.
+    pub max_size: (u32, u32),
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct TileState {
-    /// Hash of what the client has (acknowledged).
+    /// Hash of what the client has (acknowledged), and from which frame: acks can arrive out
+    /// of order, and the client keeps the newest frame's version of a tile.
     confirmed: Option<TileHash>,
     confirmed_lossless: bool,
-    /// Hash currently in flight and in which frame.
-    inflight: Option<(u64, TileHash, bool)>,
+    confirmed_frame: u64,
+    /// Versions sent and not acknowledged yet, oldest first: (frame, hash, lossless). At most
+    /// [`MAX_IN_FLIGHT`]. Once they land the client shows the newest, so that is what the
+    /// next frame is compared with: comparing with `confirmed` alone left a tile that changed
+    /// and changed back (something passing by) showing the in-between version.
+    inflight: Vec<(u64, TileHash, bool)>,
     /// Hash at the previous capture and when it last changed.
     current: Option<TileHash>,
     changed_at: Option<Instant>,
@@ -93,11 +101,12 @@ impl Scheduler {
                 t.current = Some(hash);
             }
             let moving = t.changed_at.is_some_and(|c| now.duration_since(c) < MOTION_WINDOW);
-            let inflight_same = t.inflight.is_some_and(|(_, h, _)| h == hash);
-            let send = if t.confirmed != Some(hash) {
-                // Client has something else: send unless this exact content is already on its way.
-                !inflight_same
-            } else if !t.confirmed_lossless && !moving && t.inflight.is_none() && refinements < REFINE_PER_FRAME {
+            // What the client will show once everything sent has landed.
+            let newest = t.inflight.last().map(|&(_, h, _)| h);
+            let send = if newest.or(t.confirmed) != Some(hash) {
+                // The client has (or will have) something else.
+                true
+            } else if !t.confirmed_lossless && !moving && newest.is_none() && refinements < REFINE_PER_FRAME {
                 // Client has this content lossy and it has settled: refine it.
                 refinements += 1;
                 true
@@ -106,7 +115,7 @@ impl Scheduler {
             };
             if send {
                 let lossy = moving;
-                t.inflight = Some((frame_id, hash, !lossy));
+                t.inflight.push((frame_id, hash, !lossy));
                 out.push(Planned { rect: self.rect(i), lossy, hash });
             }
         }
@@ -115,20 +124,25 @@ impl Scheduler {
 
     pub fn acked(&mut self, frame_id: u64) {
         for t in &mut self.tiles {
-            if let Some((f, h, lossless)) = t.inflight
-                && f == frame_id
-            {
-                t.confirmed = Some(h);
-                t.confirmed_lossless = lossless;
-                t.inflight = None;
+            if let Some(i) = t.inflight.iter().position(|&(f, _, _)| f == frame_id) {
+                let (f, h, lossless) = t.inflight.remove(i);
+                // A late ack of an older frame: the client kept the newer version.
+                if t.confirmed.is_none() || f > t.confirmed_frame {
+                    t.confirmed = Some(h);
+                    t.confirmed_lossless = lossless;
+                    t.confirmed_frame = f;
+                }
             }
         }
     }
 
+    /// The frame was given up on. The client may have painted some of it (a full frame is
+    /// painted as it arrives), so its tiles are unknown there: send them again.
     pub fn lost(&mut self, frame_id: u64) {
         for t in &mut self.tiles {
-            if t.inflight.is_some_and(|(f, _, _)| f == frame_id) {
-                t.inflight = None;
+            if let Some(i) = t.inflight.iter().position(|&(f, _, _)| f == frame_id) {
+                t.inflight.remove(i);
+                t.confirmed = None;
             }
         }
     }
@@ -202,7 +216,7 @@ pub async fn run(
             if settings.has_changed().is_err() {
                 return Ok(());
             }
-            if s.monitor != current.monitor || s.epoch != current.epoch {
+            if s.monitor != current.monitor || s.epoch != current.epoch || s.max_size != current.max_size {
                 sched = None;
                 full_pending = true;
                 for (_, f) in inflight.drain() {
@@ -271,6 +285,10 @@ pub async fn run(
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
+        };
+        let frame = match crate::scale::fit(frame.width, frame.height, current.max_size.0, current.max_size.1) {
+            Some((w, h)) => tokio::task::spawn_blocking(move || crate::scale::downscale(&frame, w, h)).await?,
+            None => frame,
         };
         if sched.as_ref().is_none_or(|s| s.dims() != (frame.width, frame.height)) {
             sched = Some(Scheduler::new(frame.width, frame.height));
@@ -443,6 +461,41 @@ mod tests {
         assert_eq!(s.plan(&frame_with(64, 64, 2), 3, t0).len(), 0, "frame 2 still in flight");
         s.lost(2);
         assert_eq!(s.plan(&frame_with(64, 64, 2), 4, t0).len(), 1);
+    }
+
+    /// Something passing over a tile: frame 2 draws it, frame 3 (the tile back to what the
+    /// client confirmed) must still be sent, or the client keeps frame 2's version.
+    #[test]
+    fn content_back_to_the_confirmed_one_is_sent_while_another_is_in_flight() {
+        let mut s = Scheduler::new(64, 64);
+        let t0 = Instant::now();
+        let (bg, square) = (frame_with(64, 64, 1), frame_with(64, 64, 2));
+        s.plan(&bg, 1, t0);
+        s.acked(1);
+        assert_eq!(s.plan(&square, 2, t0).len(), 1);
+        assert_eq!(s.plan(&bg, 3, t0).len(), 1, "the client would keep showing frame 2");
+        s.acked(2);
+        s.acked(3);
+        // Settled: only the lossless refinement of what frame 3 sent as JPEG is left.
+        let p = s.plan(&bg, 4, t0 + Duration::from_secs(1));
+        assert!(p.len() == 1 && !p[0].lossy);
+        s.acked(4);
+        assert!(s.plan(&bg, 5, t0 + Duration::from_secs(2)).is_empty());
+    }
+
+    #[test]
+    fn acks_out_of_order_keep_the_newest_version() {
+        let mut s = Scheduler::new(64, 64);
+        let t0 = Instant::now();
+        s.plan(&frame_with(64, 64, 1), 1, t0);
+        s.acked(1);
+        s.plan(&frame_with(64, 64, 2), 2, t0);
+        let c = frame_with(64, 64, 3);
+        s.plan(&c, 3, t0);
+        // Frame 3 lands first; frame 2's tile is then older than what the client shows.
+        s.acked(3);
+        s.acked(2);
+        assert!(s.plan(&c, 4, t0).is_empty(), "the client has frame 3's version");
     }
 
     #[test]

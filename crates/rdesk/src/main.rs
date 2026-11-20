@@ -1635,6 +1635,8 @@ fn connect(a: ConnectArgs) -> Result<()> {
         // A terminal opens without the picture (and the host does not capture the screen)
         // until the window asks for it.
         video: a.headless || !a.terminal,
+        extensions: Default::default(),
+        device_key: None,
     };
     if a.headless {
         return rdesk_client::headless::run(

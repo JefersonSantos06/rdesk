@@ -135,8 +135,89 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The phone apps: an APK for Android (signed with the project's release key, so each
+  # version updates the last) and an unsigned IPA for iPhone (signed when sideloaded).
+  # See mobile/README.md.
+  mobile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: android
+          - os: macos-latest
+            platform: ios
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: The tag matches the workspace version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+          IFS=. read -r major minor patch <<< "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # Android's version code must grow with every release.
+          echo "BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v5
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'android' && 'aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android' || 'aarch64-apple-ios' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - name: The release signing key (Android)
+        if: matrix.platform == 'android'
+        env:
+          KEYSTORE: ${{ secrets.RDESK_ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::error::RDESK_ANDROID_KEYSTORE_B64 is not set: an APK signed with another key could not update the installed app (see mobile/README.md)"
+            exit 1
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/rdesk-release.jks"
+          echo "RDESK_ANDROID_KEYSTORE=$RUNNER_TEMP/rdesk-release.jks" >> "$GITHUB_ENV"
+      - name: Build the APK
+        if: matrix.platform == 'android'
+        working-directory: mobile
+        env:
+          RDESK_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RDESK_ANDROID_KEYSTORE_PASSWORD }}
+          RDESK_ANDROID_KEY_ALIAS: ${{ secrets.RDESK_ANDROID_KEY_ALIAS }}
+          RDESK_ANDROID_KEY_PASSWORD: ${{ secrets.RDESK_ANDROID_KEY_PASSWORD }}
+        run: |
+          flutter build apk --release --build-name "$VERSION" --build-number "$BUILD_NUMBER"
+          mkdir -p ../dist
+          cp build/app/outputs/flutter-apk/app-release.apk "../dist/rdesk-$VERSION-android.apk"
+      - name: Build the IPA (unsigned)
+        if: matrix.platform == 'ios'
+        working-directory: mobile
+        run: |
+          flutter build ios --release --no-codesign --build-name "$VERSION" --build-number "$BUILD_NUMBER"
+          mkdir -p Payload ../dist
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qr "../dist/rdesk-$VERSION-ios.ipa" Payload
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-${{ matrix.platform }}-app
+          path: dist/*
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, mobile]
     runs-on: ubuntu-latest
     # Put RDESK_RELEASE_KEY in this environment's secrets; required reviewers here make
     # every release wait for your approval.

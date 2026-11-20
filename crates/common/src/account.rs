@@ -147,6 +147,21 @@ pub fn install_crypto() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// An HTTPS client builder with rdesk's user agent. The system's certificate store checks
+/// the server, except on Android: reaching it there needs the app's Java side, so the
+/// Mozilla roots built into the app are used instead.
+pub fn http_client() -> reqwest::ClientBuilder {
+    install_crypto();
+    let b = reqwest::Client::builder().user_agent(concat!("rdesk/", env!("CARGO_PKG_VERSION")));
+    #[cfg(target_os = "android")]
+    let b = {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        let tls = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        b.tls_backend_preconfigured(tls)
+    };
+    b
+}
+
 /// `https://host` from what the user typed (`host`, `host:port`, a URL).
 pub fn normalize_server(s: &str) -> Result<String> {
     let s = s.trim().trim_end_matches('/');
@@ -180,11 +195,7 @@ pub fn here_proof(key: &iroh::SecretKey, user_id: i64, scope: api::Here) -> Stri
 
 impl Api {
     pub fn new(server: &str, token: Option<String>) -> Result<Self> {
-        install_crypto();
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("rdesk/", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let http = http_client().timeout(Duration::from_secs(20)).build()?;
         Ok(Self { base: normalize_server(server)?, token, here: None, http })
     }
 
@@ -540,34 +551,82 @@ fn random_b64(n: usize) -> String {
 /// Sign in to `server`: opens the browser with `open`, waits for it to come back, saves
 /// and returns the session.
 pub async fn login(server: &str, device: &str, open: impl FnOnce(&str) -> Result<()>) -> Result<Session> {
-    let api = Api::new(server, None)?;
-    let info = api.info().await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.context("opening the sign-in callback")?;
     let redirect = format!("http://127.0.0.1:{}/callback", listener.local_addr()?.port());
+    let pending = begin_login(server, device, &redirect).await?;
+    open(pending.url())?;
+    let code = tokio::time::timeout(LOGIN_TIMEOUT, wait_callback(&listener, &pending.state, &pending.info.name))
+        .await
+        .map_err(|_| anyhow!("the sign-in was not finished within {} minutes", LOGIN_TIMEOUT.as_secs() / 60))??;
+    pending.complete(&code).await
+}
+
+/// The phone app's redirect (its own URL scheme; see the server's `login` module).
+pub const APP_REDIRECT: &str = "rdesk://callback";
+
+/// A sign-in started in the browser and not finished yet: the app opens [`url`](Self::url)
+/// and gives the code that comes back to [`complete`](Self::complete) (or the whole
+/// callback URL to [`complete_from_callback`](Self::complete_from_callback)).
+pub struct PendingLogin {
+    api: Api,
+    info: ServerInfo,
+    url: String,
+    state: String,
+    verifier: String,
+}
+
+/// Start a sign-in to `server` that comes back to `redirect`.
+pub async fn begin_login(server: &str, device: &str, redirect: &str) -> Result<PendingLogin> {
+    let api = Api::new(server, None)?;
+    let info = api.info().await?;
     let state = random_b64(16);
     let verifier = random_b64(32);
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut u = url::Url::parse(&api.url(api::PATH_LOGIN))?;
     u.query_pairs_mut()
-        .append_pair("redirect_uri", &redirect)
+        .append_pair("redirect_uri", redirect)
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
         .append_pair("device", device);
-    open(u.as_str())?;
-    let code = tokio::time::timeout(LOGIN_TIMEOUT, wait_callback(&listener, &state, &info.name))
-        .await
-        .map_err(|_| anyhow!("the sign-in was not finished within {} minutes", LOGIN_TIMEOUT.as_secs() / 60))??;
-    let tok = api.token(&code, &verifier).await?;
-    let session = Session {
-        server: api.base.clone(),
-        token: tok.token,
-        expires_at: tok.expires_at,
-        user: tok.user,
-        relay_url: info.relay_url,
-        server_name: info.name,
-    };
-    session.save()?;
-    Ok(session)
+    Ok(PendingLogin { api, info, url: u.into(), state, verifier })
+}
+
+impl PendingLogin {
+    /// What to open in the browser.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The server's name, as its sign-in pages show it.
+    pub fn server_name(&self) -> &str {
+        &self.info.name
+    }
+
+    /// Finish with the redirect the browser came back with (`…/callback?code=…&state=…`).
+    pub async fn complete_from_callback(self, callback: &str) -> Result<Session> {
+        let u = url::Url::parse(callback).context("the sign-in came back with an invalid address")?;
+        let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+        if q.get("state").map(String::as_str) != Some(self.state.as_str()) {
+            bail!("this answer does not match the sign-in started by the app; try again");
+        }
+        let code = q.get("code").context("the sign-in came back without a code")?.clone();
+        self.complete(&code).await
+    }
+
+    /// Trade the one-time code for a session, save it and return it.
+    pub async fn complete(self, code: &str) -> Result<Session> {
+        let tok = self.api.token(code, &self.verifier).await?;
+        let session = Session {
+            server: self.api.base.clone(),
+            token: tok.token,
+            expires_at: tok.expires_at,
+            user: tok.user,
+            relay_url: self.info.relay_url,
+            server_name: self.info.name,
+        };
+        session.save()?;
+        Ok(session)
+    }
 }
 
 /// Serve the browser's redirect: `GET /callback?code=…&state=…`.

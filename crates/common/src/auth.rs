@@ -18,7 +18,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use hmac::{Hmac, Mac};
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration, ClientRegistrationFinishParameters,
@@ -476,10 +476,44 @@ fn new_session_id() -> SessionId {
 // Client side
 // ---------------------------------------------------------------------------
 
+/// A future boxed for [`ExternalSigner`].
+pub type SignFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send>>;
+
+/// A key that never leaves secure hardware (a phone's Secure Enclave or Keystore): an
+/// ECDSA P-256 key, unlocked by the phone (Face ID, fingerprint) each time it signs.
+pub trait ExternalSigner: Send + Sync {
+    /// Its public half (`ecdsa-sha2-nistp256`).
+    fn public_key(&self) -> &PublicKey;
+    /// Sign `data` (ECDSA with SHA-256, as the hardware does it) and return the signature
+    /// in ASN.1 DER, as Android's Keystore and Apple's Security framework produce it.
+    fn sign_der(&self, data: Vec<u8>) -> SignFuture;
+}
+
+/// Sign an SSHSIG over `msg` with an [`ExternalSigner`].
+pub async fn sign_external(signer: &dyn ExternalSigner, namespace: &str, msg: &[u8]) -> Result<SshSig> {
+    let key = signer.public_key().key_data().clone();
+    ensure_p256(&key)?;
+    let data = SshSig::signed_data(namespace, HashAlg::Sha512, msg)?;
+    let der = signer.sign_der(data).await?;
+    let sig =
+        p256::ecdsa::Signature::from_der(&der).map_err(|e| anyhow!("the device returned a bad signature: {e}"))?;
+    let sig = ssh_key::Signature::try_from(sig.normalize_s().unwrap_or(sig))?;
+    Ok(SshSig::new(key, namespace, HashAlg::Sha512, sig)?)
+}
+
+fn ensure_p256(key: &KeyData) -> Result<()> {
+    match key {
+        KeyData::Ecdsa(ssh_key::public::EcdsaPublicKey::NistP256(_)) => Ok(()),
+        other => bail!("a device key must be ECDSA P-256, not {}", other.algorithm()),
+    }
+}
+
 pub enum KeySource {
     Agent(Agent),
     /// In-memory keys (tests, or a key file).
     Local(Vec<PrivateKey>),
+    /// A key in the device's secure hardware.
+    External(std::sync::Arc<dyn ExternalSigner>),
     /// RSA signed the way an SSH agent does it (rsa-sha2-512). ssh-key 0.6's own
     /// RSA signer is broken, so tests use this to exercise the host's RSA verification.
     #[cfg(test)]
@@ -491,6 +525,7 @@ impl KeySource {
         match self {
             KeySource::Agent(a) => Ok(a.identities().await?.into_iter().map(|k| k.key_data().clone()).collect()),
             KeySource::Local(keys) => Ok(keys.iter().map(|k| k.public_key().key_data().clone()).collect()),
+            KeySource::External(s) => Ok(vec![s.public_key().key_data().clone()]),
             #[cfg(test)]
             KeySource::RsaRaw(k) => Ok(vec![KeyData::Rsa(ssh_key::public::RsaPublicKey::try_from(k.to_public_key())?)]),
         }
@@ -502,6 +537,10 @@ impl KeySource {
             KeySource::Local(keys) => {
                 let k = keys.iter().find(|k| k.public_key().key_data() == key).context("unknown local key")?;
                 Ok(SshSig::sign(k, SSHSIG_NAMESPACE, HashAlg::Sha512, msg)?)
+            }
+            KeySource::External(s) => {
+                ensure!(s.public_key().key_data() == key, "unknown device key");
+                sign_external(s.as_ref(), SSHSIG_NAMESPACE, msg).await
             }
             #[cfg(test)]
             KeySource::RsaRaw(k) => {

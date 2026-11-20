@@ -1902,7 +1902,11 @@ impl ApplicationHandler<UiEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UiEvent) {
         match event {
-            UiEvent::FrameUpdated | UiEvent::Wake => {}
+            UiEvent::FrameUpdated
+            | UiEvent::Wake
+            | UiEvent::Extensions(_)
+            | UiEvent::Cursor { .. }
+            | UiEvent::Clipboard(_) => {}
             UiEvent::Terminal { admin, result: Ok(slot) } => {
                 self.shells_opening = self.shells_opening.saturating_sub(1);
                 if let Some(link) = slot.0.lock().unwrap().take() {

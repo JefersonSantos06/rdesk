@@ -1,0 +1,24 @@
+[package]
+name = "rdesk-core"
+description = "rdesk client core without a UI: connection manager, decoded picture, terminal stream, saved passwords"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rdesk-proto.workspace = true
+rdesk-common.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize = "1"
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
+
+# Saved passwords: the system's credential store on computers, a private file on phones.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+keyring = "4.2"
+rpassword = "7"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+serde_json = "1"

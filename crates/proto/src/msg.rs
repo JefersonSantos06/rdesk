@@ -298,7 +298,45 @@ pub enum StreamOpen {
     File,
     /// A terminal (bidirectional): [`TermClient`] in, [`TermHost`] out.
     Terminal,
+    /// Session extensions (bidirectional): [`ExtClient`] in, [`ExtHost`] out. Hosts older
+    /// than this variant drop the stream without answering, which tells the client they
+    /// have none of the extensions; nothing else in the session is affected.
+    Extensions,
 }
+
+/// The client's side of the extensions stream. New messages are only ever appended, and
+/// a client sends one only if the host listed its feature in [`ExtHost::Hello`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ExtClient {
+    /// First message: the protocol revision of the extensions the client speaks.
+    Hello { rev: u16 },
+    /// Scale the picture down to fit `width`×`height` (0×0: the monitor's own size). Mouse
+    /// coordinates stay normalized to the monitor, so input is unaffected.
+    MaxSize { width: u32, height: u32 },
+    /// Send the pointer position ([`ExtHost::Cursor`]) while on.
+    Cursor { on: bool },
+}
+
+/// The host's side of the extensions stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ExtHost {
+    /// Answer to [`ExtClient::Hello`]: what this host can do.
+    Hello { rev: u16, features: Vec<Feature> },
+    /// Where the pointer is on the active monitor (normalized 0..=65535 like input), or
+    /// `visible: false` when it is elsewhere (another monitor) or cannot be known.
+    Cursor { x: u16, y: u16, visible: bool },
+}
+
+/// What the extensions stream can carry (see [`ExtHost::Hello`]). Unknown features are
+/// never sent to an older client: the host lists only what the client's `rev` knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Feature {
+    MaxSize,
+    Cursor,
+}
+
+/// Revision of the extensions protocol (1: picture size limit and pointer position).
+pub const EXT_REV: u16 = 1;
 
 /// The client's side of a terminal stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

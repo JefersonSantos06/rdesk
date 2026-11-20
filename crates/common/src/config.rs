@@ -27,7 +27,18 @@ pub const HOST_KEY: &str = "host_id.key";
 pub const OPAQUE_SETUP: &str = "opaque_server_setup.bin";
 pub const OPAQUE_PASSWORD: &str = "password.opaque";
 
+static CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Use `dir` for the config from now on (an app on a phone: its own data directory, which
+/// the platform hands to it). Set once, before anything reads the config.
+pub fn set_config_dir(dir: PathBuf) {
+    let _ = CONFIG_DIR.set(dir);
+}
+
 pub fn config_dir() -> Result<PathBuf> {
+    if let Some(dir) = CONFIG_DIR.get() {
+        return Ok(dir.clone());
+    }
     if let Some(dir) = std::env::var_os("RDESK_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));
     }

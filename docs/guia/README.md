@@ -4,7 +4,7 @@ Este guia explica, passo a passo, como montar e usar o rdesk: do servidor na nuv
 acessar o computador de casa pelo notebook do trabalho. Não precisa saber programar. Siga
 os passos na ordem e copie os comandos como estão.
 
-O rdesk roda em **Windows**, **Mac** (Apple Silicon) e **Linux**. Não há app para celular.
+O rdesk roda em **Windows**, **Mac** (Apple Silicon) e **Linux**. No **celular** (Android e iPhone) há um app que acessa os computadores (o celular não é acessado): veja [O app do celular](12-celular.md).
 
 ## Por onde começar
 
@@ -50,6 +50,7 @@ Responda às perguntas e vá direto ao capítulo certo.
 10. [Problemas e soluções](10-problemas.md): não conecta, tela preta, cliques que não
     funcionam, onde ficam os logs.
 11. [Desinstalar](11-desinstalar.md): tirar o app, o serviço e o servidor.
+12. [O app do celular](12-celular.md): Android e iPhone, gestos, teclado e a chave do celular.
 
 ## Palavras que aparecem o tempo todo
 

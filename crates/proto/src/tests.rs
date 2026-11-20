@@ -140,6 +140,42 @@ async fn garbage_payload_is_decode_error() {
 }
 
 #[test]
+fn extensions_roundtrip() {
+    for m in [
+        ExtClient::Hello { rev: EXT_REV },
+        ExtClient::MaxSize { width: 1280, height: 720 },
+        ExtClient::Cursor { on: true },
+    ] {
+        assert_eq!(roundtrip(&m), m);
+    }
+    for m in [
+        ExtHost::Hello { rev: EXT_REV, features: vec![Feature::MaxSize, Feature::Cursor] },
+        ExtHost::Cursor { x: 65535, y: 0, visible: true },
+    ] {
+        assert_eq!(roundtrip(&m), m);
+    }
+}
+
+/// Older peers must keep decoding the stream tags they know: new variants only go at the end.
+#[test]
+fn stream_tags_keep_their_numbers() {
+    let tags = [StreamOpen::Input, StreamOpen::Acks, StreamOpen::File, StreamOpen::Terminal, StreamOpen::Extensions];
+    for (i, t) in tags.iter().enumerate() {
+        assert_eq!(&encode(t).unwrap()[4..], &[i as u8], "{t:?}");
+    }
+    // What an older host sees: a tag it cannot decode (it drops that stream only).
+    #[derive(serde::Deserialize, Debug)]
+    #[allow(dead_code)]
+    enum OldStreamOpen {
+        Input,
+        Acks,
+        File,
+        Terminal,
+    }
+    assert!(decode::<OldStreamOpen>(&encode(&StreamOpen::Extensions).unwrap()[4..]).is_err());
+}
+
+#[test]
 fn key_names_unique() {
     let mut names: Vec<_> = Key::ALL.iter().map(|k| k.name()).collect();
     names.sort();

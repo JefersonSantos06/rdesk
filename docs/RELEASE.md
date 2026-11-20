@@ -10,6 +10,8 @@ Cada versão é um GitHub Release com os binários e um `release.json` assinado.
 | `rdesk-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O app para Linux (PC e Raspberry/Orange Pi) |
 | `rdesk_<versão>_amd64.deb`, `…_arm64.deb` | O app como pacote Debian/Ubuntu/Raspberry Pi OS |
 | `rdesk-<versão>-macos-aarch64.tar.gz` | O `rdesk.app` para Mac com Apple Silicon (assinado só localmente: na primeira vez, botão direito → *Abrir*) |
+| `rdesk-<versão>-android.apk` | O app do celular para Android (assinado com a chave de release do Android) |
+| `rdesk-<versão>-ios.ipa` | O app para iPhone, **sem assinatura**: o Sideloadly ou o AltStore assinam com o seu Apple ID ao instalar ([mobile/README.md](../mobile/README.md)) |
 | `rdesk-server-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O servidor, com a unit do systemd |
 | `release.json` | Versão, versão do protocolo, SHA-256 e tamanho de cada arquivo |
 | `release.json.sig` | Assinatura Ed25519 do `release.json` (hex) |
@@ -34,6 +36,10 @@ As chaves públicas estão em `crates/proto/src/release.rs` (`RELEASE_KEYS`).
 
 Para gerar chaves novas no futuro: `cargo run -p rdesk-release -- keygen --out <pasta> --name <nome>`.
 
+### A chave do APK (Android)
+
+O APK tem a sua própria assinatura, a do Android, além do `release.json`. Precisa ser sempre a mesma chave, senão o celular recusa a atualização. Como criar e quais *Repository secrets* configurar (`RDESK_ANDROID_KEYSTORE_B64` e as senhas): [mobile/README.md](../mobile/README.md#a-chave-de-assinatura-do-android). Sem eles, o job do Android falha e o Release não é publicado.
+
 ### Trocar a chave principal
 
 1. Gere uma chave nova e coloque a pública em `RELEASE_KEYS`, no lugar da antiga (a reserva continua).
@@ -54,6 +60,7 @@ Para gerar chaves novas no futuro: `cargo run -p rdesk-release -- keygen --out <
    - confere se a tag bate com a versão do `Cargo.toml`;
    - roda os testes e compila Windows x64, Linux x64 e Linux arm64;
    - gera os `.zip`, `.tar.gz` e `.deb`;
+   - gera o app do celular: o `.apk` (Ubuntu) e o `.ipa` sem assinatura (macOS);
    - escreve o `release.json`, assina, confere a assinatura com as chaves embutidas no app e publica o Release com notas geradas a partir dos commits.
 
 Os runners ARM e os minutos de CI são gratuitos com o repositório público; com ele privado, o job `linux-aarch64` pode não ter runner.

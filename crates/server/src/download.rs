@@ -61,6 +61,17 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
             "<h2>Windows</h2><p>{l}: unpack it, open <i>rdesk.exe</i> and sign in to <b>{server}</b>.</p>"
         ));
     }
+    if let Some(l) = link(FileKind::App, rdesk_proto::release::ANDROID, "rdesk.apk") {
+        body.push_str(&format!(
+            "<h2>Android</h2><p>{l}: open it on the phone and allow installing from this source when Android asks. \
+             Then sign in to <b>{server}</b>. The app tells you when a newer version is released here.</p>"
+        ));
+    }
+    if let Some(l) = link(FileKind::App, rdesk_proto::release::IOS, "rdesk.ipa") {
+        body.push_str(&format!(
+            "<h2>iPhone</h2><p>{l}: not on the App Store. Install it from a computer with              <a href=\"https://sideloadly.io\">Sideloadly</a> or <a href=\"https://altstore.io\">AltStore</a>,              which sign it with your Apple ID (a free one must reinstall every 7 days; a paid developer              account lasts a year). Then sign in to <b>{server}</b>.</p>"
+        ));
+    }
     if let Some(l) = link(FileKind::App, "macos-aarch64", "rdesk.app (Apple Silicon)") {
         body.push_str(&format!(
             "<h2>Mac</h2><p>{l}. Unpack it, move <i>rdesk</i> to Applications and open it the first time with \

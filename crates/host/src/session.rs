@@ -11,8 +11,8 @@ use rdesk_common::files;
 use rdesk_common::transport;
 use rdesk_common::{t, tf};
 use rdesk_proto::{
-    ClientMsg, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MonitorInfo, StreamOpen, TermClient,
-    expect_msg, read_msg, write_msg,
+    ClientMsg, EXT_REV, ExtClient, ExtHost, Feature, FrameAck, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG,
+    MonitorInfo, StreamOpen, TermClient, expect_msg, read_msg, write_msg,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -85,7 +85,9 @@ pub async fn run(
         max_fps: shared.cfg.max_fps,
         jpeg_quality: shared.cfg.jpeg_quality,
         epoch: 0,
+        max_size: (0, 0),
     });
+    let settings_tx = Arc::new(settings_tx);
     let (ack_tx, ack_rx) = mpsc::unbounded_channel::<u64>();
     // The picture starts when the client opens its acks stream: a client that only wants a
     // terminal (or files) leaves it closed, and the screen is never captured.
@@ -126,6 +128,7 @@ pub async fn run(
         let injector = injector.clone();
         let monitors = monitors.clone();
         let capturer = shared.capturer.clone();
+        let settings_tx = settings_tx.clone();
         tasks.spawn(async move {
             loop {
                 let Some(msg) = read_msg::<_, ClientMsg>(&mut ctrl_r, MAX_CONTROL_MSG).await? else {
@@ -237,8 +240,8 @@ pub async fn run(
                                     let _ = ack_tx.send(a.frame_id);
                                 }
                             }
-                            StreamOpen::File | StreamOpen::Terminal => {
-                                return Err(anyhow!("file and terminal streams must be bidirectional"));
+                            StreamOpen::File | StreamOpen::Terminal | StreamOpen::Extensions => {
+                                return Err(anyhow!("file, terminal and extension streams must be bidirectional"));
                             }
                         }
                         Ok(())
@@ -252,9 +255,11 @@ pub async fn run(
         });
     }
 
-    // Client-opened bidirectional streams: file transfers.
+    // Client-opened bidirectional streams: file transfers, terminals, extensions.
     {
         let conn = conn.clone();
+        let injector = injector.clone();
+        let settings_tx = settings_tx.clone();
         let inbox = shared.cfg.inbox_dir();
         let chosen_inbox = shared.cfg.inbox_dir.clone();
         // Administrator rights in a terminal: only with every other right too.
@@ -279,6 +284,7 @@ pub async fn run(
                 };
                 let (inbox, chosen_inbox) = (inbox.clone(), chosen_inbox.clone());
                 let (reporter, who) = (reporter.clone(), who.clone());
+                let (injector, settings_tx) = (injector.clone(), settings_tx.clone());
                 tokio::spawn(async move {
                     let res: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut r, MAX_SMALL_MSG).await? {
@@ -318,6 +324,9 @@ pub async fn run(
                                 reporter.terminal(-1, admin);
                                 r2
                             }
+                            StreamOpen::Extensions => {
+                                serve_extensions(&mut r, &mut w, &settings_tx, injector, access.screen).await
+                            }
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
                     }
@@ -326,7 +335,7 @@ pub async fn run(
                         Ok(()) => {
                             let _ = w.finish();
                         }
-                        Err(e) => tracing::warn!("file transfer or terminal failed: {e:#}"),
+                        Err(e) => tracing::warn!("file transfer, terminal or extensions stream failed: {e:#}"),
                     }
                 });
             }
@@ -389,6 +398,84 @@ pub async fn run(
     injector.event(InputEvent::ReleaseAll);
     tracing::info!("session {} ended ({reason})", hex(&auth.session_id));
     Ok(())
+}
+
+/// How often the pointer is looked at while the client follows it.
+const POINTER_EVERY: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// The extensions stream ([`StreamOpen::Extensions`]): the picture size limit and the
+/// pointer position, for clients that draw their own pointer (phones).
+async fn serve_extensions(
+    r: &mut transport::RecvStream,
+    w: &mut transport::SendStream,
+    settings: &watch::Sender<VideoSettings>,
+    injector: Injector,
+    screen: bool,
+) -> Result<()> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let ExtClient::Hello { rev } = expect_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? else {
+        return Err(anyhow!("extensions stream must start with Hello"));
+    };
+    let features = if screen && rev >= 1 { vec![Feature::MaxSize, Feature::Cursor] } else { Vec::new() };
+    write_msg(w, &ExtHost::Hello { rev: rev.min(EXT_REV), features }).await?;
+
+    // 0: off; 1: on; 2: on, and send the next position even if it did not move.
+    let follow = Arc::new(AtomicU8::new(0));
+    let (tx, mut rx) = mpsc::channel::<crate::input::Pointer>(2);
+    let poller = {
+        let follow = follow.clone();
+        tokio::spawn(async move {
+            let mut last = None;
+            loop {
+                tokio::time::sleep(POINTER_EVERY).await;
+                let state = follow.load(Ordering::Acquire);
+                if state == 0 {
+                    continue;
+                }
+                let p = injector.pointer().await;
+                if state == 2 {
+                    follow.store(1, Ordering::Release);
+                    last = None;
+                }
+                if last != Some(p) {
+                    last = Some(p);
+                    if tx.send(p).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+    };
+    let read = async {
+        while let Some(m) = read_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? {
+            match m {
+                ExtClient::MaxSize { width, height } if screen => {
+                    let size = if width == 0 || height == 0 { (0, 0) } else { (width.max(64), height.max(64)) };
+                    settings.send_if_modified(|s| std::mem::replace(&mut s.max_size, size) != size);
+                }
+                ExtClient::Cursor { on } if screen => {
+                    follow.store(if on { 2 } else { 0 }, Ordering::Release);
+                    // It draws the pointer itself: the capture leaves it out where it can.
+                    crate::pointer::set_client_draws(on);
+                }
+                _ => {}
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let write = async {
+        while let Some(p) = rx.recv().await {
+            write_msg(w, &ExtHost::Cursor { x: p.x, y: p.y, visible: p.visible }).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let result = tokio::select! {
+        r = read => r,
+        r = write => r,
+    };
+    poller.abort();
+    crate::pointer::set_client_draws(false);
+    result
 }
 
 #[cfg(windows)]

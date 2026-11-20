@@ -70,13 +70,32 @@ fn flow_user(st: &Shared, headers: &HeaderMap) -> Result<User, String> {
     Ok(user)
 }
 
-/// Only plain-HTTP loopback redirects: the code goes to the app on this computer.
+/// The phone app's redirect: its own URL scheme (RFC 8252 §7.1), which only the rdesk app
+/// on that phone answers. PKCE keeps a stolen code useless.
+pub const APP_SCHEME_REDIRECT: &str = "rdesk://callback";
+
+/// Plain-HTTP loopback redirects (the desktop app on this computer), or the phone app's
+/// own scheme.
 fn valid_app_redirect(uri: &str) -> bool {
     let Ok(u) = url::Url::parse(uri) else { return false };
+    if u.scheme() == "rdesk" {
+        return is_app_scheme(&u);
+    }
     u.scheme() == "http"
         && u.port().is_some()
         && u.fragment().is_none()
         && matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+fn is_app_scheme(u: &url::Url) -> bool {
+    u.scheme() == "rdesk"
+        && u.host_str() == Some("callback")
+        && u.port().is_none()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && matches!(u.path(), "" | "/")
+        && u.query().is_none()
+        && u.fragment().is_none()
 }
 
 /// Second factor done: hand a one-time code to the app.
@@ -102,7 +121,34 @@ fn finish(st: &Shared, headers: &HeaderMap, user: &User, how: &str) -> String {
     let _ = st.db.touch_login(user.id);
     let mut u = url::Url::parse(&app.redirect_uri).expect("checked when the sign-in started");
     u.query_pairs_mut().append_pair("code", &code).append_pair("state", &app.state);
+    if u.scheme() == "rdesk" {
+        // A browser may refuse to leave for an app's scheme without a tap (after the
+        // passkey's script, say): a page that tries, with a button for the tap. The answer
+        // rides in the fragment, which never reaches a server.
+        return st.url(&format!(
+            "/login/app#{}",
+            url::form_urlencoded::byte_serialize(String::from(u).as_bytes()).collect::<String>()
+        ));
+    }
     u.into()
+}
+
+/// `GET /login/app`: hands the sign-in back to the phone app (see [`finish`]).
+pub async fn back_to_app(State(st): State<Shared>) -> Response {
+    let body = format!(
+        r#"<h1>Signed in</h1><p>Go back to the rdesk app to continue.</p>
+<a id="back" class="btn primary" href="{APP_SCHEME_REDIRECT}">Open rdesk</a>
+<p class="muted">If nothing happens, tap the button.</p>
+<script>
+const to = decodeURIComponent(location.hash.slice(1));
+if (/^rdesk:\/\/callback\?/.test(to)) {{
+  document.getElementById('back').href = to;
+  history.replaceState(null, '', location.pathname);
+  location.replace(to);
+}}
+</script>"#
+    );
+    pages::page(&st.cfg.name, "Signed in", &body).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +608,17 @@ mod tests {
         assert!(!valid_app_redirect("http://127.0.0.1/callback"), "needs a port");
         assert!(!valid_app_redirect("https://evil.example.com:443/cb"));
         assert!(!valid_app_redirect("http://127.0.0.1.evil.com:80/cb"));
-        assert!(!valid_app_redirect("rdesk://callback"));
+    }
+
+    #[test]
+    fn the_phone_apps_scheme() {
+        assert!(valid_app_redirect(APP_SCHEME_REDIRECT));
+        assert!(valid_app_redirect("rdesk://callback/"));
+        assert!(!valid_app_redirect("rdesk://evil"));
+        assert!(!valid_app_redirect("rdesk://callback?code=x"), "the server adds the query");
+        assert!(!valid_app_redirect("rdesk://callback#x"));
+        assert!(!valid_app_redirect("rdesk://user@callback"));
+        assert!(!valid_app_redirect("other://callback"));
     }
 
     #[test]

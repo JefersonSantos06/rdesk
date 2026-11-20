@@ -72,6 +72,15 @@ impl FileKind {
 
 pub const PLATFORMS: [&str; 4] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64"];
 
+/// The phone app for Android (one APK for every processor). It is listed as an
+/// [`FileKind::App`] so that apps from before it, which know no other kinds, still read
+/// the manifest; their updaters only ever look for their own platform.
+pub const ANDROID: &str = "android";
+
+/// The phone app for iPhone, unsigned (AltStore or Sideloadly sign it with your own Apple
+/// ID when installing; there is no App Store build). Listed like [`ANDROID`].
+pub const IOS: &str = "ios";
+
 /// What an asset is, from its name:
 /// `rdesk-<v>-<platform>.zip|.tar.gz`, `rdesk-<v>-windows-x86_64.exe`,
 /// `rdesk-server-<v>-<platform>.tar.gz`, `rdesk_<v>_amd64.deb|arm64.deb`.
@@ -86,6 +95,12 @@ pub fn classify(name: &str, version: &str) -> Option<(FileKind, &'static str)> {
     }
     if name == format!("rdesk-{version}-windows-x86_64.exe") {
         return Some((FileKind::Exe, "windows-x86_64"));
+    }
+    if name == format!("rdesk-{version}-{ANDROID}.apk") {
+        return Some((FileKind::App, ANDROID));
+    }
+    if name == format!("rdesk-{version}-{IOS}.ipa") {
+        return Some((FileKind::App, IOS));
     }
     let (kind, rest) = match name.strip_prefix(&format!("rdesk-server-{version}-")) {
         Some(rest) => (FileKind::Server, rest),
@@ -130,6 +145,9 @@ mod tests {
         assert_eq!(classify("rdesk-0.2.0-linux-x86_64.exe", v), None);
         assert_eq!(classify("rdesk-0.2.0-linux-x86_64.zip", v), None);
         assert_eq!(classify("notes.txt", v), None);
+        assert_eq!(classify("rdesk-0.2.0-android.apk", v), Some((FileKind::App, ANDROID)));
+        assert_eq!(classify("rdesk-0.1.0-android.apk", v), None, "other version");
+        assert_eq!(classify("rdesk-0.2.0-ios.ipa", v), Some((FileKind::App, IOS)));
     }
 
     #[test]

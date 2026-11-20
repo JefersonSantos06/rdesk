@@ -18,8 +18,9 @@ use rdesk_common::tiles::{Frame, TileRect};
 use rdesk_common::transport::{self, Connection, ConnectionError, Endpoint, RecvStream, Role, SendStream, close};
 use rdesk_common::{t, tf};
 use rdesk_proto::{
-    ClientMsg, DirEntry, FrameAck, FrameHeader, HostInfo, HostMsg, InputEvent, MAX_CONTROL_MSG, MAX_VIDEO_MSG,
-    MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg, write_msg,
+    ClientMsg, DirEntry, EXT_REV, ExtClient, ExtHost, Feature, FrameAck, FrameHeader, HostInfo, HostMsg, InputEvent,
+    MAX_CONTROL_MSG, MAX_SMALL_MSG, MAX_VIDEO_MSG, MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg,
+    write_msg,
 };
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -43,8 +44,8 @@ pub struct PasswordReply(Arc<Mutex<Option<tokio::sync::oneshot::Sender<Option<Pa
 
 impl PasswordReply {
     /// A reply that goes nowhere (the ui gallery).
-    #[cfg(test)]
-    pub(crate) fn test() -> Self {
+    #[doc(hidden)]
+    pub fn test() -> Self {
         Self(Arc::new(Mutex::new(None)))
     }
 
@@ -138,6 +139,19 @@ pub enum UiEvent {
         admin: bool,
         result: Result<crate::terminal::TermSlot, String>,
     },
+    /// What the host's extensions stream offers (empty: an older host, none of them).
+    /// Only when [`Extensions::wanted`].
+    Extensions(Vec<Feature>),
+    /// Where the host's pointer is on the shown monitor (normalized 0..=65535), with
+    /// [`Extensions::cursor`].
+    Cursor {
+        x: u16,
+        y: u16,
+        visible: bool,
+    },
+    /// Text the host copied, with [`Extensions::clipboard_in_app`] (the app puts it on its
+    /// own clipboard).
+    Clipboard(String),
     /// Something to redraw (terminal output).
     Wake,
     Quit,
@@ -171,7 +185,43 @@ pub enum Cmd {
     /// Try to connect again now: skips the wait between attempts, or starts over after a
     /// [`UiEvent::Fatal`].
     Reconnect,
+    /// Ask for the picture scaled to fit this size (0×0: full size); kept across reconnects.
+    SetMaxSize(u32, u32),
+    /// Follow the host's pointer ([`UiEvent::Cursor`]) or stop.
+    FollowCursor(bool),
+    /// Text the user copied in the app, for the host's clipboard (with
+    /// [`Extensions::clipboard_in_app`]).
+    Clipboard(String),
     Quit,
+}
+
+/// What a client without a mouse of its own (a phone) asks of the session.
+#[derive(Debug, Clone, Default)]
+pub struct Extensions {
+    /// Scale the picture down to fit this size.
+    pub max_size: Option<(u32, u32)>,
+    /// Report the host's pointer ([`UiEvent::Cursor`]).
+    pub cursor: bool,
+    /// The clipboard goes through the app ([`UiEvent::Clipboard`], [`Cmd::Clipboard`]) instead
+    /// of being watched here.
+    pub clipboard_in_app: bool,
+}
+
+impl Extensions {
+    /// Whether the session opens the host's extensions stream.
+    pub fn wanted(&self) -> bool {
+        self.max_size.is_some() || self.cursor
+    }
+
+    /// Keep what a command asks for, for the next connection too.
+    fn remember(&mut self, c: &Cmd) {
+        match *c {
+            Cmd::SetMaxSize(0, _) | Cmd::SetMaxSize(_, 0) => self.max_size = None,
+            Cmd::SetMaxSize(w, h) => self.max_size = Some((w, h)),
+            Cmd::FollowCursor(on) => self.cursor = on,
+            _ => {}
+        }
+    }
 }
 
 /// What the app wants an already open session window to show.
@@ -240,6 +290,27 @@ impl View {
         self.session
     }
 
+    /// Paint decoded tiles of frame `frame_id` of `monitor`, all under one lock (the caller
+    /// holds it), unless the connection or the monitor changed meanwhile.
+    fn apply<'a>(
+        &mut self,
+        session: u64,
+        monitor: u32,
+        frame_id: u64,
+        tiles: impl IntoIterator<Item = (TileRect, &'a [u8])>,
+    ) -> Result<()> {
+        if self.session != session {
+            return Err(anyhow!("frame from an old connection"));
+        }
+        if self.monitor != monitor {
+            return Err(anyhow!("monitor switched mid-frame"));
+        }
+        for (rect, px) in tiles {
+            self.paint(frame_id, rect, px)?;
+        }
+        Ok(())
+    }
+
     /// Paint a decoded tile of frame `frame_id`. False when a newer frame already painted it.
     fn paint(&mut self, frame_id: u64, rect: TileRect, px: &[u8]) -> Result<bool> {
         let key = (rect.x, rect.y);
@@ -281,6 +352,9 @@ pub struct ConnectOpts {
     /// Receive the remote screen from the start. Without it the host captures nothing
     /// until [`Cmd::ShowScreen`] (a terminal-only window).
     pub video: bool,
+    pub extensions: Extensions,
+    /// Use this device key (a phone's secure hardware) for hosts that ask for a key.
+    pub device_key: Option<Arc<dyn rdesk_common::auth::ExternalSigner>>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,8 +415,8 @@ pub struct Handle {
 }
 
 /// A handle to no connection: commands go nowhere (the ui gallery).
-#[cfg(test)]
-pub(crate) fn test_handle() -> Handle {
+#[doc(hidden)]
+pub fn test_handle() -> Handle {
     let (cmd, _) = mpsc::unbounded_channel();
     Handle { cmd, view: Arc::new(Mutex::new(View::new())), thread: std::thread::spawn(|| {}) }
 }
@@ -397,6 +471,7 @@ async fn reconnect_loop(
     let mut ticket: CachedTicket = None;
     let mut monitor = opts.monitor;
     let mut video = opts.video;
+    let mut ext = opts.extensions.clone();
     let mut failures = 0u32;
     let mut password_hint: Option<String> = None;
     loop {
@@ -409,6 +484,7 @@ async fn reconnect_loop(
             &mut ticket,
             &mut monitor,
             &mut video,
+            &mut ext,
             &mut password_hint,
             &mut cmd_rx,
             &view,
@@ -425,7 +501,7 @@ async fn reconnect_loop(
                         None | Some(Cmd::Quit) => return,
                         Some(Cmd::Reconnect) => break,
                         Some(Cmd::ShowScreen) => video = true,
-                        Some(_) => {}
+                        Some(c) => ext.remember(&c),
                     }
                 }
                 failures = 0;
@@ -459,7 +535,7 @@ async fn reconnect_loop(
                             None | Some(Cmd::Quit) => return,
                             Some(Cmd::Reconnect) => break,
                             Some(Cmd::ShowScreen) => video = true,
-                            _ => {}
+                            Some(c) => ext.remember(&c),
                         }
                     }
                 }
@@ -523,11 +599,14 @@ pub fn password_asker(
                         _ => return Err(PasswordCancelled.into()),
                     }
                 }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 None => {
                     let prompt = tf!("rdesk password for {target}: ", "Senha do rdesk para {target}: ");
                     let p = tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt)).await??;
                     (Zeroizing::new(p), false)
                 }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                None => return Err(PasswordCancelled.into()),
             };
             *used.lock().unwrap() = Some(PasswordUse::Typed { password: password.clone(), remember });
             Ok(password)
@@ -611,6 +690,7 @@ async fn once(
     ticket: &mut CachedTicket,
     monitor: &mut Option<u32>,
     video: &mut bool,
+    ext: &mut Extensions,
     password_hint: &mut Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
@@ -680,6 +760,11 @@ async fn once(
     let asker = password_asker(&opts.name, &opts.entry, used.clone(), ui);
     let mut creds = credentials(&opts.entry, resume.take(), asker).await;
     creds.ticket = ticket_bytes;
+    if creds.keys.is_none()
+        && let Some(k) = &opts.device_key
+    {
+        creds.keys = Some(KeySource::External(k.clone()));
+    }
     // Generous: the user may be typing a password or approving 1Password.
     let result = tokio::time::timeout(
         Duration::from_secs(300),
@@ -734,7 +819,7 @@ async fn once(
 
     // The clipboard goes both ways: only with full control.
     let clipboard = opts.clipboard && access.input;
-    match run_session(&conn, ctrl_w, ctrl_r, monitor, video, cmd_rx, view, notify, clipboard, access.input).await {
+    match run_session(&conn, ctrl_w, ctrl_r, monitor, video, ext, cmd_rx, view, notify, clipboard, access.input).await {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -768,6 +853,7 @@ async fn run_session(
     mut ctrl_r: RecvStream,
     monitor: &mut Option<u32>,
     video: &mut bool,
+    ext: &mut Extensions,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
     notify: &Notify,
@@ -786,7 +872,8 @@ async fn run_session(
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<ClientMsg>();
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<u64>();
     let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<String>();
-    let clipboard = if clipboard_on { ClipboardSync::spawn(clip_tx) } else { None };
+    let clipboard = if clipboard_on && !ext.clipboard_in_app { ClipboardSync::spawn(clip_tx) } else { None };
+    let clipboard_to_app = clipboard_on && ext.clipboard_in_app;
     let (frame_pending, session) = {
         let mut v = view.lock().unwrap();
         (v.pending.clone(), v.begin_session())
@@ -810,12 +897,22 @@ async fn run_session(
     if *video && let Some(tx) = want_video.take() {
         let _ = tx.send(());
     }
+    // With a size limit, the picture waits for the extensions stream to pass it on: the
+    // first frame (the biggest) then already comes scaled.
+    let (ext_ready, ext_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let ext_ready = if ext.wanted() {
+        Some(ext_ready)
+    } else {
+        let _ = ext_ready.send(());
+        None
+    };
     let ack_conn = conn.clone();
     tasks.spawn(async move {
         if video_wanted.await.is_err() {
             // The session is ending without the picture.
             std::future::pending::<()>().await;
         }
+        let _ = tokio::time::timeout(Duration::from_secs(3), ext_ready_rx).await;
         let mut acks = ack_conn.open_uni().await?;
         let _ = acks.set_priority(20);
         write_msg(&mut acks, &StreamOpen::Acks).await?;
@@ -885,6 +982,8 @@ async fn run_session(
                     HostMsg::Clipboard { text } => {
                         if let Some(c) = &clipboard {
                             c.set(text);
+                        } else if clipboard_to_app {
+                            notify(UiEvent::Clipboard(text));
                         }
                     }
                     HostMsg::DirListing { path, result, .. } => notify(UiEvent::DirListing { path, result }),
@@ -927,6 +1026,11 @@ async fn run_session(
             }
         });
     }
+    // The extensions stream (picture size, pointer), for clients that ask for it.
+    let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtClient>();
+    if let Some(ready) = ext_ready {
+        tasks.spawn(extensions(conn.clone(), ext.clone(), ext_rx, ready, notify.clone()));
+    }
     let mut transfer_id = 0u64;
     let mut list_req = 0u32;
     let result = loop {
@@ -944,6 +1048,19 @@ async fn run_session(
                     Cmd::Quit => break Ok(true),
                     // Already connected.
                     Cmd::Reconnect => {}
+                    Cmd::SetMaxSize(width, height) => {
+                        ext.remember(&Cmd::SetMaxSize(width, height));
+                        let _ = ext_tx.send(ExtClient::MaxSize { width, height });
+                    }
+                    Cmd::FollowCursor(on) => {
+                        ext.remember(&Cmd::FollowCursor(on));
+                        let _ = ext_tx.send(ExtClient::Cursor { on });
+                    }
+                    Cmd::Clipboard(text) => {
+                        if clipboard_to_app {
+                            let _ = ctrl_tx.send(ClientMsg::Clipboard { text });
+                        }
+                    }
                     Cmd::ShowScreen => {
                         *video = true;
                         if let Some(tx) = want_video.take() {
@@ -1001,6 +1118,75 @@ async fn run_session(
     result
 }
 
+/// Run the extensions stream. Never ends on its own (the session must not end with it):
+/// a host without extensions just leaves the stream unanswered.
+async fn extensions(
+    conn: Connection,
+    want: Extensions,
+    mut rx: mpsc::UnboundedReceiver<ExtClient>,
+    ready: tokio::sync::oneshot::Sender<()>,
+    notify: Notify,
+) -> Result<()> {
+    // Dropped on any failure, which also lets the picture start.
+    let mut ready = Some(ready);
+    let r: Result<()> = async {
+        let (mut w, mut r) = conn.open_bi().await?;
+        write_msg(&mut w, &StreamOpen::Extensions).await?;
+        write_msg(&mut w, &ExtClient::Hello { rev: EXT_REV }).await?;
+        let features = match read_msg::<_, ExtHost>(&mut r, MAX_SMALL_MSG).await {
+            Ok(Some(ExtHost::Hello { features, .. })) => features,
+            _ => {
+                notify(UiEvent::Extensions(Vec::new()));
+                anyhow::bail!("this host has no extensions (an older rdesk)");
+            }
+        };
+        notify(UiEvent::Extensions(features.clone()));
+        let can = |f: Feature| features.contains(&f);
+        if can(Feature::MaxSize)
+            && let Some((width, height)) = want.max_size
+        {
+            write_msg(&mut w, &ExtClient::MaxSize { width, height }).await?;
+        }
+        if can(Feature::Cursor) && want.cursor {
+            write_msg(&mut w, &ExtClient::Cursor { on: true }).await?;
+        }
+        if let Some(r) = ready.take() {
+            let _ = r.send(());
+        }
+        let read = async {
+            while let Some(m) = read_msg::<_, ExtHost>(&mut r, MAX_SMALL_MSG).await? {
+                if let ExtHost::Cursor { x, y, visible } = m {
+                    notify(UiEvent::Cursor { x, y, visible });
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let write = async {
+            while let Some(m) = rx.recv().await {
+                let allowed = match m {
+                    ExtClient::MaxSize { .. } => can(Feature::MaxSize),
+                    ExtClient::Cursor { .. } => can(Feature::Cursor),
+                    ExtClient::Hello { .. } => false,
+                };
+                if allowed {
+                    write_msg(&mut w, &m).await?;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::select! {
+            r = read => r,
+            r = write => r,
+        }
+    }
+    .await;
+    drop(ready);
+    if let Err(e) = r {
+        tracing::debug!("extensions: {e:#}");
+    }
+    std::future::pending::<Result<()>>().await
+}
+
 async fn read_frame(s: &mut RecvStream, view: &SharedView, session: u64) -> Result<u64> {
     let h: FrameHeader = expect_msg(s, MAX_VIDEO_MSG).await?;
     {
@@ -1016,21 +1202,27 @@ async fn read_frame(s: &mut RecvStream, view: &SharedView, session: u64) -> Resu
             v.tile_frame.clear();
         }
     }
+    // A full frame (the first one, another monitor or size) is painted as it arrives: there
+    // is nothing older worth keeping on screen, and on a slow link the picture shows up bit
+    // by bit instead of all at once seconds later. Any other frame is applied whole, at once:
+    // painted tile by tile, whoever looked at the picture in between (the window, the phone
+    // app) could catch half of it, like something that moved drawn at both places.
+    let progressive = h.full;
+    let mut decoded: Vec<(TileRect, Vec<u8>)> = Vec::new();
     let mut scratch = Vec::new();
     while let Some(tile) = read_msg::<_, Tile>(s, MAX_VIDEO_MSG).await? {
         // Decode outside the lock.
         rdesk_common::tiles::decode_tile(&tile, &mut scratch)?;
         let rect = TileRect { x: tile.x, y: tile.y, w: tile.w as u32, h: tile.h as u32 };
-        let mut v = view.lock().unwrap();
-        if v.session != session {
-            return Err(anyhow!("frame from an old connection"));
+        if progressive {
+            view.lock().unwrap().apply(session, h.monitor_id, h.frame_id, [(rect, scratch.as_slice())])?;
+        } else {
+            decoded.push((rect, std::mem::take(&mut scratch)));
         }
-        if v.monitor != h.monitor_id {
-            return Err(anyhow!("monitor switched mid-frame"));
-        }
-        v.paint(h.frame_id, rect, &scratch)?;
     }
-    view.lock().unwrap().frames += 1;
+    let mut v = view.lock().unwrap();
+    v.apply(session, h.monitor_id, h.frame_id, decoded.iter().map(|(r, px)| (*r, px.as_slice())))?;
+    v.frames += 1;
     Ok(h.frame_id)
 }
 
@@ -1076,6 +1268,21 @@ pub enum Update {
     None,
     Full { width: u32, height: u32, rgba: Vec<u8> },
     Partial { width: u32, height: u32, tiles: Vec<(TileRect, Vec<u8>)> },
+}
+
+/// The whole picture, if anything changed since the last look (for apps that redraw it
+/// whole, like the phone app). Like [`take_updates`], it marks everything as seen.
+pub fn take_frame(view: &SharedView) -> Option<(u32, u32, Vec<u8>)> {
+    let mut v = view.lock().unwrap();
+    if v.monitor == u32::MAX {
+        // Nothing has arrived yet (the placeholder is not a picture).
+        return None;
+    }
+    let changed = v.full_dirty || !v.dirty.is_empty();
+    v.full_dirty = false;
+    v.dirty.clear();
+    v.pending.store(false, Ordering::Release);
+    changed.then(|| (v.frame.width, v.frame.height, v.frame.data.clone()))
 }
 
 pub fn take_updates(view: &SharedView) -> Update {
@@ -1155,6 +1362,22 @@ mod tests {
         let new = v.begin_session();
         assert_ne!(old, new);
         assert_eq!(v.session, new, "read_frame drops streams still tagged with `old`");
+    }
+
+    #[test]
+    fn a_frame_is_applied_whole_or_not_at_all() {
+        let mut v = View::new();
+        v.frame = Frame::new(128, 64);
+        v.monitor = 1;
+        let s = v.begin_session();
+        let (a, b) = (tile(4), tile(5));
+        v.apply(s, 1, 7, [(rect(0), a.as_slice()), (rect(1), b.as_slice())]).unwrap();
+        assert_eq!((pixel(&v, 0), pixel(&v, 1)), (4, 5));
+        // The monitor or the connection changed while the frame was arriving: none of it lands.
+        let c = tile(9);
+        assert!(v.apply(s, 2, 8, [(rect(0), c.as_slice())]).is_err());
+        assert!(v.apply(s + 1, 1, 8, [(rect(0), c.as_slice())]).is_err());
+        assert_eq!(pixel(&v, 0), 4);
     }
 
     #[test]

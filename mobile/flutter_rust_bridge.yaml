@@ -1,0 +1,5 @@
+# `flutter_rust_bridge_codegen generate` (run here) turns the Rust API in
+# crates/mobile/src/api into lib/src/rust and crates/mobile/src/frb_generated.rs.
+rust_input: crate::api
+rust_root: ../crates/mobile/
+dart_output: lib/src/rust

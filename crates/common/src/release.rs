@@ -54,11 +54,7 @@ pub fn this_platform() -> String {
 /// Download a release file (following GitHub's redirect), refusing anything larger than
 /// `max` bytes. Check it with [`check_file`] before using it.
 pub async fn download(url: &str, max: u64) -> Result<Vec<u8>> {
-    crate::account::install_crypto();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(900))
-        .user_agent(concat!("rdesk/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = crate::account::http_client().timeout(std::time::Duration::from_secs(900)).build()?;
     let mut r = client.get(url).send().await.with_context(|| format!("downloading {url}"))?;
     ensure!(r.status().is_success(), "downloading {url}: HTTP {}", r.status());
     let mut out = Vec::new();

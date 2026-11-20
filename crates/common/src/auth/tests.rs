@@ -95,6 +95,56 @@ async fn pubkey_rsa_sha512_ok() {
     h.unwrap();
 }
 
+/// A phone's hardware key, simulated: P-256, signing SHA-256 digests into DER.
+struct DeviceKey {
+    key: p256::ecdsa::SigningKey,
+    public: PublicKey,
+}
+
+impl DeviceKey {
+    fn new() -> Self {
+        let key = p256::ecdsa::SigningKey::random(&mut OsRng);
+        let public = PublicKey::from(ssh_key::public::EcdsaPublicKey::from(*key.verifying_key()));
+        Self { key, public }
+    }
+}
+
+impl ExternalSigner for DeviceKey {
+    fn public_key(&self) -> &PublicKey {
+        &self.public
+    }
+    fn sign_der(&self, data: Vec<u8>) -> SignFuture {
+        use p256::ecdsa::signature::Signer;
+        let sig: p256::ecdsa::Signature = self.key.sign(&data);
+        let der = sig.to_der().as_bytes().to_vec();
+        Box::pin(async move { Ok(der) })
+    }
+}
+
+#[tokio::test]
+async fn pubkey_device_key_ok() {
+    let device = std::sync::Arc::new(DeviceKey::new());
+    let mut cfg = host_cfg(&[], None);
+    cfg.authorized_keys.push(device.public.key_data().clone());
+    let store = ResumeStore::default();
+    let mut auth = client(vec![], None);
+    auth.keys = Some(KeySource::External(device));
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    c.unwrap();
+    assert!(matches!(h.unwrap().kind, AuthKind::PublicKey { .. }));
+}
+
+#[tokio::test]
+async fn device_key_not_authorized_is_rejected() {
+    let device = std::sync::Arc::new(DeviceKey::new());
+    let cfg = host_cfg(&[&ed25519()], None);
+    let store = ResumeStore::default();
+    let mut auth = client(vec![], None);
+    auth.keys = Some(KeySource::External(device));
+    let (h, c) = run(&cfg, &store, [1; 32], [1; 32], HOST_FP, &mut auth).await;
+    assert!(c.is_err() && h.is_err());
+}
+
 #[tokio::test]
 async fn picks_authorized_key_among_several() {
     let good = ed25519();

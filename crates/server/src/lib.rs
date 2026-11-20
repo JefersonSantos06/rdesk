@@ -91,6 +91,7 @@ pub fn router(st: Shared) -> Router {
             axum::routing::patch(groups::set_role).delete(groups::remove_member),
         )
         .route(paths::PATH_LOGIN, get(login::start))
+        .route("/login/app", get(login::back_to_app))
         .route("/login/oauth/{provider}", get(login::oauth_go))
         .route("/login/oauth/{provider}/callback", get(login::oauth_back))
         .route("/login/dev", post(login::dev))

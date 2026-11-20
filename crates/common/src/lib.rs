@@ -23,7 +23,18 @@ pub fn now_us() -> u64 {
     EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
+static DEVICE_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Name this device by `name` instead of its host name (a phone's own name, as the user
+/// set it; its host name is meaningless there). Set once, at start.
+pub fn set_device_name(name: String) {
+    let _ = DEVICE_NAME.set(name);
+}
+
 pub fn local_hostname() -> String {
+    if let Some(n) = DEVICE_NAME.get() {
+        return n.clone();
+    }
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
