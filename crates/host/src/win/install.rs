@@ -85,7 +85,7 @@ pub fn install(o: &InstallOpts) -> Result<String> {
         ));
     }
     register_uninstall()?;
-    msg.push_str(t!(" Listed in Settings → Apps.", " Listado em Configurações → Aplicativos."));
+    msg.push_str(t!(" Listed in Settings > Apps.", " Listado em Configurações > Aplicativos."));
     Ok(msg)
 }
 

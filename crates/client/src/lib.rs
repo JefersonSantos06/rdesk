@@ -6,4 +6,5 @@ pub mod headless;
 pub mod keys;
 pub mod secrets;
 pub mod terminal;
+pub mod ui;
 pub mod viewer;

@@ -201,7 +201,10 @@ fn color(c: vt100::Color, default: Color32) -> Color32 {
     }
 }
 
-/// A terminal window's contents and state.
+/// A cell of the visible grid: (row, column).
+type Cell = (u16, u16);
+
+/// A terminal's contents and state, drawn by [`TermView::ui`].
 pub struct TermView {
     parser: vt100::Parser,
     link: Option<TerminalLink>,
@@ -210,6 +213,12 @@ pub struct TermView {
     pub ended: bool,
     size: (u16, u16),
     font: FontId,
+    /// The keyboard goes here (it had the focus when last drawn).
+    pub focused: bool,
+    /// Take the keyboard when next drawn.
+    want_focus: bool,
+    /// Selected text on the visible grid: where the drag started and where it is now.
+    selection: Option<(Cell, Cell)>,
 }
 
 impl TermView {
@@ -222,7 +231,53 @@ impl TermView {
             ended: false,
             size: (cols, rows),
             font: FontId::monospace(14.0),
+            focused: false,
+            want_focus: true,
+            selection: None,
         }
+    }
+
+    /// A terminal showing `output`, without a host (the ui gallery).
+    #[cfg(test)]
+    pub(crate) fn sample(status: &str, output: &[u8], cols: u16, rows: u16) -> Self {
+        let nz = |v: u16| NonZeroU16::new(v.max(2)).unwrap();
+        let mut parser = vt100::Parser::new(nz(rows), nz(cols), 5000);
+        parser.process(output);
+        Self {
+            parser,
+            link: None,
+            status: status.into(),
+            ended: false,
+            size: (cols, rows),
+            font: FontId::monospace(14.0),
+            focused: false,
+            want_focus: false,
+            selection: None,
+        }
+    }
+
+    /// Select from `a` to `b`, (row, column) on the visible grid (the ui gallery).
+    #[cfg(test)]
+    pub(crate) fn select(&mut self, a: Cell, b: Cell) {
+        self.selection = Some((a, b));
+    }
+
+    /// Look back `rows` lines (the ui gallery).
+    #[cfg(test)]
+    pub(crate) fn scroll_back(&mut self, rows: usize) {
+        self.parser.screen_mut().set_scrollback(rows);
+    }
+
+    /// Mark it ended, as when its shell exits (the ui gallery).
+    #[cfg(test)]
+    pub(crate) fn end(&mut self, status: &str) {
+        self.status = status.into();
+        self.ended = true;
+    }
+
+    /// Give it the keyboard when it is next drawn.
+    pub fn request_focus(&mut self) {
+        self.want_focus = true;
     }
 
     fn send(&self, m: TermClient) {
@@ -274,6 +329,66 @@ impl TermView {
         changed
     }
 
+    /// The selection in reading order (start before end), if any.
+    fn selection_range(&self) -> Option<(Cell, Cell)> {
+        let (a, b) = self.selection?;
+        // Within the grid (it may have shrunk since).
+        let size = self.parser.screen().size();
+        let (rows, cols) = (size.0.get(), size.1.get());
+        let fit = |(r, c): Cell| (r.min(rows - 1), c.min(cols - 1));
+        let (a, b) = (fit(a), fit(b));
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// The selected text, one line per row (trailing blanks dropped).
+    fn selected_text(&self) -> Option<String> {
+        let ((sr, sc), (er, ec)) = self.selection_range()?;
+        let text = self.parser.screen().contents_between(sr, sc, er, ec.saturating_add(1));
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// What a paste sends: line ends as Enter, marked as a paste for programs that asked.
+    fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let bracketed = self.parser.screen().bracketed_paste();
+        if bracketed {
+            out.extend_from_slice(b"\x1b[200~");
+        }
+        out.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+        if bracketed {
+            out.extend_from_slice(b"\x1b[201~");
+        }
+        out
+    }
+
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.selected_text() {
+            ctx.copy_text(text);
+        }
+    }
+
+    /// Paste what the system clipboard holds (the right-click menu, Ctrl+Shift+V).
+    fn paste_clipboard(&mut self) {
+        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) if !text.is_empty() => {
+                let bytes = self.paste_bytes(&text);
+                self.input(bytes);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!("clipboard: {e}"),
+        }
+    }
+
+    /// Send typed bytes: back to the live screen, the selection gone.
+    fn input(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.parser.screen_mut().set_scrollback(0);
+        self.selection = None;
+        self.send(TermClient::Input(bytes));
+    }
+
     /// Draw it in the space left in `ui`, and send keys typed while it has the focus.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll();
@@ -286,12 +401,60 @@ impl TermView {
             self.parser.screen_mut().set_size(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap());
             self.send(TermClient::Resize { cols, rows });
         }
-        let (rect, resp) = ui.allocate_exact_size(avail, egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
         let id = resp.id;
+        let (srows, scols) = {
+            let s = self.parser.screen().size();
+            (s.0.get(), s.1.get())
+        };
+        let cell_at = |p: egui::Pos2| -> Cell {
+            let c = ((p.x - rect.min.x) / cw).floor().clamp(0.0, f32::from(scols - 1)) as u16;
+            let r = ((p.y - rect.min.y) / ch).floor().clamp(0.0, f32::from(srows - 1)) as u16;
+            (r, c)
+        };
+
+        // Mouse: a drag selects, a click takes the keyboard (and drops the selection).
+        if resp.drag_started_by(egui::PointerButton::Primary)
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let at = cell_at(p);
+            self.selection = Some((at, at));
+            resp.request_focus();
+        } else if resp.dragged_by(egui::PointerButton::Primary)
+            && let (Some(p), Some((a, _))) = (resp.interact_pointer_pos(), self.selection)
+        {
+            self.selection = Some((a, cell_at(p)));
+        }
         if resp.clicked() {
+            self.selection = None;
             resp.request_focus();
         }
+        if std::mem::take(&mut self.want_focus) {
+            resp.request_focus();
+        }
+        let has_selection = self.selection.is_some();
+        let (mut copy, mut paste) = (false, false);
+        resp.context_menu(|ui| {
+            let copy_btn = egui::Button::new(t!("Copy", "Copiar")).shortcut_text("Ctrl+Shift+C");
+            if ui.add_enabled(has_selection, copy_btn).clicked() {
+                copy = true;
+                ui.close();
+            }
+            if ui.add(egui::Button::new(t!("Paste", "Colar")).shortcut_text("Ctrl+V")).clicked() {
+                paste = true;
+                ui.close();
+            }
+        });
+        if copy {
+            self.copy_selection(ui.ctx());
+        }
+        if paste {
+            self.paste_clipboard();
+            resp.request_focus();
+        }
+
         let focused = resp.has_focus();
+        self.focused = focused;
         if focused {
             // Tab, arrows and Escape are the shell's, not egui's focus keys.
             ui.memory_mut(|m| {
@@ -309,12 +472,14 @@ impl TermView {
             let lines = (wheel / ch).round() as isize;
             let now = screen.scrollback() as isize;
             screen.set_scrollback((now + lines).max(0) as usize);
+            if lines != 0 {
+                self.selection = None;
+            }
         }
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, BG);
         let screen = self.parser.screen();
-        let (srows, scols) = (screen.size().0.get(), screen.size().1.get());
         for row in 0..srows {
             let mut job = LayoutJob::default();
             for col in 0..scols {
@@ -341,8 +506,23 @@ impl TermView {
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(rect.min + egui::vec2(0.0, row as f32 * ch), galley, FG);
         }
+        // The selection, over the text.
+        if let Some(((sr, sc), (er, ec))) = self.selection_range() {
+            let fill = crate::ui::tint(crate::ui::pal(ui).accent, 110);
+            for row in sr..=er {
+                let from = if row == sr { sc } else { 0 };
+                let to = if row == er { ec } else { scols - 1 };
+                if to < from {
+                    continue;
+                }
+                let min = rect.min + egui::vec2(f32::from(from) * cw, f32::from(row) * ch);
+                let r = egui::Rect::from_min_size(min, egui::vec2(f32::from(to - from + 1) * cw, ch));
+                painter.rect_filled(r, 0.0, fill);
+            }
+        }
         // The cursor (on the live screen only).
-        if !screen.hide_cursor() && screen.scrollback() == 0 && !self.ended {
+        let scrolled = screen.scrollback() > 0;
+        if !screen.hide_cursor() && !scrolled && !self.ended {
             let (cr, cc) = screen.cursor_position();
             let at = rect.min + egui::vec2(cc as f32 * cw, cr as f32 * ch);
             let r = egui::Rect::from_min_size(at, egui::vec2(cw, ch));
@@ -352,6 +532,10 @@ impl TermView {
                 painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, FG), egui::StrokeKind::Inside);
             }
         }
+        // Looking back: say how to return.
+        if scrolled {
+            history_pill(ui, &painter, rect);
+        }
         if !focused && !self.ended {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -359,24 +543,30 @@ impl TermView {
 
     fn keys(&mut self, ui: &egui::Ui) {
         let app_cursor = self.parser.screen().application_cursor();
-        let bracketed = self.parser.screen().bracketed_paste();
+        let has_selection = self.selection.is_some();
         let mut out: Vec<u8> = Vec::new();
+        let (mut copy, mut paste) = (false, false);
         ui.input(|i| {
             for ev in &i.events {
                 match ev {
                     egui::Event::Text(t) => out.extend_from_slice(t.as_bytes()),
-                    egui::Event::Paste(t) => {
-                        if bracketed {
-                            out.extend_from_slice(b"\x1b[200~");
-                        }
-                        out.extend_from_slice(t.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
-                        if bracketed {
-                            out.extend_from_slice(b"\x1b[201~");
-                        }
-                    }
-                    // egui turns Ctrl+C / Ctrl+X into these: the shell gets the control keys.
+                    egui::Event::Paste(t) => out.extend(self.paste_bytes(t)),
+                    // egui turns Ctrl+C / Ctrl+X into these. With text selected Ctrl+C copies
+                    // it; otherwise the shell gets the control keys.
+                    egui::Event::Copy if has_selection => copy = true,
                     egui::Event::Copy => out.push(0x03),
                     egui::Event::Cut => out.push(0x18),
+                    // Ctrl+Shift+C / Ctrl+Shift+V: copy and paste, as in other terminals.
+                    egui::Event::Key { key: Key::C, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.shift =>
+                    {
+                        copy = true
+                    }
+                    egui::Event::Key { key: Key::V, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.shift =>
+                    {
+                        paste = true
+                    }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
                         if let Some(b) = key_bytes(*key, *modifiers, app_cursor) {
                             if modifiers.alt && !modifiers.ctrl && b.len() == 1 {
@@ -389,12 +579,33 @@ impl TermView {
                 }
             }
         });
-        if !out.is_empty() {
-            // Typing goes back to the live screen.
-            self.parser.screen_mut().set_scrollback(0);
-            self.send(TermClient::Input(out));
+        if copy {
+            self.copy_selection(ui.ctx());
+            self.selection = None;
         }
+        if paste {
+            self.paste_clipboard();
+        }
+        self.input(out);
     }
+}
+
+/// "History — type to go back", in the top right corner of the terminal.
+fn history_pill(ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+    let p = crate::ui::pal(ui);
+    let text = t!("History — type to go back", "Histórico — digite para voltar");
+    let galley = painter.layout_no_wrap(text.into(), FontId::proportional(crate::ui::size::SMALL), p.text);
+    let w = (galley.size().x + 20.0).min((rect.width() - 16.0).max(40.0));
+    let h = galley.size().y + 8.0;
+    let pill = egui::Rect::from_min_size(egui::pos2(rect.right() - 8.0 - w, rect.top() + 8.0), egui::vec2(w, h));
+    painter.rect(
+        pill,
+        egui::CornerRadius::same(255),
+        p.surface,
+        egui::Stroke::new(1.0, p.border),
+        egui::StrokeKind::Inside,
+    );
+    painter.with_clip_rect(pill.shrink(4.0)).galley(pill.min + egui::vec2(10.0, 4.0), galley, p.text);
 }
 
 #[cfg(test)]

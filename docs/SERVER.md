@@ -104,8 +104,8 @@ Ou pelo app, na aba **Admin** (só para admins do sistema), ou pela CLI do app: 
 ## Computadores e acesso
 
 - Cada computador é cadastrado por um usuário, com prova de posse da chave do host. Ele ganha uma credencial própria: usa o relay e sincroniza com o servidor mesmo sem ninguém logado. Três formas:
-  - logado nele: aba *This computer* ou `rdesk machines register`;
-  - sem login nele, pelo **e-mail do dono**: o host pede para entrar (`rdesk host enroll --owner …` ou *Only share this computer* na tela de login) e o dono aprova no app, conferindo um código. Sem e-mail, os admins aprovam. Pedidos pendentes não entram no relay;
+  - logado nele: página *Este computador* ou `rdesk machines register`;
+  - sem login nele, pelo **e-mail do dono**: o host pede para entrar (`rdesk host enroll --owner …` ou *Só compartilhar este computador* na tela de login) e o dono aprova no app, conferindo um código. Sem e-mail, os admins aprovam. Pedidos pendentes não entram no relay;
   - sem login nele, com uma **chave de cadastro** criada no app: entra na hora, já com a visibilidade e os grupos da chave. Ideal para imagens prontas (Raspberry Pi). Veja o [README](../README.md#computador-só-acessado-sem-login-nele).
 - Quem pode ver: **só eu**, **compartilhado** (com pessoas e/ou grupos) ou **todos do servidor**.
 - Cada compartilhamento tem um **papel**: *full control* (tela, teclado e mouse, clipboard, arquivos), *view only* (só a tela) ou *files only* (só arquivos). Quem tem vários compartilhamentos soma as permissões.
@@ -154,7 +154,7 @@ rdesk-server rotate-key                         # nova chave dos tíquetes; rein
 
 ## No app
 
-- O app só abre a tela de login até a pessoa entrar: endereço do servidor → **Sign in with the browser** → Google/GitHub → 2FA → volta para o app.
+- O app só abre a tela de login até a pessoa entrar: endereço do servidor → **Entrar pelo navegador** → Google/GitHub → 2FA → volta para o app.
 - Linha de comando: `rdesk login rdesk.seu-dominio.com`, `rdesk whoami`, `rdesk logout`.
 
 ## Teste local (sem domínio)

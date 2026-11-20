@@ -17,7 +17,7 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 ## Baixar
 
 Do seu servidor: **`https://seu-servidor/download`**. Ele lista a versão liberada para todos:
-- **Windows**: `rdesk@seu-servidor.exe`, que já sabe qual servidor usar. Abra, entre e, em *This computer*, **Install rdesk on this computer** (instala em `Program Files`, o serviço, o Menu Iniciar e *Configurações → Aplicativos*; atualiza sozinho). Pela linha de comando: `rdesk install` (ou `rdesk install --only-share --key rdk_…` para um computador só acessado), `rdesk uninstall`.
+- **Windows**: `rdesk@seu-servidor.exe`, que já sabe qual servidor usar. Abra, entre e, em *Este computador*, **Instalar** (serviço do Windows) (instala em `Program Files`, o serviço, o Menu Iniciar e *Configurações → Aplicativos*; atualiza sozinho). Pela linha de comando: `rdesk install` (ou `rdesk install --only-share --key rdk_…` para um computador só acessado), `rdesk uninstall`.
 - **Linux**: `curl -fsSL https://seu-servidor/install.sh | sudo sh` (instala o `.deb` e liga as atualizações; `… | sudo sh -s -- --host --key rdk_…` para um computador só acessado).
 - **Mac**: o `rdesk.app`.
 
@@ -37,32 +37,32 @@ Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev
 
 ## O app (tudo pela interface)
 
-Rode `rdesk` sem argumentos (ou dê duplo clique no executável). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Sign in with the browser* → Google/GitHub → 2FA); sem login, só o modo **Use on this network, without a server** (veja [Sem servidor](#sem-servidor-rede-local-e-tailscale)). A outra exceção é um computador que só vai **ser acessado**: na mesma tela, *Only share this computer (no sign-in)* pede o e-mail de quem vai ser o dono (ou uma chave de cadastro) e o computador espera a aprovação (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)). Depois abre as abas e um ícone no tray; fechar a janela só a esconde no tray e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta.
+Rode `rdesk` sem argumentos (ou dê duplo clique no executável). O app fala **português do Brasil ou inglês** (por padrão, o idioma de exibição do sistema; troque em *Configurações → Geral*). Antes de tudo, a janela pede o **login no seu servidor** (endereço → *Entrar pelo navegador* → Google/GitHub → 2FA). Abaixo do login há duas opções sem conta: **Usar nesta rede, sem servidor** (veja [Sem servidor](#sem-servidor-rede-local-e-tailscale)) e **Só compartilhar este computador**, para um computador que só vai **ser acessado**: pede o e-mail de quem vai ser o dono (ou uma chave de cadastro) e espera a aprovação (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)). Depois abre a janela com uma barra lateral e um ícone na bandeja; fechar a janela só a esconde na bandeja e o app continua rodando, como o AnyDesk. Abrir de novo apenas mostra a janela que já está aberta. Avisos e erros aparecem no canto da janela (os erros ficam até você fechar).
 
-**🖥 Computers** — os computadores que você pode acessar, vindos do servidor (como no TeamViewer):
-- *My computers* (os que você cadastrou) e *Shared with me* (os que compartilharam com você ou que estão visíveis para todos).
-- *Waiting for your approval*: computadores que pediram para entrar com o seu e-mail (admins também veem os pedidos sem dono). Confira o código que o computador mostra e clique em **Approve…** (nome e quem pode ver) ou **Refuse**.
-- **＋ Add a computer…**: as formas de incluir um computador e as **chaves de cadastro** (criar, ver quantas vezes foram usadas, revogar).
-- Status ao vivo: *Online*, *In use*, *Offline · seen 3 h ago*.
-- **Connect** (ou duplo clique) abre a sessão numa janela própria; **Files** abre já no painel de transferência de arquivos (enviar, navegar nas pastas, baixar).
-- Nos seus (e nos que você co-gerencia): **Share…** (pessoas e grupos, cada um com *full control*, *view only* ou *files only*), *Who can see it* (só eu / compartilhado / todos do servidor), *Rename…*, *History…* (quem acessou, quando, por quanto tempo). Só do dono: *Managers…* (co-gestores) e *Unregister…*.
-- *Login options…* (clique direito): como responder ao **cadeado extra** de um computador (senha ou chave SSH próprias dele): chave do 1Password, referência `op://`, senha salva no cofre do sistema.
+**Computadores** — os computadores que você pode acessar, numa lista com um painel de detalhes:
+- Um campo **Buscar ou conectar** (Ctrl+K) filtra enquanto você digita (nome, e-mail do dono, ID); Enter conecta ao selecionado, ou a um nome, ID ou `ID@endereço`.
+- Filtros: *Todos*, *Meus*, *Compartilhados comigo*, *Nesta rede* (os salvos neste aparelho, para a rede local sem servidor) e *Só online*.
+- Status ao vivo em cada linha: *Online*, *Em uso*, *Sessão aberta*, *Offline · visto há 3 h*. Duplo clique ou Enter conecta; as setas mudam a seleção; o botão direito abre as mesmas ações do painel.
+- Quando computadores pedem para entrar com o seu e-mail (admins também veem os pedidos sem dono), um aviso no topo leva a **Revisar**: confira o código que cada computador mostra e **Aprove** (nome e quem pode ver) ou **Recuse**.
+- O painel do selecionado mostra **Conectar** (abre a sessão numa janela própria; com ela aberta, **Mostrar** a traz para a frente), **Arquivos** e **Terminal** (quando o seu acesso permite), o ID do host, **quem tem acesso**, as **sessões recentes** e o histórico completo, o aviso de acesso direto e, em *Avançado*, as **Opções de login** (como responder ao **cadeado extra** de um computador: chave do 1Password, referência `op://`, senha salva no cofre do sistema) e **Descadastrar** (só o dono). Nos seus (e nos que você co-gerencia), o lápis renomeia (F2). Na janela pequena, os detalhes abrem num diálogo.
+- **Gerenciar acesso**: num só lugar, *Só eu*, *Pessoas e grupos* (cada um com *controle total*, *só visualizar*, *só arquivos* ou *só terminal*; o dono também escolhe quem *pode gerenciar*) ou *Todos do servidor*, com o que cada escolha significa.
+- **＋ Adicionar**: um assistente com cada forma de incluir um computador (este, outro em que você vai entrar, outro aprovado pelo seu e-mail, vários com **chave de cadastro**, um da rede local sem servidor).
 
-**🏠 This computer** — o host embutido (deixa este computador ser acessado):
-- **Turn on / Turn off** (lembra a escolha), **host ID** com **Copy**, estado do relay e porta UDP para conexões diretas.
-- *On your rdesk server*: **Register this computer** (nome e quem pode acessar) ou *Unregister…*. Cadastrado, o computador tem credencial própria: continua acessível mesmo sem ninguém logado no app.
-- Windows: **Install the rdesk service (recommended)**: o host passa a rodar como serviço do Windows (veja [Serviço do Windows](#serviço-do-windows)). Com o serviço instalado a página mostra o status dele; mudar as configurações do computador pede *Manage as administrator*.
-- Sessão atual (quem, de onde, como) com **Disconnect** — o outro lado não tenta reconectar.
-- *This computer's own password and keys* (para a LAN sem servidor, ou como cadeado extra): **Set password…** (com *Generate a strong one* e *Read from 1Password*), chaves SSH (**Add SSH key…** do agente do 1Password ou colando a chave pública), remover.
-- *Options*: porta UDP, pasta dos arquivos recebidos, fps, qualidade, clipboard, **cadeado extra** (pedir também a senha ou chave deste computador depois da permissão do servidor). *Activity*: conexões e **logins que falharam**. *Diagnostics*: o mesmo que `rdesk host check`.
+**Este computador** — o host embutido (deixa este computador ser acessado), como um painel:
+- O estado com o **interruptor** (lembra a escolha), o **ID do host** com *Copiar*, e por onde chegam até ele (pelo servidor, direto na rede local, porta UDP).
+- Quem está conectado agora (e se abriu um terminal, inclusive como administrador), com **Desconectar** — o outro lado não tenta reconectar.
+- A lista de configuração: **cadastro no servidor** (cadastrado, o computador tem credencial própria: continua acessível mesmo sem ninguém logado no app), **serviço do Windows** (recomendado: veja [Serviço do Windows](#serviço-do-windows); com ele instalado, mudar as configurações pede *Gerenciar como administrador*), senha própria e chaves SSH.
+- Abas: *Visão geral*, *Segurança* (senha própria com *Gerar uma forte* e leitura do 1Password, chaves SSH do agente ou coladas, **cadeado extra**, acesso direto, nova identidade), *Desempenho e arquivos* (porta UDP, pasta dos arquivos recebidos, fps, qualidade, área de transferência, terminal como administrador no Windows), *Atividade* (conexões e **logins que falharam**) e *Diagnóstico* (o mesmo que `rdesk host check`). Mudanças que reiniciam o host esperam você clicar em **Aplicar**.
 
-**⚙ Settings**: **Idioma** (português do Brasil ou inglês; por padrão, o idioma de exibição do sistema), **Account** (com quem você está logado, quantos dias faltam, *Sign out*), iniciar com o sistema (*off / ao fazer login*, no tray; no Windows o host fica a cargo do serviço), comportamento do tray, Cmd→Ctrl, **My SSH keys** (copiar a chave pública para autorizar em outra máquina) e a pasta de config/logs.
+**A janela de sessão** tem uma barra no topo (em tela cheia ela se esconde e volta ao encostar o mouse em cima): monitor, **qualidade** (*Auto*, *Velocidade*, *Qualidade* ou ajuste fino), **teclas** (Ctrl+Alt+Del e tecla Windows nos computadores Windows, Alt+Tab, teclas de Mac), **Arquivos**, **Terminal**, tela cheia e **Desconectar**. Arquivos e terminal abrem num painel lateral: navegue nas pastas, baixe, envie (ou solte arquivos na janela) e acompanhe as transferências; abra vários terminais em abas (como administrador nos Windows com controle total), selecione e copie o texto (Ctrl+Shift+C). Se a conexão cai, a imagem escurece, o teclado pausa e a janela mostra a reconexão, com *Tentar agora*.
 
-**👥 Groups**: grupos de pessoas para compartilhar computadores. Quem cria vira admin do grupo; admins adicionam e removem membros e promovem outros admins.
+**Configurações**: *Conta* (com quem você está logado, quantos dias faltam, *Sair*), *Geral* (**idioma**, iniciar com o sistema na bandeja — no Windows o host fica a cargo do serviço —, comportamento da bandeja), *Sessões remotas* (teclas de Mac), *Chaves SSH* (copiar a sua chave pública para autorizar em outra máquina), *Chaves de cadastro* e *Avançado* (a pasta de configuração e logs).
 
-**🛡 Admin** (só admins do sistema): quais e-mails podem entrar, tornar admin, desativar, remover; e a lista de **todos os computadores** (só visualização: admins acessam apenas o que foi compartilhado com eles).
+**Grupos**: grupos de pessoas para compartilhar computadores. Quem cria vira admin do grupo; admins adicionam e removem membros e promovem outros admins.
 
-Tray: *Open rdesk*, estado do host, *Turn host on/off*, *Copy host ID*, *Quit rdesk*.
+**Admin** (só admins do sistema): *Usuários* (quais e-mails podem entrar, tornar admin, desativar, remover), *Computadores* (todos, só para ver — admins acessam apenas o que foi compartilhado com eles — e quais são **de teste**) e *Versões* (liberar uma versão para os de teste ou para todos, atualizar o servidor).
+
+Bandeja: *Abrir o rdesk*, estado do host, *Ligar/Desligar o host*, *Copiar o ID do host*, *Sair do rdesk*.
 
 Logs do app: `<pasta de config>/logs/app.log`; de cada sessão: `logs/session-<nome>.log`.
 
@@ -102,15 +102,15 @@ rdesk machines keys revoke "Raspberry Pis"
 
 Um computador que nunca acessa ninguém (o PC de um parente, um Raspberry Pi) não precisa de conta. Ele pede ao servidor para entrar, provando que tem a própria chave, e só vira computador do servidor quando:
 
-- **o dono aprova** (pelo e-mail): no app, *Only share this computer* na tela de login; ou
+- **o dono aprova** (pelo e-mail): no app, *Só compartilhar este computador* na tela de login; ou
 
   ```sh
   rdesk host enroll --server rdesk.seu-dominio.com --owner voce@gmail.com [--name "PC da vó"]
   rdesk host run
   ```
 
-  O host mostra um código (ex.: `3F2A-91C0`) e fica esperando. O dono vê o pedido em *Computers → Waiting for your approval*, confere o código e aprova; o host entra na hora. Sem `--owner`, quem aprova são os admins do servidor. O servidor responde igual para e-mails que não existem e limita os pedidos pendentes (10 por pessoa, 100 no total); um pedido recusado fica recusado por 30 dias.
-- **ou com uma chave de cadastro**, sem aprovação: crie em *Computers → Add a computer → New key…* (ou `rdesk machines keys create`) e use `rdesk host enroll --server … --key rdk_…`. A chave tem validade (até 365 dias), pode ser de uso único ou reutilizável, e define quem vê os computadores que ela cadastra (inclusive grupos). Revogar a chave não tira os computadores já cadastrados. Um computador descadastrado não volta sozinho com a chave: ele vira um pedido de aprovação para o dono da chave.
+  O host mostra um código (ex.: `3F2A-91C0`) e fica esperando. O dono vê o pedido em *Computadores* (o aviso *Revisar* no topo), confere o código e aprova; o host entra na hora. Sem `--owner`, quem aprova são os admins do servidor. O servidor responde igual para e-mails que não existem e limita os pedidos pendentes (10 por pessoa, 100 no total); um pedido recusado fica recusado por 30 dias.
+- **ou com uma chave de cadastro**, sem aprovação: crie em *Computadores → Adicionar → Vários computadores* (ou *Configurações → Chaves de cadastro*) (ou `rdesk machines keys create`) e use `rdesk host enroll --server … --key rdk_…`. A chave tem validade (até 365 dias), pode ser de uso único ou reutilizável, e define quem vê os computadores que ela cadastra (inclusive grupos). Revogar a chave não tira os computadores já cadastrados. Um computador descadastrado não volta sozinho com a chave: ele vira um pedido de aprovação para o dono da chave.
 
 As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` fazem o mesmo que `host enroll` e têm prioridade sobre o `host.toml`. A chave é apagada do `host.toml` depois de usada.
 
@@ -128,7 +128,7 @@ As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` f
 
 ### Host (PC de casa)
 
-1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, aba *This computer*). Sem login nele: `rdesk host enroll` (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)).
+1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, em *Este computador*). Sem login nele: `rdesk host enroll` (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)).
 2. Execute: `rdesk host run` (ou ligue o host no app). `rdesk host check` mostra o diagnóstico.
 3. (Opcional) Cadeado extra, ou acesso pela LAN sem servidor: senha (`rdesk host set-password --op "op://Private/rdesk/password"`, guardada como registro OPAQUE) e/ou chaves SSH (`rdesk host add-key --from-agent` ou `rdesk host add-key "ssh-ed25519 AAAA…"`). Para exigir também esse fator depois da permissão do servidor: `require_local = true` no `host.toml` (ou *Options → Extra lock* no app).
 4. Iniciar com o sistema: no Windows, instale o serviço (abaixo). macOS: crie um LaunchAgent; Linux: um serviço `systemd --user`. Em macOS conceda **Gravação de Tela** e **Acessibilidade** ao `rdesk` (Ajustes → Privacidade e Segurança). Em Linux use sessão **X11**.
@@ -143,7 +143,7 @@ O serviço `rdesk` roda como SYSTEM e mantém o host rodando na sessão de quem 
 - segue só a sessão do console (a tela física), não sessões de Área de Trabalho Remota.
 
 ```powershell
-rdesk service install     # num terminal de administrador (ou o botão em This computer)
+rdesk service install     # num terminal de administrador (ou o botão em Este computador)
 rdesk service status
 rdesk service uninstall   # os arquivos do host voltam para a sua pasta
 ```
@@ -166,12 +166,12 @@ congestion = "cubic"     # ou "bbr"
 
 ### Sem servidor (rede local e Tailscale)
 
-Para usar antes de ter a VPS, ou entre computadores da mesma casa: cada computador entra com a **própria senha ou chave SSH** (*This computer → This computer's own password and keys*), e só a partir da **rede local** ou do **Tailscale**.
+Para usar antes de ter a VPS, ou entre computadores da mesma casa: cada computador entra com a **própria senha ou chave SSH** (*Este computador → Segurança*), e só a partir da **rede local** ou do **Tailscale**.
 
-- No app, na tela de login: **Use on this network, without a server**. A aba Computers mostra *On this network*: **＋ Add…** pede nome, host ID e endereço (IP, nome ou nome do Tailscale; vazio = achar pelo mDNS). Conectado ao servidor, essa lista aparece também, abaixo das outras.
+- No app, na tela de login: **Usar nesta rede, sem servidor**. Em *Computadores*, o filtro *Nesta rede* mostra os salvos neste aparelho; **＋ Adicionar → Um computador nesta rede** pede nome, host ID e endereço (IP, nome ou nome do Tailscale; vazio = achar pelo mDNS). Conectado ao servidor, eles aparecem também, na mesma lista.
 - Linha de comando, sem login: `rdesk connect <host ID>@192.168.0.20` (ou `@pc.tailnet.ts.net`), ou `rdesk connect <host ID>` com o mDNS ligado no host.
 
-No host (*This computer → Options → Direct access*, ou `[direct]` no `host.toml`):
+No host (*Este computador → Segurança → Acesso direto*, ou `[direct]` no `host.toml`):
 
 ```toml
 [direct]

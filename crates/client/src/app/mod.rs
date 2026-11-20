@@ -3,10 +3,14 @@
 //! screen is available until the user signs in to the rdesk server. Closing the window
 //! keeps it in the tray, like AnyDesk; a second launch just shows the running window.
 
+mod access;
 mod account;
+mod add_computer;
 mod admin;
 mod autostart;
 mod computers;
+#[cfg(test)]
+pub(crate) mod gallery;
 mod groups;
 #[cfg(feature = "host")]
 mod host_page;
@@ -21,8 +25,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use egui::{Color32, RichText};
-use rdesk_common::{t, tf};
+use rdesk_common::t;
+
+use crate::ui::{self, Toasts, Trailing, icons, space};
 
 pub use autostart::{Autostart, apply as apply_autostart, current as current_autostart};
 
@@ -42,8 +47,9 @@ pub(crate) enum AppCmd {
     CopyFingerprint,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Page {
+/// The pages of the window. A page asks to show another by setting its `go_to`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Page {
     Computers,
     #[cfg(feature = "host")]
     ThisComputer,
@@ -81,8 +87,8 @@ pub fn run(opts: AppOpts) -> Result<()> {
             .with_title("rdesk")
             .with_app_id("rdesk")
             .with_icon(Arc::new(icon))
-            .with_inner_size([1000.0, 680.0])
-            .with_min_inner_size([600.0, 420.0])
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([900.0, 600.0])
             .with_visible(!hidden),
         ..Default::default()
     };
@@ -92,6 +98,7 @@ pub fn run(opts: AppOpts) -> Result<()> {
         native,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
+            ui::install(&ctx);
             let _ = ctx_slot.set(ctx.clone());
             let tray = match tray::Tray::create(tx.clone(), ctx.clone(), cfg!(feature = "host")) {
                 Ok(t) => Some(t),
@@ -120,6 +127,7 @@ struct App {
     host: host_page::HostPage,
     settings: settings::SettingsPage,
     tray: Option<tray::Tray>,
+    toasts: Toasts,
     cmds: Receiver<AppCmd>,
     quitting: bool,
     visible: bool,
@@ -193,6 +201,7 @@ impl App {
             exe_checked: Instant::now(),
             exe: exe.clone(),
             tray,
+            toasts: Toasts::default(),
             cmds,
             quitting: false,
             _instance: guard,
@@ -239,70 +248,161 @@ impl App {
         }
     }
 
-    fn toast(&self) -> Option<&(String, bool, Instant)> {
-        let mut all: Vec<&(String, bool, Instant)> = Vec::new();
-        all.extend(self.computers.toast.as_ref());
+    /// Messages the pages left since the last frame go to the corner.
+    fn collect_toasts(&mut self) {
+        let mut all = Vec::new();
+        all.extend(self.computers.toast.take());
         #[cfg(feature = "host")]
-        all.extend(self.host.toast.as_ref());
-        all.extend(self.settings.toast.as_ref());
-        all.extend(self.account.toast.as_ref());
-        all.extend(self.admin.toast.as_ref());
-        all.extend(self.groups.toast.as_ref());
-        all.into_iter().filter(|t| t.2.elapsed() < Duration::from_secs(12)).max_by_key(|t| t.2)
+        all.extend(self.host.toast.take());
+        all.extend(self.settings.toast.take());
+        all.extend(self.account.toast.take());
+        all.extend(self.admin.toast.take());
+        all.extend(self.groups.toast.take());
+        all.sort_by_key(|t| t.2);
+        for (text, error, _) in all {
+            self.toasts.push(text, error);
+        }
     }
 
-    fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("rdesk").strong().size(22.0));
-            ui.add_space(16.0);
-            let ctx = ui.ctx().clone();
-            let mut clicked = None;
-            let mut tab = |ui: &mut egui::Ui, page: Page, label: &str| {
-                if ui.selectable_label(self.page == page, RichText::new(label).size(15.0)).clicked() {
-                    clicked = Some(page);
-                }
+    fn go(&mut self, page: Page, ctx: &egui::Context) {
+        self.page = page;
+        match page {
+            Page::Settings => self.settings.refresh(),
+            Page::Admin => self.admin.reload(ctx, self.account.session()),
+            Page::Groups => self.groups.reload(ctx),
+            _ => {}
+        }
+    }
+
+    /// What the sidebar shows now.
+    fn sidebar_model(&self) -> Sidebar {
+        #[cfg(feature = "host")]
+        let host = {
+            let p = ui::palette_for(true);
+            let st = self.host.status();
+            let color = if !self.host.running() {
+                p.muted
+            } else if st.session.is_some() {
+                p.warning
+            } else {
+                p.success
             };
-            tab(ui, Page::Computers, t!("🖥  Computers", "🖥  Computadores"));
-            #[cfg(feature = "host")]
-            tab(ui, Page::ThisComputer, t!("🏠  This computer", "🏠  Este computador"));
-            if self.account.signed_in() {
-                tab(ui, Page::Groups, t!("👥  Groups", "👥  Grupos"));
-            }
-            tab(ui, Page::Settings, t!("⚙  Settings", "⚙  Configurações"));
-            if self.account.is_admin() {
-                tab(ui, Page::Admin, "🛡  Admin");
-            }
-            if let Some(page) = clicked {
-                self.page = page;
-                match page {
-                    Page::Settings => self.settings.refresh(),
-                    Page::Admin => self.admin.reload(&ctx, self.account.session()),
-                    Page::Groups => self.groups.reload(&ctx),
-                    _ => {}
+            Some((color, self.host.summary()))
+        };
+        #[cfg(not(feature = "host"))]
+        let host = None;
+        Sidebar {
+            page: self.page,
+            signed_in: self.account.signed_in(),
+            admin: self.account.is_admin(),
+            pending: self.computers.pending_requests(),
+            host,
+            account: self.account.session().map(|s| (s.user.email.clone(), s.server_name.clone())),
+            sessions: self.computers.open_sessions(),
+        }
+    }
+}
+
+/// The sidebar's contents (kept apart from the pages so it can be drawn on its own).
+pub(super) struct Sidebar {
+    pub page: Page,
+    pub signed_in: bool,
+    pub admin: bool,
+    /// Computers waiting for this user's approval.
+    pub pending: usize,
+    /// The host's dot color and summary ("on", "in use by ana"…).
+    #[cfg_attr(not(feature = "host"), allow(dead_code))]
+    pub host: Option<(egui::Color32, String)>,
+    /// Signed in as (e-mail, server name).
+    pub account: Option<(String, String)>,
+    /// Session windows open from this app.
+    pub sessions: usize,
+}
+
+/// The sidebar; returns the page clicked.
+pub(super) fn sidebar(ui: &mut egui::Ui, m: &Sidebar) -> Option<Page> {
+    let p = ui::pal(ui);
+    let mut go = None;
+    ui.add_space(space::S);
+    ui.horizontal(|ui| {
+        ui.add_space(space::S);
+        ui.label(egui::RichText::new("rdesk").size(22.0).strong());
+    });
+    ui.add_space(space::M);
+    let mut item = |ui: &mut egui::Ui, page: Page, icon: &str, label: &str, trailing: Trailing| {
+        if ui::nav_item(ui, icon, label, m.page == page, trailing).clicked() {
+            go = Some(page);
+        }
+    };
+    item(ui, Page::Computers, icons::DESKTOP, t!("Computers", "Computadores"), Trailing::Count(m.pending));
+    #[cfg(feature = "host")]
+    {
+        let (dot, _) = m.host.clone().unwrap_or((p.muted, String::new()));
+        item(ui, Page::ThisComputer, icons::HOUSE, t!("This computer", "Este computador"), Trailing::Dot(dot));
+    }
+    if m.signed_in {
+        item(ui, Page::Groups, icons::USERS_THREE, t!("Groups", "Grupos"), Trailing::None);
+    }
+    if m.admin {
+        item(ui, Page::Admin, icons::SHIELD_CHECK, "Admin", Trailing::None);
+    }
+
+    // The bottom: settings, then who is signed in.
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.add_space(space::S);
+        let account = egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| match &m.account {
+                Some((email, server)) => {
+                    ui::avatar(ui, email, 28.0);
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(email.as_str()).truncate());
+                        ui.add(egui::Label::new(ui::muted(server.as_str()).size(ui::size::SMALL)).truncate());
+                    });
                 }
-            }
-            #[cfg(feature = "host")]
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let on = self.host.running();
-                let (color, text) = if on {
-                    (Color32::from_rgb(46, 184, 92), format!("● Host {}", self.host.summary()))
-                } else {
-                    (Color32::GRAY, t!("○ Host off", "○ Host desligado").to_string())
-                };
-                if ui
-                    .add(egui::Button::new(RichText::new(text).color(color)).frame(false))
-                    .on_hover_text(t!(
-                        "Others can connect to this computer while the host is on",
-                        "Outras pessoas podem se conectar a este computador enquanto o host está ligado"
-                    ))
-                    .clicked()
-                {
-                    self.page = Page::ThisComputer;
+                None => {
+                    ui.label(egui::RichText::new(icons::WIFI_SLASH).size(ui::size::ICON).color(p.muted));
+                    ui.add(
+                        egui::Label::new(ui::muted(t!("Without a server", "Sem servidor")).size(ui::size::SMALL))
+                            .truncate(),
+                    );
                 }
             });
         });
-    }
+        if account.response.interact(egui::Sense::click()).on_hover_text(t!("Account", "Conta")).clicked() {
+            go = Some(Page::Settings);
+        }
+        ui.separator();
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            // Top-down again, at the end of the bottom-up space.
+            let h = 36.0 * if m.sessions > 0 { 2.0 } else { 1.0 } + space::S;
+            ui.add_space((ui.available_height() - h).max(0.0));
+            if m.sessions > 0 {
+                let text = rdesk_common::tf!("{} open session(s)", "{} sessão(ões) aberta(s)", m.sessions);
+                ui.horizontal(|ui| {
+                    ui.add_space(space::S);
+                    ui.label(egui::RichText::new(icons::MONITOR).color(p.accent));
+                    ui.add(egui::Label::new(ui::muted(text).size(ui::size::SMALL)).truncate());
+                });
+            }
+            if ui::nav_item(
+                ui,
+                icons::GEAR_SIX,
+                t!("Settings", "Configurações"),
+                m.page == Page::Settings,
+                Trailing::None,
+            )
+            .clicked()
+            {
+                go = Some(Page::Settings);
+            }
+        });
+    });
+    go
 }
+
+/// The sidebar's width: room for the longest Portuguese label plus a count.
+pub(super) const SIDEBAR_WIDTH: f32 = 220.0;
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -392,28 +492,21 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.collect_toasts();
+        let page_frame = |p: &ui::Palette| {
+            egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(space::XL as i8, space::L as i8 + 4))
+        };
+        let p = ui::pal(ui);
         if !self.account.signed_in() && !self.local_mode {
             #[cfg(feature = "host")]
             let host = &mut self.host;
             let mut go_local = false;
-            egui::CentralPanel::default().show(ui, |ui| {
-                self.account.login_screen(ui, |ui, _server| {
-                    ui.add_space(10.0);
-                    if ui
-                        .button(t!("Use on this network, without a server", "Usar nesta rede, sem servidor"))
-                        .on_hover_text(t!(
-                            "Only computers on the local network or Tailscale that let you in with their own \
-                             password or SSH key",
-                            "Só computadores da rede local ou do Tailscale que deixam você entrar com a senha ou \
-                             chave SSH deles"
-                        ))
-                        .clicked()
-                    {
-                        go_local = true;
-                    }
+            egui::CentralPanel::default().frame(page_frame(&p)).show(ui, |ui| {
+                go_local = self.account.login_screen(ui, |_ui, _server| {
                     #[cfg(feature = "host")]
-                    host.join_section(ui, _server);
-                })
+                    host.join_section(_ui, _server);
+                });
             });
             if go_local {
                 self.local_mode = true;
@@ -424,86 +517,41 @@ impl eframe::App for App {
                     self.host.start();
                 }
             }
-            #[cfg(feature = "host")]
-            if let Some((text, true, at)) = &self.host.toast
-                && at.elapsed() < Duration::from_secs(12)
-            {
-                egui::Panel::bottom("signed-out-status").show(ui, |ui| {
-                    ui.colored_label(Color32::from_rgb(230, 70, 70), text);
-                });
-            }
+            self.toasts.show(&ctx);
             return;
         }
-        egui::Panel::top("nav").show(ui, |ui| {
-            ui.add_space(6.0);
-            self.nav(ui);
-            ui.add_space(4.0);
-        });
-        let toast = self.toast().cloned();
-        let sessions = self.computers.open_sessions();
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match toast {
-                    Some((text, err, _)) => {
-                        let color = if err { Color32::from_rgb(230, 70, 70) } else { ui.visuals().text_color() };
-                        ui.colored_label(color, text);
-                    }
-                    None => {
-                        ui.weak(match self.page {
-                            Page::Computers => t!(
-                                "Double-click a computer to connect · right-click for more",
-                                "Clique duas vezes em um computador para conectar · botão direito para mais"
-                            ),
-                            #[cfg(feature = "host")]
-                            Page::ThisComputer => t!(
-                                "Others can connect to this computer while the host is on",
-                                "Outras pessoas podem se conectar a este computador enquanto o host está ligado"
-                            ),
-                            Page::Settings => t!("Changes are saved immediately", "As alterações são salvas na hora"),
-                            Page::Admin => t!(
-                                "Only these e-mails can sign in to your server",
-                                "Só estes e-mails podem entrar no seu servidor"
-                            ),
-                            Page::Groups => t!(
-                                "Share computers with a group from the Computers page",
-                                "Compartilhe computadores com um grupo na página Computadores"
-                            ),
-                        });
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if sessions > 0 {
-                        ui.label(tf!("{sessions} open session(s)", "{sessions} sessão(ões) aberta(s)"));
-                    }
-                });
-            });
-        });
-        egui::CentralPanel::default().show(ui, |ui| match self.page {
+        let model = self.sidebar_model();
+        let clicked = egui::Panel::left("nav")
+            .exact_size(SIDEBAR_WIDTH)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(p.bg_alt).inner_margin(egui::Margin::same(space::S as i8)))
+            .show(ui, |ui| sidebar(ui, &model))
+            .inner;
+        if let Some(page) = clicked {
+            self.go(page, &ctx);
+        }
+        let mut sign_in = false;
+        egui::CentralPanel::default().frame(page_frame(&p)).show(ui, |ui| match self.page {
             Page::Computers => self.computers.show(ui, self.account.signed_in()),
             #[cfg(feature = "host")]
             Page::ThisComputer => self.host.show(ui),
-            Page::Settings => {
-                if self.local_mode && !self.account.signed_in() {
-                    ui.label(RichText::new(t!("Account", "Conta")).strong().size(16.0));
-                    ui.horizontal(|ui| {
-                        ui.label(t!(
-                            "Used without a server: only computers on this network.",
-                            "Usado sem servidor: só computadores desta rede."
-                        ));
-                        if ui.button(t!("Sign in to a server…", "Entrar em um servidor…")).clicked() {
-                            self.local_mode = false;
-                            set_local_only(false);
-                        }
-                    });
-                    ui.add_space(14.0);
-                } else {
-                    self.account.settings_section(ui);
-                }
-                self.settings.show(ui);
-            }
+            Page::Settings => sign_in = self.settings.show(ui, &mut self.account, self.local_mode),
             Page::Admin => self.admin.show(ui, self.account.session()),
             Page::Groups => self.groups.show(ui),
         });
+        if sign_in {
+            // Leave the local-network mode: the sign-in screen shows.
+            self.local_mode = false;
+            set_local_only(false);
+        }
+        // A page asked for another one.
+        let wanted = self.computers.go_to.take();
+        #[cfg(feature = "host")]
+        let wanted = wanted.or(self.host.go_to.take());
+        if let Some(page) = wanted {
+            self.go(page, &ctx);
+        }
+        self.toasts.show(&ctx);
     }
 
     fn on_exit(&mut self) {

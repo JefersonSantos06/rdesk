@@ -318,8 +318,8 @@ pub async fn diagnose() -> Vec<CheckLine> {
         out.push(line(
             "macOS",
             t!(
-                "grant rdesk Screen Recording and Accessibility in System Settings → Privacy & Security",
-                "permita ao rdesk Gravação de Tela e Acessibilidade em Ajustes do Sistema → Privacidade e Segurança"
+                "grant rdesk Screen Recording and Accessibility in System Settings > Privacy & Security",
+                "permita ao rdesk Gravação de Tela e Acessibilidade em Ajustes do Sistema > Privacidade e Segurança"
             ),
             true,
         ));

@@ -47,7 +47,7 @@ pub fn agent_path(override_path: Option<&str>) -> Result<String> {
         return Ok(p);
     }
     bail!(
-        "no SSH agent found. Enable the 1Password SSH agent (Settings → Developer) \
+        "no SSH agent found. Enable the 1Password SSH agent (Settings > Developer) \
          or set SSH_AUTH_SOCK / `agent_socket`"
     )
 }

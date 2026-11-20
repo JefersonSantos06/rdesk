@@ -47,3 +47,6 @@ tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 [dev-dependencies]
 rdesk-host.workspace = true
 tempfile = "3"
+# Renders the screens to PNG files to look at (the ui gallery test).
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

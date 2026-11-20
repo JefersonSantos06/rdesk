@@ -42,6 +42,12 @@ impl std::fmt::Debug for PasswordAnswer {
 pub struct PasswordReply(Arc<Mutex<Option<tokio::sync::oneshot::Sender<Option<PasswordAnswer>>>>>);
 
 impl PasswordReply {
+    /// A reply that goes nowhere (the ui gallery).
+    #[cfg(test)]
+    pub(crate) fn test() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
     pub fn send(&self, answer: Option<PasswordAnswer>) {
         if let Some(tx) = self.0.lock().unwrap().take() {
             let _ = tx.send(answer);
@@ -127,8 +133,11 @@ pub enum UiEvent {
     },
     /// The app asked this session window to come forward (the window is already open).
     Raise(Raise),
-    /// A terminal opened (or why not).
-    Terminal(Result<crate::terminal::TermSlot, String>),
+    /// A terminal opened (or why not); `admin` as asked in [`Cmd::OpenTerminal`].
+    Terminal {
+        admin: bool,
+        result: Result<crate::terminal::TermSlot, String>,
+    },
     /// Something to redraw (terminal output).
     Wake,
     Quit,
@@ -291,6 +300,13 @@ pub struct Handle {
     pub cmd: mpsc::UnboundedSender<Cmd>,
     pub view: SharedView,
     pub thread: std::thread::JoinHandle<()>,
+}
+
+/// A handle to no connection: commands go nowhere (the ui gallery).
+#[cfg(test)]
+pub(crate) fn test_handle() -> Handle {
+    let (cmd, _) = mpsc::unbounded_channel();
+    Handle { cmd, view: Arc::new(Mutex::new(View::new())), thread: std::thread::spawn(|| {}) }
 }
 
 /// Start the connection manager on its own thread with its own tokio runtime.
@@ -901,10 +917,14 @@ async fn run_session(
                         tokio::spawn(async move {
                             let wake = notify.clone();
                             let r = crate::terminal::open(conn, cols, rows, admin, move || wake(UiEvent::Wake)).await;
-                            notify(UiEvent::Terminal(
-                                r.map(|l| crate::terminal::TermSlot(std::sync::Arc::new(std::sync::Mutex::new(Some(l)))))
+                            notify(UiEvent::Terminal {
+                                admin,
+                                result: r
+                                    .map(|l| {
+                                        crate::terminal::TermSlot(std::sync::Arc::new(std::sync::Mutex::new(Some(l))))
+                                    })
                                     .map_err(|e| format!("{e:#}")),
-                            ));
+                            });
                         });
                     }
                 }
