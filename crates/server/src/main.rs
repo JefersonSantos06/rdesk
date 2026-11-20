@@ -89,6 +89,12 @@ enum UsersCmd {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// Forget the user's second factor (a lost phone) and end their sessions: their next
+    /// sign-in sets up a new one.
+    #[command(name = "reset-2fa")]
+    Reset2fa {
+        email: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -259,6 +265,12 @@ fn users(data: &std::path::Path, cmd: UsersCmd) -> Result<()> {
                 db.revoke_user(u.id)?;
             }
             println!("{}: disabled {state}.", u.email);
+        }
+        UsersCmd::Reset2fa { email } => {
+            let u = find(&email)?;
+            db.reset_second_factor(u.id)?;
+            db.audit(None, "2fa-reset", &format!("{} (cli)", u.email));
+            println!("{}: second factor reset; they set up a new one at their next sign-in.", u.email);
         }
     }
     Ok(())

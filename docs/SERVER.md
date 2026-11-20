@@ -1,5 +1,7 @@
 # Servidor privado (`rdesk-server`)
 
+> Passo a passo para montar o servidor do zero (domínio, portas, Google/GitHub, primeiro login): [Guia → Criar o servidor](guia/02-servidor.md). Esta página é a referência técnica.
+
 Um binário só, na sua VPS:
 
 - **Contas**: só e-mails que um admin cadastrou; login com Google ou GitHub e **2FA obrigatório em todo login** (TOTP ou passkey; o cadastro do 2FA acontece no primeiro login). A sessão do app vale **10 dias**.
@@ -96,6 +98,7 @@ rdesk-server users list
 rdesk-server users add maria@gmail.com [--admin]
 rdesk-server users admin maria@gmail.com on|off
 rdesk-server users disable maria@gmail.com on|off   # bloqueia, encerra as sessões e revoga os tíquetes
+rdesk-server users reset-2fa maria@gmail.com        # celular perdido: esquece o 2FA e encerra as sessões; ela cadastra outro
 rdesk-server users remove maria@gmail.com
 ```
 
@@ -108,20 +111,20 @@ Ou pelo app, na aba **Admin** (só para admins do sistema), ou pela CLI do app: 
   - sem login nele, pelo **e-mail do dono**: o host pede para entrar (`rdesk host enroll --owner …` ou *Só compartilhar este computador* na tela de login) e o dono aprova no app, conferindo um código. Sem e-mail, os admins aprovam. Pedidos pendentes não entram no relay;
   - sem login nele, com uma **chave de cadastro** criada no app: entra na hora, já com a visibilidade e os grupos da chave. Ideal para imagens prontas (Raspberry Pi). Veja o [README](../README.md#computador-só-acessado-sem-login-nele).
 - Quem pode ver: **só eu**, **compartilhado** (com pessoas e/ou grupos) ou **todos do servidor**.
-- Cada compartilhamento tem um **papel**: *full control* (tela, teclado e mouse, clipboard, arquivos), *view only* (só a tela) ou *files only* (só arquivos). Quem tem vários compartilhamentos soma as permissões.
-- **Co-gestores** (*Managers…*, só o dono escolhe): têm acesso total e podem compartilhar, renomear, mudar quem vê e ver o histórico. Descadastrar é só do dono.
-- **Histórico** (*History…*): quem acessou, quando, por quanto tempo e com qual acesso. Visível para o dono, os co-gestores e os admins do sistema.
+- Cada compartilhamento tem um **papel**: *controle total* (tela, teclado e mouse, clipboard, arquivos, terminal), *só visualizar* (só a tela), *só arquivos* ou *só terminal*. Quem tem vários compartilhamentos soma as permissões.
+- **Gestores** (em *Gerenciar acesso*, opção *controle total e pode gerenciar*; só o dono escolhe): têm acesso total e podem compartilhar, renomear, mudar quem vê e ver o histórico. Descadastrar é só do dono.
+- **Histórico** (*Histórico completo*, no painel do computador): quem acessou, quando, por quanto tempo e com qual acesso. Visível para o dono, os gestores e os admins do sistema.
 - Para conectar, o app pede um **tíquete** (válido por até 12 h); o host confere sozinho e aplica as permissões. Tirar ou reduzir o acesso revoga na hora e derruba a sessão em andamento.
 - Admins do sistema veem todos os computadores (aba *Admin*), mas só acessam os compartilhados com eles.
 - Os hosts não revelam nada antes do login (nome, sistema, se está em uso): o status vem do servidor.
 
 ## Atualizar (versões novas)
 
-O servidor olha os Releases do GitHub de hora em hora (`update_repo` no `server.toml`, vazio desliga) e guarda só as versões com o `release.json` assinado por uma chave de release do rdesk. Na aba **Admin → rdesk versions**:
+O servidor olha os Releases do GitHub de hora em hora (`update_repo` no `server.toml`, vazio desliga) e guarda só as versões com o `release.json` assinado por uma chave de release do rdesk. No app, em **Admin**:
 
-1. Marque uma ou mais máquinas como **Test computer** (lista *All computers*).
-2. **Release to test computers**: só elas recebem a versão no próximo sync (na hora).
-3. Deu certo? **Release to everyone…**: todas recebem.
+1. Em **Computadores**, marque uma ou mais máquinas como **Computador de teste**.
+2. Em **Versões**, **Liberar para os de teste**: só elas recebem a versão no próximo sync (na hora).
+3. Deu certo? **Liberar para todos…**: todas recebem.
 
 Cada computador confere de novo a assinatura e o hash com as chaves embutidas nele, baixa do GitHub e instala quando ninguém está conectado:
 - **Windows** (com o serviço): o próprio serviço; se a versão nova não sobe em 2 minutos, volta para a anterior (log em `C:\ProgramData\rdesk\logs\update.log`).
@@ -132,7 +135,7 @@ Computadores não voltam de versão sozinhos: liberar uma versão mais antiga é
 
 ### O próprio servidor
 
-**Update the server** (na mesma lista) baixa e confere a versão, faz backup do banco (`backups/`), troca o programa e reinicia; se a versão nova não responder, o programa e o banco anteriores voltam. Como o servidor roda sem privilégios, quem troca o programa é uma unidade root que roda o programa **já instalado** (que confere tudo de novo):
+**Atualizar o servidor…** (na mesma lista) baixa e confere a versão, faz backup do banco (`backups/`), troca o programa e reinicia; se a versão nova não responder, o programa e o banco anteriores voltam. Como o servidor roda sem privilégios, quem troca o programa é uma unidade root que roda o programa **já instalado** (que confere tudo de novo):
 
 ```sh
 sudo install -m 644 deploy/rdesk-server-update.path deploy/rdesk-server-update.service /etc/systemd/system/

@@ -49,4 +49,7 @@ assets = [
     ["../../deploy/rdesk-update.service", "usr/lib/systemd/system/", "644"],
     ["../../deploy/rdesk-update.timer", "usr/lib/systemd/system/", "644"],
     ["../../deploy/rdesk-host.service", "usr/lib/systemd/user/", "644"],
+    # The applications menu entry and its icon.
+    ["../../deploy/rdesk.desktop", "usr/share/applications/", "644"],
+    ["../../deploy/rdesk.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
 ]

@@ -4,7 +4,9 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 
 - **Host** (máquina controlada): Windows, macOS, Linux (X11).
 - **Cliente** (viewer): macOS, Linux, Windows.
-- Tela + mouse + teclado, múltiplos monitores, clipboard de texto nos dois sentidos, envio/download de arquivos com retomada.
+- Tela + mouse + teclado, múltiplos monitores, clipboard de texto nos dois sentidos, envio/download de arquivos com retomada, terminal remoto.
+
+**Primeira vez? Leia o [Guia do rdesk](docs/guia/README.md)**: passo a passo para criar o servidor, instalar o app e montar cada caso (usar e ser acessado, só acessado, sem servidor, rede local, Tailscale…), em português simples.
 
 ## Por que não dá timeout como o AnyDesk
 
@@ -138,7 +140,7 @@ As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` f
 O serviço `rdesk` roda como SYSTEM e mantém o host rodando na sessão de quem está na frente da tela:
 
 - o computador fica acessível **antes de alguém entrar no Windows**, na **tela de bloqueio** e nos prompts do **UAC** (o host acompanha a área de trabalho ativa);
-- enquanto alguém está conectado, uma barra no topo da tela mostra quem é, com o botão **End session**;
+- enquanto alguém está conectado, uma barra no topo da tela mostra quem é, com o botão **Encerrar**;
 - arquivos enviados e baixados passam pelos direitos de quem está logado (vão para a pasta Downloads dessa pessoa); sem ninguém logado, arquivos são recusados;
 - segue só a sessão do console (a tela física), não sessões de Área de Trabalho Remota.
 
@@ -196,8 +198,8 @@ rdesk connect <host ID>@192.168.0.20     # computador não cadastrado, na LAN
 
 Ordem de autenticação: token de retomada → **tíquete do servidor** (pedido automaticamente) → se o computador tiver o cadeado extra: chave SSH (agente do 1Password; aprovação/Touch ID) → senha (`op read` ou prompt).
 
-Na janela:
-- **▼ rdesk** (topo) abre o menu: monitores, fps/qualidade, tela cheia, teclas do Mac, Ctrl+Alt+Del, terminal (e terminal como administrador, no Windows), arquivos.
+Na janela (detalhes em [Usar no dia a dia](docs/guia/05-usar.md)):
+- A **barra do topo** tem monitor, qualidade, teclas (Ctrl+Alt+Del, tecla Windows, Alt+Tab, teclas de Mac), **Arquivos**, **Terminal** (e terminal como administrador, no Windows), tela cheia e **Desconectar**.
 - Arraste arquivos para a janela para enviá-los ao host (vão para `Downloads/rdesk`).
 - No Mac, por padrão, Cmd vira Ctrl, o Option esquerdo vira a tecla Windows e o Control vira Alt; o Option direito continua AltGr (`--no-swap-cmd-ctrl` desliga).
 - Minimizada, a janela pausa o vídeo; ao voltar, recebe a tela inteira de novo.
@@ -223,7 +225,7 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 
 ## Limitações conhecidas
 
-- Com o app rodando como administrador no Windows (*Manage as administrator*), as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Send files…* no menu da sessão.
+- Com o app rodando como administrador no Windows (*Gerenciar como administrador*), as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Enviar arquivos…* no painel de arquivos da sessão.
 - Tela de bloqueio/UAC do Windows e Ctrl+Alt+Del: só com o serviço instalado.
 - Wayland: imagem e input vão pelo portal do desktop; na primeira conexão alguém no computador precisa permitir (depois a permissão fica guardada, no GNOME 46+ e no KDE Plasma 6.1+). Ainda não testado num desktop de verdade: se der problema, `RDESK_WAYLAND=0` volta ao X11.
 - O cursor remoto não é desenhado na imagem; use o cursor local (posição é absoluta e sincronizada).

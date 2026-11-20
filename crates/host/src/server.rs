@@ -384,6 +384,9 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
             ),
         }
     }
+    // The system asks the person at the computer for what the host still needs.
+    #[cfg(target_os = "macos")]
+    crate::mac_permissions::request();
     let bound = ep.bound_sockets();
     tracing::info!("host {} listening on {:?}", format_host_id(&host_fp), bound);
     reporter.state(HostState::Listening(bound.clone()));

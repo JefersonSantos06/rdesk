@@ -87,6 +87,10 @@ pub struct UpdateUser {
     pub is_admin: Option<bool>,
     #[serde(default)]
     pub disabled: Option<bool>,
+    /// Forget their second factors (authenticator and passkeys) and end their sessions:
+    /// their next sign-in sets up a new one (a lost phone). Older servers ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset_second_factor: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,6 +9,8 @@ pub mod input;
 pub mod ipc;
 pub mod keymap;
 pub mod localnet;
+#[cfg(target_os = "macos")]
+pub mod mac_permissions;
 #[cfg(any(target_os = "macos", test))]
 pub mod mac_update;
 pub mod power;

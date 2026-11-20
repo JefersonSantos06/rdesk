@@ -153,6 +153,10 @@ pub async fn admin_update_user(
             st.wake(&touched);
         }
     }
+    if req.reset_second_factor {
+        st.db.reset_second_factor(id)?;
+        st.db.audit(Some(me.user.id), "2fa-reset", &u.email);
+    }
     st.db.audit(Some(me.user.id), "user-updated", &format!("{} {:?}", u.email, (req.is_admin, req.disabled)));
     let u = st.db.user(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such user"))?;
     Ok(Json(admin_view(&st, &u)))

@@ -1,0 +1,156 @@
+# 5. Usar no dia a dia
+
+## A lista de computadores
+
+Em **Computadores** ficam todos os computadores que você pode acessar: os seus, os
+compartilhados com você e os salvos neste aparelho para a rede local.
+
+- **Buscar ou conectar** (atalho **Ctrl+K**): digite parte do nome, o e-mail do dono ou o
+  começo do ID para filtrar. **Enter** conecta ao selecionado. Também aceita um ID
+  completo, ou `ID@endereço` para um computador da rede local.
+- **Filtros**: *Todos*, *Meus*, *Compartilhados comigo*, *Nesta rede* e *Só online*.
+- Em cada linha, a situação ao vivo:
+
+  | Situação | Significa |
+  |---|---|
+  | **Online** | ligado e pronto |
+  | **Em uso** | alguém está conectado nele agora (se você conectar, a sessão dessa pessoa cai) |
+  | **Sessão aberta** | você já tem uma janela aberta com ele |
+  | **Offline · visto há 3 h** | desligado, sem internet, ou com o host desligado |
+
+- **Clique** seleciona, **dois cliques** (ou **Enter**) conecta, as **setas** mudam a
+  seleção e o **botão direito** abre as ações.
+- O **painel da direita** mostra o selecionado: **Conectar**, **Arquivos**, **Terminal**
+  (quando o seu acesso permite), o ID do host, quem tem acesso, as últimas sessões e o
+  menu **⋯** (copiar o ID, opções de login). Numa janela pequena, use o **>** da linha para
+  ver os detalhes.
+- **F2** renomeia (nos seus) e **Delete** descadastra (só o dono, com confirmação).
+
+Se a janela de um computador já estiver aberta, **Mostrar** (no lugar de *Conectar*) traz
+ela para a frente. **Arquivos** e **Terminal** também abrem direto nela.
+
+## Conectar
+
+1. Selecione o computador e clique em **Conectar**.
+2. Abre uma janela nova. Enquanto conecta, ela mostra *Conectando a …*; você pode
+   **Cancelar**.
+3. Se o computador tiver o **cadeado extra**, o app pede a chave (o 1Password pergunta) ou
+   a senha dele.
+4. Pronto: a tela do outro computador aparece. Mexa o mouse e digite normalmente.
+
+## A janela da sessão
+
+No topo há uma barra (em tela cheia ela se esconde; encoste o mouse no alto da tela para
+ela voltar):
+
+| Na barra | Para quê |
+|---|---|
+| ● nome · **ms** | quem você está acessando e a latência (passe o mouse para ver se a ligação é direta ou pelo relay) |
+| **Monitor** | escolher qual tela ver, se o outro tiver várias; *Atualizar imagem* se algo ficou estranho |
+| **Qualidade** | *Auto*, *Velocidade* (mais fluido, menos nítido), *Qualidade* (mais nítido); ou ajuste o fps e a qualidade à mão. Muda na hora. |
+| **Teclas** | enviar **Ctrl+Alt+Del** e a **tecla Windows** (em computadores Windows), **Alt+Tab**, e ligar as **teclas de Mac** |
+| **Arquivos** | abre o painel de arquivos |
+| **Terminal** | abre o painel de terminal |
+| ⛶ | tela cheia |
+| **Desconectar** | encerra a sessão |
+
+Quando a janela é estreita, os botões viram só ícones (passe o mouse para ver o nome).
+
+### Teclas especiais
+
+- **Ctrl+Alt+Del** pela barra (*Teclas*). No Windows, só funciona com o **serviço do
+  Windows** instalado no outro computador.
+- **Do Mac para Windows/Linux**: as **teclas de Mac** vêm ligadas: **Cmd** vira **Ctrl**
+  (então Cmd+C copia), o **Option esquerdo** vira a tecla **Windows**, e o **Control** vira
+  **Alt**. O Option direito continua AltGr. Desligue em *Teclas* se preferir.
+- Atalhos do seu próprio sistema (como Alt+Tab no Windows) ficam com o seu computador; use o
+  menu *Teclas* para mandá-los ao outro.
+
+### Copiar e colar
+
+Texto copiado de um lado pode ser colado no outro, nos dois sentidos, automaticamente
+(só texto, e só com **controle total**). Para desligar no computador acessado:
+*Este computador → Desempenho e arquivos → Área de transferência*.
+
+### Arquivos
+
+1. Clique em **Arquivos** na barra. Abre um painel ao lado da tela.
+2. **Para baixar**: navegue pelas pastas (clique nos nomes, ou na seta para cima; clique no
+   caminho para digitar um) e clique no ícone de download ao lado do arquivo (ou dois
+   cliques nele). Vai para a sua pasta **Downloads** (o painel mostra onde, com o botão
+   **Abrir**).
+3. **Para enviar**: **Enviar arquivos…**, ou **arraste os arquivos para a janela**. Eles vão
+   para `Downloads/rdesk` do outro computador.
+4. Embaixo do painel ficam as transferências: andamento, concluídas e as que falharam.
+   **Limpar concluídos** limpa a lista.
+
+Se a conexão cair no meio, a transferência continua de onde parou quando você mandar de
+novo. Arquivos com o mesmo nome não são sobrescritos: viram `nome (1).ext`.
+
+Com o serviço do Windows, os arquivos vão para os Downloads de quem está logado no Windows
+naquele momento. Com ninguém logado, o envio é recusado.
+
+### Terminal
+
+1. Clique em **Terminal** na barra. Abre um terminal do outro computador, como quem está
+   logado lá (no Windows, PowerShell; no Mac e no Linux, o shell da pessoa).
+2. **＋** abre outro terminal em outra aba. Em computadores **Windows** com **controle
+   total**, o **＋** oferece também **Terminal (admin)**: com os direitos de administrador
+   da pessoa logada (precisa do serviço instalado lá).
+3. **Copiar**: selecione o texto com o mouse e use **Ctrl+Shift+C** (ou **Ctrl+C** com algo
+   selecionado; sem seleção, Ctrl+C interrompe o comando, como sempre). **Colar**:
+   **Ctrl+V** ou **Ctrl+Shift+V**. O botão direito também tem *Copiar* e *Colar*.
+4. Role com a roda do mouse para ver o histórico; digite qualquer coisa para voltar ao fim.
+5. Fechar a aba de um terminal ativo pede confirmação (o que estiver rodando nele para).
+
+Quando o terminal está aberto ao lado da tela, um selo na barra diz para onde vai o
+teclado: **Teclado: terminal** ou **Teclado: tela remota**. Clique nele (ou na imagem)
+para trocar.
+
+### Info
+
+O painel **Info** mostra o computador, o sistema, o seu nível de acesso, a **rota**
+(direta ou relay), a latência, os quadros por segundo e a velocidade.
+
+## Quando a conexão cai
+
+- Quedas curtas: a imagem só pausa e volta sozinha.
+- Quedas maiores: a imagem escurece e aparece **Reconectando a …**, com há quanto tempo
+  caiu, o motivo e a tentativa. **O teclado e o mouse ficam pausados** até voltar (nada do
+  que você digitar agora é enviado depois).
+  - **Tentar agora** pula a espera; **Desconectar** desiste.
+  - Depois de 20 segundos, o app avisa que o computador pode estar desligado ou sem
+    internet. Ele continua tentando até você desistir.
+- Quando volta: aparece **Reconectado após …** por alguns segundos.
+- Se a sessão terminou de vez (alguém conectou no seu lugar, ou foi encerrada pelo outro
+  lado), aparecem **Reconectar** e **Fechar**.
+
+## Fechar
+
+- **Desconectar** (ou fechar a janela) encerra a sessão. Se houver um terminal ativo ou
+  transferências em andamento, o app pergunta antes.
+- No computador acessado, quem está na frente da tela sempre vê **quem está conectado**:
+  no Windows, uma barra no alto da tela com o botão **Encerrar**, que derruba a sessão na
+  hora.
+
+## Do outro lado: "Este computador"
+
+Em **Este computador** você vê e controla o que acontece **neste** computador:
+
+- o **interruptor** (ninguém consegue se conectar com ele desligado), o **ID do host** com
+  **Copiar**, e por onde chegam até ele;
+- **quem está conectado agora**, com **Desconectar**;
+- **Configuração do acesso**: cadastro no servidor, serviço do Windows, senha própria,
+  chaves SSH;
+- abas **Segurança**, **Desempenho e arquivos** (porta, pasta dos arquivos recebidos,
+  fps, qualidade, área de transferência, terminal como administrador), **Atividade**
+  (quem conectou, logins que falharam) e **Diagnóstico** (**Verificar** testa permissões,
+  monitores e rede).
+
+Mudanças que reiniciam o host (como a porta) só valem depois de **Aplicar**, na barra que
+aparece embaixo.
+
+## Bandeja (ícone perto do relógio)
+
+*Abrir o rdesk*, a situação do host, *Ligar/Desligar o host*, *Copiar o ID do host* e
+*Sair do rdesk*.

@@ -345,6 +345,17 @@ impl Db {
         Ok(())
     }
 
+    /// Forget the user's second factors (authenticator app and passkeys) and end their
+    /// sessions: their next sign-in asks them to set up a new one.
+    pub fn reset_second_factor(&self, id: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute("UPDATE users SET totp_secret = NULL, totp_last_step = 0 WHERE id = ?1", [id])?;
+            c.execute("DELETE FROM passkeys WHERE user_id = ?1", [id])
+        })?;
+        self.revoke_user_sessions(id)?;
+        Ok(())
+    }
+
     fn admin_count_except(&self, id: i64) -> Result<i64> {
         self.with(|c| {
             c.query_row("SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled = 0 AND id != ?1", [id], |r| {
@@ -545,6 +556,20 @@ mod tests {
         assert!(db.session("nope").unwrap().is_none());
         db.set_disabled(b.id, true).unwrap();
         assert!(db.session(&tok).unwrap().is_none(), "disabling ends sessions");
+    }
+
+    #[test]
+    fn second_factor_reset() {
+        let db = Db::memory().unwrap();
+        let u = db.add_user("ana@example.com", false).unwrap();
+        db.set_totp(u.id, "SECRET", 10).unwrap();
+        db.add_passkey(u.id, "phone", "{}").unwrap();
+        let (tok, _) = db.create_session(u.id, "laptop").unwrap();
+        db.reset_second_factor(u.id).unwrap();
+        let u = db.user(u.id).unwrap().unwrap();
+        assert!(u.totp_secret.is_none());
+        assert!(db.passkeys(u.id).unwrap().is_empty());
+        assert!(db.session(&tok).unwrap().is_none(), "the reset ends their sessions");
     }
 
     #[test]

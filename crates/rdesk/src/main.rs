@@ -448,6 +448,12 @@ enum UsersCmd {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// Forget the user's second factor (a lost phone) and end their sessions: their next
+    /// sign-in sets up a new one.
+    #[command(name = "reset-2fa")]
+    Reset2fa {
+        email: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1508,15 +1514,24 @@ async fn users_cmd(cmd: UsersCmd) -> Result<()> {
         }
         UsersCmd::Admin { email, state } => {
             let u = find(&email).await?;
-            let change = rdesk_proto::api::UpdateUser { is_admin: Some(state == "on"), disabled: None };
+            let change = rdesk_proto::api::UpdateUser { is_admin: Some(state == "on"), ..Default::default() };
             api.update_user(u.id, &change).await?;
             println!("{}: admin {state}.", u.email);
         }
         UsersCmd::Disable { email, state } => {
             let u = find(&email).await?;
-            let change = rdesk_proto::api::UpdateUser { is_admin: None, disabled: Some(state == "on") };
+            let change = rdesk_proto::api::UpdateUser { disabled: Some(state == "on"), ..Default::default() };
             api.update_user(u.id, &change).await?;
             println!("{}: disabled {state}.", u.email);
+        }
+        UsersCmd::Reset2fa { email } => {
+            let u = find(&email).await?;
+            let change = rdesk_proto::api::UpdateUser { reset_second_factor: true, ..Default::default() };
+            let after = api.update_user(u.id, &change).await?;
+            if after.has_totp || after.passkeys > 0 {
+                bail!("the server kept {}'s second factor: update the server first", u.email);
+            }
+            println!("{}: second factor reset; they set up a new one at their next sign-in.", u.email);
         }
     }
     Ok(())

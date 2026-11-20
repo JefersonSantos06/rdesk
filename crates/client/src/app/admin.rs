@@ -17,6 +17,7 @@ enum Op {
     Add { email: String, admin: bool },
     Update { id: i64, email: String, change: UpdateUser },
     Remove { id: i64, email: String },
+    Reset2fa { id: i64, email: String },
     Release { version: String, ring: Ring },
     UpdateServer { version: String },
     Ring { id: i64, name: String, ring: Ring },
@@ -49,6 +50,8 @@ pub(super) struct AdminPage {
     user_search: String,
     machine_search: String,
     confirm_remove: Option<AdminUser>,
+    /// Asking before resetting someone's second factor.
+    confirm_reset: Option<AdminUser>,
     pub(super) toast: Option<(String, bool, Instant)>,
 }
 
@@ -68,6 +71,7 @@ impl AdminPage {
             user_search: String::new(),
             machine_search: String::new(),
             confirm_remove: None,
+            confirm_reset: None,
             toast: None,
         }
     }
@@ -94,6 +98,21 @@ impl AdminPage {
                 }
                 Op::Remove { id, email } => {
                     api.remove_user(id).await.map(|_| tf!("Removed {email}.", "{email} removido."))
+                }
+                Op::Reset2fa { id, email } => {
+                    let change = UpdateUser { reset_second_factor: true, ..Default::default() };
+                    match api.update_user(id, &change).await {
+                        // An older server ignores the request.
+                        Ok(u) if u.has_totp || u.passkeys > 0 => Err(anyhow::anyhow!(tf!(
+                            "The server kept {email}'s second factor: update the server first.",
+                            "O servidor manteve o segundo fator de {email}: atualize o servidor antes."
+                        ))),
+                        Ok(_) => Ok(tf!(
+                            "{email} sets up a new second factor at the next sign-in.",
+                            "{email} cadastra um segundo fator novo no próximo login."
+                        )),
+                        Err(e) => Err(e),
+                    }
                 }
                 Op::Release { version, ring } => api.release_version(&version, ring).await.map(|_| match ring {
                     Ring::Test => {
@@ -335,7 +354,7 @@ impl AdminPage {
                                 (icons::CROWN, t!("Make admin", "Tornar admin"))
                             };
                             if menu_item(ui, icon, label).clicked() {
-                                let change = UpdateUser { is_admin: Some(!u.is_admin), disabled: None };
+                                let change = UpdateUser { is_admin: Some(!u.is_admin), ..Default::default() };
                                 op = Some(Op::Update { id: u.id, email: u.email.clone(), change });
                             }
                             let (icon, label) = if u.disabled {
@@ -350,8 +369,18 @@ impl AdminPage {
                                 ))
                                 .clicked()
                             {
-                                let change = UpdateUser { is_admin: None, disabled: Some(!u.disabled) };
+                                let change = UpdateUser { disabled: Some(!u.disabled), ..Default::default() };
                                 op = Some(Op::Update { id: u.id, email: u.email.clone(), change });
+                            }
+                            if (u.has_totp || u.passkeys > 0)
+                                && menu_item(ui, icons::KEY, t!("Reset second factor…", "Redefinir segundo fator…"))
+                                    .on_hover_text(t!(
+                                        "A lost phone: they set up a new one at the next sign-in",
+                                        "Celular perdido: a pessoa cadastra um novo no próximo login"
+                                    ))
+                                    .clicked()
+                            {
+                                self.confirm_reset = Some((*u).clone());
                             }
                             if Some(u.id) != me {
                                 ui.separator();
@@ -662,6 +691,30 @@ impl AdminPage {
                     self.run(ctx, session, Op::UpdateServer { version });
                 }
                 Some(false) => self.confirm_server = None,
+                None => {}
+            }
+        }
+        if let Some(u) = self.confirm_reset.clone() {
+            match ui::confirm(
+                ctx,
+                "admin-reset-2fa",
+                &tf!("Reset {}'s second factor?", "Redefinir o segundo fator de {}?", u.email),
+                t!(
+                    "Their authenticator app and passkeys stop working here and they are signed out. At their next \
+                     sign-in (with Google or GitHub) they set up a new second factor. Do it only when you are sure \
+                     it is really them asking.",
+                    "O app autenticador e as passkeys da pessoa deixam de valer aqui, e ela sai da conta. No próximo \
+                     login (com Google ou GitHub) ela cadastra um segundo fator novo. Faça só quando tiver certeza de \
+                     que é mesmo ela pedindo."
+                ),
+                t!("Reset", "Redefinir"),
+                true,
+            ) {
+                Some(true) => {
+                    self.confirm_reset = None;
+                    self.run(ctx, session, Op::Reset2fa { id: u.id, email: u.email.clone() });
+                }
+                Some(false) => self.confirm_reset = None,
                 None => {}
             }
         }

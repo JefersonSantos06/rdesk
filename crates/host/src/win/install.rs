@@ -80,7 +80,10 @@ pub fn install(o: &InstallOpts) -> Result<String> {
             if o.key.is_some() {
                 t!(" with the enrollment key", " com a chave de cadastro")
             } else {
-                t!("; its owner approves it in their app", "; o dono o aprova no app dele")
+                t!(
+                    "; its owner approves it in their app, comparing the code that rdesk (Start menu) shows here",
+                    "; o dono o aprova no app dele, conferindo o código que o rdesk (menu Iniciar) mostra aqui"
+                )
             }
         ));
     }

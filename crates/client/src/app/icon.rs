@@ -63,6 +63,16 @@ fn rounded(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The Linux menu icon (`deploy/rdesk.png`, installed by the .deb) comes from here:
+    /// `cargo test -p rdesk-client --lib export_menu_icon -- --ignored` after changing the drawing.
+    #[test]
+    #[ignore = "writes deploy/rdesk.png"]
+    fn export_menu_icon() {
+        let size = 256;
+        let img = image::RgbaImage::from_raw(size, size, super::rgba(size)).unwrap();
+        img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/rdesk.png")).unwrap();
+    }
+
     #[test]
     fn has_transparent_corners_and_opaque_middle() {
         let px = super::rgba(32);

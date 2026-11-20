@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=rdesk
+GenericName=Remote desktop
+GenericName[pt_BR]=Acesso remoto
+Comment=Reach your computers and let them be reached
+Comment[pt_BR]=Acesse os seus computadores e deixe-os ser acessados
+Exec=rdesk
+Icon=rdesk
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;rdesk;
+StartupWMClass=rdesk

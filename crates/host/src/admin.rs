@@ -314,15 +314,20 @@ pub async fn diagnose() -> Vec<CheckLine> {
         }
         Err(e) => out.push(line(t!("Screens", "Telas"), format!("{e:#}"), false)),
     }
-    if cfg!(target_os = "macos") {
-        out.push(line(
-            "macOS",
+    #[cfg(target_os = "macos")]
+    {
+        use crate::mac_permissions::{input_allowed, screen_allowed};
+        let (yes, no) = (
+            t!("allowed", "permitida"),
             t!(
-                "grant rdesk Screen Recording and Accessibility in System Settings > Privacy & Security",
-                "permita ao rdesk Gravação de Tela e Acessibilidade em Ajustes do Sistema > Privacidade e Segurança"
+                "missing: System Settings > Privacy & Security, add rdesk and turn it on",
+                "falta: Ajustes do Sistema > Privacidade e Segurança, adicione o rdesk e ligue"
             ),
-            true,
-        ));
+        );
+        let screen = screen_allowed();
+        out.push(line(t!("Screen Recording", "Gravação de Tela"), if screen { yes } else { no }, screen));
+        let input = input_allowed();
+        out.push(line(t!("Accessibility", "Acessibilidade"), if input { yes } else { no }, input));
     }
     #[cfg(target_os = "linux")]
     {
