@@ -55,7 +55,9 @@ class BuildPod {
         .where((element) => element.type == AritifactType.dylib)
         .toList();
 
-    final libName = environment.crateInfo.packageName;
+    // rdesk: Cargo names the library file with `_` where the package has `-`, and so
+    // does the podspec that links it.
+    final libName = environment.crateInfo.packageName.replaceAll('-', '_');
 
     // If there is static lib, use it and link it with pod
     if (staticLibs.isNotEmpty) {
