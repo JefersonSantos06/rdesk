@@ -89,9 +89,15 @@ jobs:
           tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release rdesk
           cargo deb -p rdesk --no-build --output dist/
 
-      # macOS: rdesk.app, signed ad hoc (not by Apple: the first launch needs right-click → Open).
+      # macOS: rdesk.app, signed with rdesk's own certificate (not Apple's: the first launch
+      # needs right-click → Open). Always the same certificate, so macOS keeps Screen Recording
+      # and Accessibility across updates; signed ad hoc (a new identity each version, so the
+      # permissions are asked again) only without it. See docs/RELEASE.md.
       - name: Package (macOS)
         if: matrix.part == 'app' && runner.os == 'macOS'
+        env:
+          CERT_P12: ${{ secrets.RDESK_MACOS_CERT_P12_B64 }}
+          CERT_PASSWORD: ${{ secrets.RDESK_MACOS_CERT_PASSWORD }}
         run: |
           mkdir -p dist stage/rdesk.app/Contents/MacOS
           cp target/release/rdesk stage/rdesk.app/Contents/MacOS/rdesk
@@ -112,8 +118,33 @@ jobs:
           </dict>
           </plist>
           PLIST
-          codesign --force --deep --sign - stage/rdesk.app
+          # The certificate into a keychain of its own. Inside an `if`, so a failure (a wrong
+          # password, say) falls back to ad hoc instead of failing the release.
+          identity=""
+          kc="$RUNNER_TEMP/rdesk-signing.keychain-db"
+          kcpass=$(openssl rand -hex 16)
+          p12="$RUNNER_TEMP/rdesk-signing.p12"
+          if [ -n "$CERT_P12" ] \
+            && echo "$CERT_P12" | base64 --decode > "$p12" \
+            && security create-keychain -p "$kcpass" "$kc" \
+            && security set-keychain-settings -lut 3600 "$kc" \
+            && security unlock-keychain -p "$kcpass" "$kc" \
+            && security import "$p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign \
+            && security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" > /dev/null \
+            && security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"'); then
+            # Self-signed, so not "valid" for the system: picked by its hash.
+            identity=$(security find-identity -p codesigning "$kc" | grep -m1 -oE '[0-9A-F]{40}' || true)
+          fi
+          rm -f "$p12"
+          if [ -n "$identity" ] && codesign --force --deep --sign "$identity" stage/rdesk.app; then
+            echo "signed with rdesk's certificate $identity"
+          else
+            echo "::warning::rdesk.app signed ad hoc (no RDESK_MACOS_CERT_P12_B64, or it failed): Macs will ask for the permissions again after this update"
+            codesign --force --deep --sign - stage/rdesk.app
+          fi
           codesign --verify --verbose stage/rdesk.app
+          # What macOS remembers the permissions by.
+          codesign --display --requirements - stage/rdesk.app
           tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C stage rdesk.app
 
       # The server
