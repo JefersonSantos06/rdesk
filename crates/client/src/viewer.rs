@@ -37,10 +37,11 @@ use crate::ui::{self, Tone, icons, size, space};
 const OFFLINE_GRACE: Duration = Duration::from_millis(1500);
 /// After this long, say the computer may be off.
 const OFFLINE_LONG: Duration = Duration::from_secs(20);
-/// The side panel's width: what it starts with and how far it can be dragged.
+/// The side panel's width: what it starts with and how narrow it can be dragged. It can be
+/// dragged wide until the picture next to it is [`PICTURE_MIN`] wide (a terminal wants room).
 const PANEL_DEFAULT: f32 = 380.0;
 const PANEL_MIN: f32 = 300.0;
-const PANEL_MAX: f32 = 560.0;
+const PICTURE_MIN: f32 = 200.0;
 /// A file in the list.
 const ROW_H: f32 = 44.0;
 /// Controls in the toolbar.
@@ -268,6 +269,11 @@ struct App {
     image_rect: Option<egui::Rect>,
     pending_move: Option<(u16, u16)>,
     pointer_inside: bool,
+    /// Mouse buttons pressed on the picture. A button's release goes where its press went,
+    /// wherever the pointer is by then: a drag of the panel's edge that ended over the
+    /// picture gave its release to the remote computer, and the edge stayed stuck to the
+    /// mouse.
+    remote_buttons: Vec<MouseButton>,
     swap_cmd_ctrl: bool,
     fps: u8,
     quality: u8,
@@ -336,6 +342,7 @@ impl App {
             image_rect: None,
             pending_move: None,
             pointer_inside: false,
+            remote_buttons: Vec::new(),
             swap_cmd_ctrl,
             fps,
             quality,
@@ -685,7 +692,7 @@ impl App {
                 egui::Panel::right("session-panel")
                     .resizable(true)
                     .default_size(PANEL_DEFAULT)
-                    .size_range(PANEL_MIN..=PANEL_MAX)
+                    .size_range(PANEL_MIN..=(window.width() - PICTURE_MIN).max(PANEL_MIN))
                     .frame(panel_frame)
                     .show(ui, |ui| self.side_panel(ui, true));
             }
@@ -1824,7 +1831,10 @@ impl ApplicationHandler<UiEvent> for App {
                     }
                 }
             }
-            WindowEvent::Focused(false) => self.input(InputEvent::ReleaseAll),
+            WindowEvent::Focused(false) => {
+                self.remote_buttons.clear();
+                self.input(InputEvent::ReleaseAll);
+            }
             // Back from minimized or covered: frames kept arriving, but nothing was drawn
             // (macOS skips redraws then) and the wake-up for new frames was spent. The
             // picture is current in memory: just draw it.
@@ -1849,38 +1859,37 @@ impl ApplicationHandler<UiEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let remote = self.to_remote(position.x, position.y);
-                self.pointer_inside = remote.is_some() && !over_egui;
+                // Dragging the panel's edge (or a slider) over the picture is egui's.
+                self.pointer_inside = remote.is_some() && !over_egui && !self.egui.egui_is_using_pointer();
                 if let Some(p) = remote
-                    && !over_egui
+                    && self.pointer_inside
                 {
                     self.pending_move = Some(p);
                 }
             }
-            WindowEvent::MouseInput { state, button, .. } if self.pointer_inside && !over_egui => {
-                let b = match button {
-                    winit::event::MouseButton::Left => MouseButton::Left,
-                    winit::event::MouseButton::Right => MouseButton::Right,
-                    winit::event::MouseButton::Middle => MouseButton::Middle,
-                    winit::event::MouseButton::Back => MouseButton::Back,
-                    winit::event::MouseButton::Forward => MouseButton::Forward,
-                    winit::event::MouseButton::Other(_) => return,
-                };
-                if *state == ElementState::Pressed {
-                    // A click on the picture: the keyboard goes back to the remote screen,
-                    // and open menus close.
-                    self.egui.memory_mut(|m| {
-                        if let Some(id) = m.focused() {
-                            m.surrender_focus(id);
-                        }
-                    });
-                    egui::Popup::close_all(&self.egui);
-                    self.request_redraw();
+            WindowEvent::MouseInput { state, button, .. } => {
+                let down = *state == ElementState::Pressed;
+                let on_picture = self.pointer_inside && !over_egui;
+                if let Some(b) = remote_button(*button)
+                    && route_button(&mut self.remote_buttons, b, down, on_picture)
+                {
+                    if down {
+                        // A click on the picture: the keyboard goes back to the remote screen,
+                        // and open menus close.
+                        self.egui.memory_mut(|m| {
+                            if let Some(id) = m.focused() {
+                                m.surrender_focus(id);
+                            }
+                        });
+                        egui::Popup::close_all(&self.egui);
+                        self.request_redraw();
+                    }
+                    if let Some(p) = self.pending_move.take() {
+                        self.input(InputEvent::MouseMove { x: p.0, y: p.1 });
+                    }
+                    self.input(InputEvent::MouseButton { button: b, down });
+                    return;
                 }
-                if let Some(p) = self.pending_move.take() {
-                    self.input(InputEvent::MouseMove { x: p.0, y: p.1 });
-                }
-                self.input(InputEvent::MouseButton { button: b, down: *state == ElementState::Pressed });
-                return;
             }
             WindowEvent::MouseWheel { delta, .. } if self.pointer_inside && !over_egui => {
                 let (dx, dy) = match delta {
@@ -2098,6 +2107,35 @@ fn keyboard_label(to_terminal: bool) -> &'static str {
         t!("Keyboard: terminal", "Teclado: terminal")
     } else {
         t!("Keyboard: remote screen", "Teclado: tela remota")
+    }
+}
+
+/// The buttons the remote computer knows.
+fn remote_button(b: winit::event::MouseButton) -> Option<MouseButton> {
+    match b {
+        winit::event::MouseButton::Left => Some(MouseButton::Left),
+        winit::event::MouseButton::Right => Some(MouseButton::Right),
+        winit::event::MouseButton::Middle => Some(MouseButton::Middle),
+        winit::event::MouseButton::Back => Some(MouseButton::Back),
+        winit::event::MouseButton::Forward => Some(MouseButton::Forward),
+        winit::event::MouseButton::Other(_) => None,
+    }
+}
+
+/// Whether a mouse button goes to the remote computer (else to egui). A press goes there
+/// when made on the picture, and a release goes where its press went (`held`: the buttons
+/// pressed on the picture).
+fn route_button(held: &mut Vec<MouseButton>, b: MouseButton, down: bool, on_picture: bool) -> bool {
+    if down {
+        if on_picture && !held.contains(&b) {
+            held.push(b);
+        }
+        on_picture
+    } else if let Some(i) = held.iter().position(|&h| h == b) {
+        held.swap_remove(i);
+        true
+    } else {
+        false
     }
 }
 
@@ -2702,6 +2740,25 @@ mod tests {
         assert_eq!(parent_of("/home", '/'), "/");
         assert_eq!(parent_of("C:\\Users", '\\'), "C:\\");
         assert_eq!(human(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn a_release_goes_where_its_press_went() {
+        let mut held = Vec::new();
+        // The panel's edge dragged out over the picture: the release is egui's, or the
+        // edge stays stuck to the mouse.
+        assert!(!route_button(&mut held, MouseButton::Left, true, false));
+        assert!(!route_button(&mut held, MouseButton::Left, false, true));
+        // A drag on the picture that ends over the panel: the remote gets its release.
+        assert!(route_button(&mut held, MouseButton::Left, true, true));
+        assert!(route_button(&mut held, MouseButton::Left, false, false));
+        assert!(held.is_empty());
+        // Two buttons, released in any order.
+        assert!(route_button(&mut held, MouseButton::Left, true, true));
+        assert!(!route_button(&mut held, MouseButton::Right, true, false));
+        assert!(!route_button(&mut held, MouseButton::Right, false, true));
+        assert!(route_button(&mut held, MouseButton::Left, false, true));
+        assert!(held.is_empty());
     }
 
     #[test]
