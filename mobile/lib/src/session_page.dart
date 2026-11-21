@@ -10,22 +10,17 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'computers_page.dart' show Open;
 import 'device_key.dart';
 import 'files_page.dart';
+import 'help.dart';
 import 'i18n.dart';
 import 'keys.dart';
+import 'prefs.dart';
 import 'rust/api/session.dart';
 import 'session_hub.dart';
 import 'terminal_page.dart';
+import 'touch.dart';
 
-/// How touches drive the remote pointer.
-enum TouchMode {
-  /// Like a laptop's touchpad: drag moves the pointer, tap clicks where it is.
-  touchpad,
-
-  /// Touch where you want: tap clicks there, drag drags there.
-  direct,
-}
-
-/// A remote session: the computer's screen, with touch, the phone keyboard and a key bar.
+/// A remote session: the computer's screen, driven by touch ([TouchEngine]) or a mouse,
+/// with the phone keyboard, a key bar, and the tools behind a floating button.
 class SessionPage extends StatefulWidget {
   const SessionPage({super.key, required this.target, this.open = Open.screen});
   final Target target;
@@ -35,7 +30,15 @@ class SessionPage extends StatefulWidget {
   State<SessionPage> createState() => _SessionPageState();
 }
 
-class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
+/// A click shown where it happened.
+class _Ripple {
+  _Ripple(this.at, {required this.secondary});
+  final Offset at;
+  final bool secondary;
+  final key = UniqueKey();
+}
+
+class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver implements TouchActions {
   late final SessionHub _hub;
   StreamSubscription<SessionEvent>? _sub;
 
@@ -43,28 +46,18 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
   ui.Image? _image;
   bool _decoding = false;
   bool _framePending = false;
-  Size _view = Size.zero;
-  double _zoom = 1;
-  Offset _pan = Offset.zero;
 
   // ---- pointer ----
-  TouchMode _mode = TouchMode.touchpad;
-  Offset _cursor = const Offset(0.5, 0.5);
+  late final TouchEngine _touch = TouchEngine(this)
+    ..mode = Prefs.touchMode
+    ..sensitivity = Prefs.sensitivity;
+  final _clock = Stopwatch()..start();
+  Timer? _touchTimer;
   bool _cursorVisible = true;
-  final Map<int, Offset> _pointers = {};
-  Offset? _downPos;
-  DateTime _downAt = DateTime.now();
-  bool _moved = false;
-  bool _holding = false;
-  bool _longPressed = false;
-  int _maxPointers = 0;
-  Timer? _longPress;
-  String? _twoFinger; // null (undecided), 'zoom' or 'scroll'
-  double _startDist = 1;
-  Offset _startCentroid = Offset.zero;
-  Offset _lastCentroid = Offset.zero;
-  double _startZoom = 1;
-  Offset _startPan = Offset.zero;
+  final _ripples = <_Ripple>[];
+
+  /// A mouse plugged into the phone: its buttons held now.
+  int _mouseButtons = 0;
 
   // ---- keyboard ----
   static const _sentinel = '  ';
@@ -75,8 +68,14 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
   final Set<String> _latched = {};
 
   // ---- chrome ----
-  bool _toolbar = true;
   bool _passwordOpen = false;
+  bool _helpShown = false;
+  Turn _turn = Prefs.turn;
+  bool _toolsLeft = Prefs.toolsLeft;
+  double _toolsY = Prefs.toolsY;
+
+  /// The tools button while it is being dragged.
+  Offset? _toolsDrag;
 
   @override
   void initState() {
@@ -87,6 +86,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     _hub = SessionHub(widget.target, video: widget.open == Open.screen, maxWidth: long, maxHeight: long);
     _hub.addListener(_changed);
     _kb.addListener(_onKeyboardText);
+    _kbFocus.addListener(_changed);
     DeviceKey.publicKey().then((pk) async {
       if (pk != null) {
         try {
@@ -102,6 +102,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     });
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _applyTurn();
     if (widget.open != Open.screen) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _openPanel(widget.open));
     }
@@ -110,7 +111,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _longPress?.cancel();
+    _touchTimer?.cancel();
     _sub?.cancel();
     _hub.removeListener(_changed);
     _hub.dispose();
@@ -120,6 +121,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     _hwFocus.dispose();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations([]);
     super.dispose();
   }
 
@@ -128,7 +130,8 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
       // Never leave a key or button held on the computer.
       _hub.session.releaseAll();
-      _holding = false;
+      _touch.reset();
+      _mouseButtons = 0;
     } else if (state == AppLifecycleState.resumed) {
       // The phone may have dropped the connection while away: try at once.
       if (!_hub.connected) _hub.session.reconnect();
@@ -144,9 +147,8 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
       case EventKind.frame:
         _onFrame();
       case EventKind.cursor:
-        // While the finger moves the pointer, the phone's idea of where it is wins.
         // An invisible pointer (another monitor, or unknown) keeps the phone's own idea.
-        if (e.visible && (!_moved || _pointers.isEmpty)) _cursor = Offset(e.x / 65535, e.y / 65535);
+        if (e.visible) _touch.hostCursor(Offset(e.x / 65535, e.y / 65535));
         _cursorVisible = e.visible;
         if (mounted) setState(() {});
       case EventKind.clipboard:
@@ -163,7 +165,9 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
 
   void _snack(String text) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
   }
 
   // ---- picture ----
@@ -190,6 +194,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
       final old = _image;
       setState(() => _image = img);
       if (old != null) WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+      if (old == null) _firstPicture();
     }
     _decoding = false;
     if (_framePending) {
@@ -198,184 +203,125 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     }
   }
 
-  /// Where the picture sits in the view at zoom 1.
-  Rect get _dst {
+  /// The first picture of the first session: show the gestures once.
+  void _firstPicture() {
+    if (_helpShown || Prefs.helpSeen) return;
+    _helpShown = true;
+    Prefs.helpSeen = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) showGestureHelp(context, _touch.mode);
+    });
+  }
+
+  /// Where the picture sits in a view of `size` at zoom 1.
+  Rect _fit(Size size) {
     final img = _image;
-    if (img == null || _view.isEmpty) return Offset.zero & _view;
-    final fit = applyBoxFit(BoxFit.contain, Size(img.width.toDouble(), img.height.toDouble()), _view);
-    return Alignment.center.inscribe(fit.destination, Offset.zero & _view);
+    if (img == null || size.isEmpty) return Offset.zero & size;
+    final fit = applyBoxFit(BoxFit.contain, Size(img.width.toDouble(), img.height.toDouble()), size);
+    return Alignment.center.inscribe(fit.destination, Offset.zero & size);
   }
 
-  /// A point on the screen → 0..1 across the remote monitor.
-  Offset _toRemote(Offset p) {
-    final q = (p - _pan) / _zoom;
-    final d = _dst;
-    return Offset(((q.dx - d.left) / d.width).clamp(0.0, 1.0), ((q.dy - d.top) / d.height).clamp(0.0, 1.0));
-  }
-
-  Offset _toScreen(Offset remote) {
-    final d = _dst;
-    return Offset(d.left + remote.dx * d.width, d.top + remote.dy * d.height) * _zoom + _pan;
-  }
-
-  void _clampPan() {
-    final maxX = _view.width * (_zoom - 1);
-    final maxY = _view.height * (_zoom - 1);
-    _pan = Offset(_pan.dx.clamp(-maxX, 0.0), _pan.dy.clamp(-maxY, 0.0));
-  }
-
-  /// Keep the pointer on screen when zoomed in (touchpad mode).
-  void _follow() {
-    if (_zoom <= 1.01) return;
-    final p = _toScreen(_cursor);
-    const margin = 48.0;
-    var dx = 0.0, dy = 0.0;
-    if (p.dx < margin) dx = margin - p.dx;
-    if (p.dx > _view.width - margin) dx = _view.width - margin - p.dx;
-    if (p.dy < margin) dy = margin - p.dy;
-    if (p.dy > _view.height - margin) dy = _view.height - margin - p.dy;
-    _pan += Offset(dx, dy);
-    _clampPan();
-  }
-
-  // ---- touch ----
+  // ---- touch and mouse ----
 
   bool get _canInput => _hub.access?.input ?? false;
 
-  void _moveTo(Offset remote) {
-    _cursor = remote;
-    _hub.session.pointer(x: remote.dx, y: remote.dy);
+  Duration get _now => _clock.elapsed;
+
+  @override
+  void pointer(Offset remote) => _hub.session.pointer(x: remote.dx, y: remote.dy);
+
+  @override
+  void button(PointerButton b, bool down) => _hub.session.button(
+        button: switch (b) {
+          PointerButton.left => Button.left,
+          PointerButton.right => Button.right,
+          PointerButton.middle => Button.middle,
+        },
+        down: down,
+      );
+
+  @override
+  void scroll(double dx, double dy) => _hub.session.scroll(dx: dx, dy: dy);
+
+  @override
+  void keyboard() => _toggleKeyboard();
+
+  @override
+  void feedback(TouchFeedback kind, Offset screen) {
+    switch (kind) {
+      case TouchFeedback.click || TouchFeedback.doubleClick:
+        HapticFeedback.selectionClick();
+      case TouchFeedback.rightClick || TouchFeedback.dragStart:
+        HapticFeedback.mediumImpact();
+      case TouchFeedback.aim:
+        HapticFeedback.lightImpact();
+        return;
+    }
+    final r = _Ripple(screen, secondary: kind == TouchFeedback.rightClick);
+    _ripples.add(r);
+    Timer(const Duration(milliseconds: 400), () {
+      if (mounted) setState(() => _ripples.remove(r));
+    });
   }
 
-  void _click(Button b) {
-    _hub.session.button(button: b, down: true);
-    _hub.session.button(button: b, down: false);
+  /// After every touch: redraw, and come back when the engine has something to do later.
+  void _afterTouch() {
+    _touchTimer?.cancel();
+    final d = _touch.deadline;
+    if (d != null) {
+      final wait = d - _now;
+      _touchTimer = Timer(wait.isNegative ? Duration.zero : wait, () {
+        _touch.tick(_now);
+        _afterTouch();
+      });
+    }
+    if (mounted) setState(() {});
   }
 
   void _onDown(PointerDownEvent e) {
-    _pointers[e.pointer] = e.localPosition;
-    if (_pointers.length == 1) {
-      _downPos = e.localPosition;
-      _downAt = DateTime.now();
-      _moved = false;
-      _longPressed = false;
-      _maxPointers = 1;
-      _twoFinger = null;
-      _longPress?.cancel();
-      _longPress = Timer(const Duration(milliseconds: 450), _onLongPress);
-    } else if (_pointers.length == 2) {
-      _longPress?.cancel();
-      _maxPointers = 2;
-      if (_holding) {
-        _hub.session.button(button: Button.left, down: false);
-        _holding = false;
-      }
-      final pts = _pointers.values.toList();
-      _startDist = math.max((pts[0] - pts[1]).distance, 1);
-      _startCentroid = (pts[0] + pts[1]) / 2;
-      _lastCentroid = _startCentroid;
-      _startZoom = _zoom;
-      _startPan = _pan;
-      _twoFinger = null;
-    } else {
-      _maxPointers = math.max(_maxPointers, _pointers.length);
-    }
+    if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    _touch.down(e.pointer, e.localPosition, _now);
+    _afterTouch();
   }
 
   void _onMove(PointerMoveEvent e) {
-    if (!_pointers.containsKey(e.pointer)) return;
-    _pointers[e.pointer] = e.localPosition;
-    if (_pointers.length == 1 && _maxPointers == 1) {
-      final total = e.localPosition - (_downPos ?? e.localPosition);
-      if (!_moved && total.distance > 8) {
-        _moved = true;
-        _longPress?.cancel();
-        if (_mode == TouchMode.direct && _canInput && !_holding) {
-          _moveTo(_toRemote(_downPos!));
-          _hub.session.button(button: Button.left, down: true);
-          _holding = true;
-        }
-      }
-      if (!_moved || !_canInput) return;
-      if (_mode == TouchMode.touchpad) {
-        final d = _dst;
-        const speed = 1.6;
-        final delta = Offset(e.delta.dx / (d.width * _zoom), e.delta.dy / (d.height * _zoom)) * speed;
-        final next = _cursor + delta;
-        _moveTo(Offset(next.dx.clamp(0.0, 1.0), next.dy.clamp(0.0, 1.0)));
-        _follow();
-      } else {
-        _moveTo(_toRemote(e.localPosition));
-      }
-      setState(() {});
-    } else if (_pointers.length == 2) {
-      final pts = _pointers.values.toList();
-      final dist = math.max((pts[0] - pts[1]).distance, 1.0);
-      final centroid = (pts[0] + pts[1]) / 2;
-      if (_twoFinger == null) {
-        if ((dist / _startDist - 1).abs() > 0.08) {
-          _twoFinger = 'zoom';
-        } else if ((centroid - _startCentroid).distance > 12) {
-          _twoFinger = 'scroll';
-        }
-      }
-      if (_twoFinger == 'zoom') {
-        final z = (_startZoom * dist / _startDist).clamp(1.0, 6.0);
-        // Keep what was under the fingers under them.
-        final content = (_startCentroid - _startPan) / _startZoom;
-        _zoom = z;
-        _pan = centroid - content * z;
-        _clampPan();
-        setState(() {});
-      } else if (_twoFinger == 'scroll' && _canInput) {
-        final d = centroid - _lastCentroid;
-        const pxPerNotch = 36.0;
-        _hub.session.scroll(dx: -d.dx / pxPerNotch, dy: d.dy / pxPerNotch);
-      }
-      _lastCentroid = centroid;
-    }
+    if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    _touch.move(e.pointer, e.localPosition, _now, stamp: e.timeStamp);
+    _afterTouch();
   }
 
-  void _onUp(PointerEvent e) {
-    _pointers.remove(e.pointer);
-    if (_pointers.isNotEmpty) return;
-    _longPress?.cancel();
-    final quick = DateTime.now().difference(_downAt) < const Duration(milliseconds: 350);
-    if (!_canInput) {
-      _holding = false;
-      return;
+  void _onUp(PointerUpEvent e) {
+    if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    _touch.up(e.pointer, e.localPosition, _now);
+    _afterTouch();
+  }
+
+  void _onCancel(PointerCancelEvent e) {
+    if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    _touch.cancel(e.pointer, _now);
+    _afterTouch();
+  }
+
+  void _onHover(PointerHoverEvent e) {
+    if (e.kind == PointerDeviceKind.mouse) _mouse(e);
+  }
+
+  /// A mouse plugged into the phone points straight at the picture, as on a computer.
+  void _mouse(PointerEvent e) {
+    if (!_canInput) return;
+    final remote = _touch.toRemote(e.localPosition);
+    _touch.cursor = remote;
+    pointer(remote);
+    final changed = e.buttons ^ _mouseButtons;
+    for (final (bit, b) in const [
+      (kPrimaryMouseButton, PointerButton.left),
+      (kSecondaryMouseButton, PointerButton.right),
+      (kMiddleMouseButton, PointerButton.middle),
+    ]) {
+      if (changed & bit != 0) button(b, e.buttons & bit != 0);
     }
-    if (_maxPointers == 1) {
-      if (_holding) {
-        _hub.session.button(button: Button.left, down: false);
-        _holding = false;
-      } else if (!_moved && !_longPressed && quick) {
-        if (_mode == TouchMode.direct) _moveTo(_toRemote(_downPos!));
-        _click(Button.left);
-      }
-    } else if (_maxPointers == 2 && _twoFinger == null && quick) {
-      // Two-finger tap: right click.
-      if (_mode == TouchMode.direct) _moveTo(_toRemote(_startCentroid));
-      _click(Button.right);
-    } else if (_maxPointers >= 3 && quick) {
-      // Three-finger tap: the keyboard.
-      _toggleKeyboard();
-    }
+    _mouseButtons = e.buttons;
     setState(() {});
-  }
-
-  void _onLongPress() {
-    if (_pointers.length != 1 || _moved || !_canInput) return;
-    _longPressed = true;
-    HapticFeedback.mediumImpact();
-    if (_mode == TouchMode.touchpad) {
-      // Hold to drag: the button stays down until the finger lifts.
-      _hub.session.button(button: Button.left, down: true);
-      _holding = true;
-    } else {
-      _moveTo(_toRemote(_downPos!));
-      _click(Button.right);
-    }
   }
 
   void _onWheel(PointerSignalEvent e) {
@@ -386,8 +332,10 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
 
   // ---- keyboard ----
 
+  bool get _keyboardOpen => MediaQuery.viewInsetsOf(context).bottom > 0;
+
   void _toggleKeyboard() {
-    if (_kbFocus.hasFocus) {
+    if (_kbFocus.hasFocus && _keyboardOpen) {
       _kbFocus.unfocus();
       _hwFocus.requestFocus();
     } else {
@@ -457,7 +405,11 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     for (final c in codes.reversed) {
       _hub.session.key(code: c, down: false);
     }
+    HapticFeedback.selectionClick();
   }
+
+  /// The key that goes with C, V, Z… for copy, paste, undo: ⌘ on a Mac, Ctrl elsewhere.
+  String get _shortcutKey => _hub.hostOs == 'macos' ? 'MetaLeft' : 'ControlLeft';
 
   KeyEventResult _onHardwareKey(FocusNode _, KeyEvent e) {
     // With the phone keyboard's field focused, typing arrives as text there instead.
@@ -536,11 +488,203 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     _snack(t('Sent to the computer\'s clipboard.', 'Enviado para a área de transferência do computador.'));
   }
 
+  void _applyTurn() {
+    SystemChrome.setPreferredOrientations(switch (_turn) {
+      Turn.auto => [],
+      Turn.landscape => [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+      Turn.portrait => [DeviceOrientation.portraitUp],
+    });
+  }
+
+  String get _turnLabel => switch (_turn) {
+        Turn.auto => t('Rotate: auto', 'Girar: automático'),
+        Turn.landscape => t('Rotate: landscape', 'Girar: deitado'),
+        Turn.portrait => t('Rotate: portrait', 'Girar: em pé'),
+      };
+
+  String get _modeLabel => _touch.mode == TouchMode.touchpad ? t('Touchpad', 'Touchpad') : t('Direct touch', 'Toque direto');
+
+  /// The tools, in a sheet from the floating button.
+  Future<void> _openTools() async {
+    final access = _hub.access;
+    final s = _hub.stats;
+    final theme = Theme.of(context);
+    final tiles = <(String, IconData, String, bool)>[
+      if (_canInput) ('keyboard', Icons.keyboard, t('Keyboard', 'Teclado'), _kbFocus.hasFocus && _keyboardOpen),
+      if (_canInput) ('keys', Icons.keyboard_command_key, t('Keys', 'Teclas'), _keysBar),
+      (
+        'mode',
+        _touch.mode == TouchMode.touchpad ? Icons.mouse_outlined : Icons.touch_app_outlined,
+        _modeLabel,
+        false,
+      ),
+      ('help', Icons.help_outline, t('Gestures', 'Gestos'), false),
+      if (_hub.monitors.length > 1) ('monitor', Icons.monitor, t('Screen', 'Tela'), false),
+      ('quality', Icons.tune, t('Quality', 'Qualidade'), false),
+      (
+        'turn',
+        switch (_turn) {
+          Turn.auto => Icons.screen_rotation,
+          Turn.landscape => Icons.stay_current_landscape,
+          Turn.portrait => Icons.stay_current_portrait,
+        },
+        _turnLabel,
+        false,
+      ),
+      if (_canInput) ('shortcuts', Icons.keyboard_alt_outlined, t('Shortcuts', 'Atalhos'), false),
+      if (_canInput) ('clipboard', Icons.content_paste_go, t('Send clipboard', 'Enviar copiado'), false),
+      if (access?.files ?? false) ('files', Icons.folder_outlined, t('Files', 'Arquivos'), false),
+      if (access?.terminal ?? false) ('terminal', Icons.terminal, t('Terminal', 'Terminal'), false),
+      ('close', Icons.close, t('Disconnect', 'Desconectar'), false),
+    ];
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(_hub.hostname.isEmpty ? widget.target.name : _hub.hostname, style: theme.textTheme.titleMedium),
+            if (s != null)
+              Text(
+                [
+                  '${s.rttMs} ms',
+                  if (s.route.isNotEmpty) s.route,
+                  '${s.fps.round()} ${t('fps', 'qps')}',
+                ].join(' · '),
+                style: theme.textTheme.bodySmall,
+              ),
+            const SizedBox(height: 12),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final (key, icon, label, on) in tiles)
+                _ToolTile(
+                  icon: icon,
+                  label: label,
+                  on: on,
+                  danger: key == 'close',
+                  onTap: () => Navigator.pop(ctx, key),
+                ),
+            ]),
+          ]),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'keyboard':
+        _toggleKeyboard();
+      case 'keys':
+        setState(() => _keysBar = !_keysBar);
+      case 'mode':
+        setState(() {
+          _touch.mode = _touch.mode == TouchMode.touchpad ? TouchMode.direct : TouchMode.touchpad;
+          Prefs.touchMode = _touch.mode;
+        });
+        _snack(_modeLabel);
+      case 'help':
+        showGestureHelp(context, _touch.mode);
+      case 'monitor':
+        _pickMonitor();
+      case 'quality':
+        _pickQuality();
+      case 'turn':
+        setState(() {
+          _turn = Turn.values[(_turn.index + 1) % Turn.values.length];
+          Prefs.turn = _turn;
+        });
+        _applyTurn();
+        _snack(_turnLabel);
+      case 'shortcuts':
+        _pickShortcut();
+      case 'clipboard':
+        _sendClipboard();
+      case 'files':
+        _openPanel(Open.files);
+      case 'terminal':
+        _openPanel(Open.terminal);
+      case 'close':
+        Navigator.of(context).pop();
+    }
+  }
+
+  Future<String?> _choose(String title, List<(String, String, bool)> options) => showDialog<String>(
+        context: context,
+        builder: (ctx) => SimpleDialog(
+          title: Text(title),
+          children: [
+            for (final (value, label, on) in options)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, value),
+                child: Row(children: [
+                  Expanded(child: Text(label)),
+                  if (on) const Icon(Icons.check, size: 18),
+                ]),
+              ),
+          ],
+        ),
+      );
+
+  Future<void> _pickMonitor() async {
+    final id = await _choose(t('Screen', 'Tela'), [
+      for (final m in _hub.monitors)
+        ('${m.id}', '${m.name.isEmpty ? m.id : m.name} · ${m.width}×${m.height}', m.id == _hub.activeMonitor),
+    ]);
+    if (id != null) _hub.session.selectMonitor(id: int.parse(id));
+  }
+
+  Future<void> _pickQuality() async {
+    final v = await _choose(t('Quality', 'Qualidade'), [
+      ('speed', t('Speed (mobile data)', 'Velocidade (dados móveis)'), false),
+      ('auto', t('Balanced', 'Equilibrada'), false),
+      ('quality', t('Quality', 'Qualidade'), false),
+      ('fit', t('Resolution: fit the phone', 'Resolução: caber no celular'), false),
+      ('full', t('Resolution: full', 'Resolução: completa'), false),
+    ]);
+    switch (v) {
+      case 'speed':
+        _hub.session.setQuality(maxFps: 15, jpegQuality: 45);
+      case 'auto':
+        _hub.session.setQuality(maxFps: 30, jpegQuality: 70);
+      case 'quality':
+        _hub.session.setQuality(maxFps: 30, jpegQuality: 90);
+      case 'fit':
+        final size = WidgetsBinding.instance.platformDispatcher.views.first.physicalSize;
+        final long = math.max(size.width, size.height).round();
+        _hub.session.setMaxSize(width: long, height: long);
+      case 'full':
+        _hub.session.setMaxSize(width: 0, height: 0);
+    }
+  }
+
+  Future<void> _pickShortcut() async {
+    final mac = _hub.hostOs == 'macos';
+    final v = await _choose(t('Shortcuts', 'Atalhos'), [
+      if (!mac) ('cad', 'Ctrl+Alt+Del', false),
+      if (!mac) ('taskmgr', 'Ctrl+Shift+Esc', false),
+      ('switch', mac ? '⌘+Tab' : 'Alt+Tab', false),
+      if (mac) ('spotlight', t('⌘+Space (Spotlight)', '⌘+Espaço (Spotlight)'), false) else ('win', 'Win', false),
+      ('esc', 'Esc', false),
+    ]);
+    if (v == null) return;
+    _combo(switch (v) {
+      'cad' => ['ControlLeft', 'AltLeft', 'Delete'],
+      'taskmgr' => ['ControlLeft', 'ShiftLeft', 'Escape'],
+      'switch' => [mac ? 'MetaLeft' : 'AltLeft', 'Tab'],
+      'win' => ['MetaLeft'],
+      'spotlight' => ['MetaLeft', 'Space'],
+      'esc' => ['Escape'],
+      _ => <String>[],
+    });
+  }
+
   // ---- build ----
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    _touch.input = _canInput;
+    final keysBar = _canInput && (_keysBar || _keyboardOpen);
     return Focus(
       focusNode: _hwFocus,
       autofocus: true,
@@ -550,83 +694,133 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
         resizeToAvoidBottomInset: true,
         body: SafeArea(
           child: Column(children: [
-            if (_toolbar) _buildToolbar(theme),
             Expanded(
-              child: Stack(children: [
-                Positioned.fill(
-                  child: LayoutBuilder(builder: (ctx, c) {
-                    _view = Size(c.maxWidth, c.maxHeight);
-                    return Listener(
+              child: LayoutBuilder(builder: (ctx, c) {
+                final size = Size(c.maxWidth, c.maxHeight);
+                _touch.layout(size, _fit(size));
+                // Touchpad: the phone moves the pointer, so it always shows it. Direct touch
+                // (or a mouse): where the computer says its pointer is.
+                final showCursor =
+                    _image != null && (_touch.mode == TouchMode.touchpad || (_hub.cursorSupported && _cursorVisible));
+                return Stack(children: [
+                  Positioned.fill(
+                    child: Listener(
                       behavior: HitTestBehavior.opaque,
                       onPointerDown: _onDown,
                       onPointerMove: _onMove,
                       onPointerUp: _onUp,
-                      onPointerCancel: _onUp,
+                      onPointerCancel: _onCancel,
+                      onPointerHover: _onHover,
                       onPointerSignal: _onWheel,
                       child: CustomPaint(
                         painter: _ScreenPainter(
                           image: _image,
-                          dst: _dst,
-                          zoom: _zoom,
-                          pan: _pan,
-                          // Touchpad: the phone moves the pointer, so it always shows it. Direct
-                          // touch: only where the computer says its pointer is.
-                          cursor: _mode == TouchMode.touchpad || (_hub.cursorSupported && _cursorVisible) ? _cursor : null,
+                          shown: _touch.shown,
+                          cursor: showCursor ? _touch.toScreen(_touch.cursor) : null,
+                          loupe: _image == null ? null : _touch.loupe,
                         ),
                       ),
-                    );
-                  }),
-                ),
-                // The hidden field that brings up the phone keyboard.
-                Positioned(
-                  left: 0,
-                  bottom: 0,
-                  width: 1,
-                  height: 1,
-                  child: Opacity(
-                    opacity: 0,
-                    child: TextField(
-                      controller: _kb,
-                      focusNode: _kbFocus,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      keyboardType: TextInputType.text,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) {
-                        if (_canInput) _tapKey('Enter');
-                        _kbFocus.requestFocus();
-                      },
-                      onEditingComplete: () {},
                     ),
                   ),
-                ),
-                if (!_toolbar)
+                  // The hidden field that brings up the phone keyboard.
                   Positioned(
-                    top: 0,
                     left: 0,
-                    right: 0,
-                    child: Center(
-                      child: GestureDetector(
-                        onTap: () => setState(() => _toolbar = true),
-                        child: Container(
-                          margin: const EdgeInsets.only(top: 2),
-                          width: 64,
-                          height: 18,
-                          decoration: BoxDecoration(
-                            color: Colors.white24,
-                            borderRadius: BorderRadius.circular(9),
-                          ),
-                          child: const Icon(Icons.keyboard_arrow_down, size: 16, color: Colors.white70),
-                        ),
+                    bottom: 0,
+                    width: 1,
+                    height: 1,
+                    child: Opacity(
+                      opacity: 0,
+                      child: TextField(
+                        controller: _kb,
+                        focusNode: _kbFocus,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.text,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) {
+                          if (_canInput) _tapKey('Enter');
+                          _kbFocus.requestFocus();
+                        },
+                        onEditingComplete: () {},
                       ),
                     ),
                   ),
-                if (!_hub.video) _overlay(theme, _pictureOff(theme)),
-                if (_hub.video && (!_hub.connected || _image == null)) _overlay(theme, _statusCard(theme)),
-              ]),
+                  for (final r in _ripples)
+                    Positioned(
+                      key: r.key,
+                      left: r.at.dx - 24,
+                      top: r.at.dy - 24,
+                      width: 48,
+                      height: 48,
+                      child: IgnorePointer(child: _RippleRing(secondary: r.secondary)),
+                    ),
+                  if (!_hub.video) _overlay(theme, _pictureOff(theme)),
+                  if (_hub.video && (!_hub.connected || _image == null)) _overlay(theme, _statusCard(theme)),
+                  _toolsButton(size),
+                ]);
+              }),
             ),
-            if (_keysBar && _canInput) _buildKeysBar(theme),
+            if (keysBar) _buildKeysBar(theme),
           ]),
+        ),
+      ),
+    );
+  }
+
+  /// The floating button for the tools: drag it anywhere, it rests against a side.
+  Widget _toolsButton(Size area) {
+    const d = 48.0, margin = 6.0;
+    final room = math.max(area.height - d, 0.0);
+    final at = _toolsDrag ?? Offset(_toolsLeft ? margin : area.width - d - margin, _toolsY * room);
+    final rtt = _hub.stats?.rttMs;
+    final dot = !_hub.connected
+        ? Colors.redAccent
+        : rtt == null
+            ? Colors.white54
+            : rtt < 80
+                ? Colors.greenAccent
+                : rtt < 200
+                    ? Colors.amberAccent
+                    : Colors.redAccent;
+    return Positioned(
+      left: at.dx,
+      top: at.dy,
+      child: GestureDetector(
+        onTap: _openTools,
+        onPanStart: (_) => setState(() => _toolsDrag = at),
+        onPanUpdate: (u) => setState(() {
+          final p = (_toolsDrag ?? at) + u.delta;
+          _toolsDrag = Offset(p.dx.clamp(0.0, math.max(area.width - d, 0.0)), p.dy.clamp(0.0, room));
+        }),
+        onPanEnd: (_) {
+          final p = _toolsDrag ?? at;
+          setState(() {
+            _toolsLeft = p.dx + d / 2 < area.width / 2;
+            _toolsY = room > 0 ? p.dy / room : 0;
+            _toolsDrag = null;
+          });
+          Prefs.setToolsAt(left: _toolsLeft, y: _toolsY);
+        },
+        child: Semantics(
+          button: true,
+          label: t('Tools', 'Ferramentas'),
+          child: Container(
+            width: d,
+            height: d,
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white38),
+            ),
+            child: Stack(alignment: Alignment.center, children: [
+              const Icon(Icons.apps, color: Colors.white),
+              Positioned(
+                right: 9,
+                top: 9,
+                child: Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+              ),
+            ]),
+          ),
         ),
       ),
     );
@@ -672,124 +866,9 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildToolbar(ThemeData theme) {
-    final s = _hub.stats;
-    final access = _hub.access;
-    return Material(
-      color: const Color(0xFF1D2128),
-      child: SizedBox(
-        height: 48,
-        child: Row(children: [
-          IconButton(
-            tooltip: t('Disconnect', 'Desconectar'),
-            icon: const Icon(Icons.close, color: Colors.white),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(children: [
-                _tool(Icons.keyboard, t('Keyboard', 'Teclado'), _canInput ? _toggleKeyboard : null, on: _kbFocus.hasFocus),
-                _tool(Icons.keyboard_command_key, t('Keys', 'Teclas'), _canInput ? () => setState(() => _keysBar = !_keysBar) : null,
-                    on: _keysBar),
-                _tool(
-                  _mode == TouchMode.touchpad ? Icons.touch_app_outlined : Icons.pan_tool_alt_outlined,
-                  _mode == TouchMode.touchpad ? t('Touchpad', 'Touchpad') : t('Direct touch', 'Toque direto'),
-                  () => setState(() => _mode = _mode == TouchMode.touchpad ? TouchMode.direct : TouchMode.touchpad),
-                ),
-                if (_hub.monitors.length > 1)
-                  PopupMenuButton<int>(
-                    tooltip: t('Monitor', 'Tela'),
-                    icon: const Icon(Icons.monitor, color: Colors.white),
-                    onSelected: (id) => _hub.session.selectMonitor(id: id),
-                    itemBuilder: (_) => [
-                      for (final m in _hub.monitors)
-                        CheckedPopupMenuItem(
-                          value: m.id,
-                          checked: m.id == _hub.activeMonitor,
-                          child: Text('${m.name.isEmpty ? m.id : m.name} · ${m.width}×${m.height}'),
-                        ),
-                    ],
-                  ),
-                PopupMenuButton<String>(
-                  tooltip: t('Quality', 'Qualidade'),
-                  icon: const Icon(Icons.tune, color: Colors.white),
-                  onSelected: _quality,
-                  itemBuilder: (_) => [
-                    PopupMenuItem(value: 'speed', child: Text(t('Speed (mobile data)', 'Velocidade (dados móveis)'))),
-                    PopupMenuItem(value: 'auto', child: Text(t('Balanced', 'Equilibrada'))),
-                    PopupMenuItem(value: 'quality', child: Text(t('Quality', 'Qualidade'))),
-                    const PopupMenuDivider(),
-                    PopupMenuItem(value: 'fit', child: Text(t('Resolution: fit the phone', 'Resolução: caber no celular'))),
-                    PopupMenuItem(value: 'full', child: Text(t('Resolution: full', 'Resolução: completa'))),
-                  ],
-                ),
-                if (_canInput) _tool(Icons.content_paste_go, t('Send the clipboard', 'Enviar a área de transferência'), _sendClipboard),
-                if (access?.files ?? false) _tool(Icons.folder_outlined, t('Files', 'Arquivos'), () => _openPanel(Open.files)),
-                if (access?.terminal ?? false) _tool(Icons.terminal, t('Terminal', 'Terminal'), () => _openPanel(Open.terminal)),
-                if (_canInput)
-                  PopupMenuButton<String>(
-                    tooltip: t('Shortcuts', 'Atalhos'),
-                    icon: const Icon(Icons.more_horiz, color: Colors.white),
-                    onSelected: (v) => _combo(switch (v) {
-                      'cad' => ['ControlLeft', 'AltLeft', 'Delete'],
-                      'alttab' => ['AltLeft', 'Tab'],
-                      'win' => ['MetaLeft'],
-                      'esc' => ['Escape'],
-                      'taskmgr' => ['ControlLeft', 'ShiftLeft', 'Escape'],
-                      _ => <String>[],
-                    }),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'cad', child: Text('Ctrl+Alt+Del')),
-                      PopupMenuItem(value: 'alttab', child: Text('Alt+Tab')),
-                      PopupMenuItem(value: 'win', child: Text('Win / ⌘')),
-                      PopupMenuItem(value: 'taskmgr', child: Text('Ctrl+Shift+Esc')),
-                      PopupMenuItem(value: 'esc', child: Text('Esc')),
-                    ],
-                  ),
-              ]),
-            ),
-          ),
-          if (s != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text('${s.rttMs} ms\n${s.route}', textAlign: TextAlign.right, style: const TextStyle(color: Colors.white60, fontSize: 10)),
-            ),
-          IconButton(
-            tooltip: t('Hide', 'Esconder'),
-            icon: const Icon(Icons.keyboard_arrow_up, color: Colors.white),
-            onPressed: () => setState(() => _toolbar = false),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  void _quality(String v) {
-    switch (v) {
-      case 'speed':
-        _hub.session.setQuality(maxFps: 15, jpegQuality: 45);
-      case 'auto':
-        _hub.session.setQuality(maxFps: 30, jpegQuality: 70);
-      case 'quality':
-        _hub.session.setQuality(maxFps: 30, jpegQuality: 90);
-      case 'fit':
-        final v = WidgetsBinding.instance.platformDispatcher.views.first.physicalSize;
-        final long = math.max(v.width, v.height).round();
-        _hub.session.setMaxSize(width: long, height: long);
-      case 'full':
-        _hub.session.setMaxSize(width: 0, height: 0);
-    }
-  }
-
-  Widget _tool(IconData icon, String tip, VoidCallback? onTap, {bool on = false}) => IconButton(
-        tooltip: tip,
-        isSelected: on,
-        icon: Icon(icon, color: onTap == null ? Colors.white24 : (on ? Colors.lightBlueAccent : Colors.white)),
-        onPressed: onTap,
-      );
-
+  /// Keys the phone keyboard lacks: shown above it whenever it is open, or on request.
   Widget _buildKeysBar(ThemeData theme) {
+    final mac = _hub.hostOs == 'macos';
     Widget mod(String code, String label) {
       final on = _latched.contains(code);
       return Padding(
@@ -797,6 +876,7 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
         child: FilterChip(
           label: Text(label),
           selected: on,
+          showCheckmark: false,
           onSelected: (v) => setState(() => v ? _latched.add(code) : _latched.remove(code)),
         ),
       );
@@ -807,21 +887,50 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
           child: ActionChip(label: Text(label), onPressed: () => _tapKey(code)),
         );
 
+    Widget shortcut(String code, IconData icon, String label) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: ActionChip(
+            avatar: Icon(icon, size: 18),
+            label: Text(label),
+            onPressed: () => _combo([_shortcutKey, code]),
+          ),
+        );
+
+    final gap = Container(width: 1, height: 24, margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 8), color: Colors.white24);
     return Material(
       color: const Color(0xFF1D2128),
       child: SizedBox(
         height: 52,
         child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6), children: [
+          if (_keyboardOpen)
+            IconButton(
+              tooltip: t('Hide the keyboard', 'Esconder o teclado'),
+              icon: const Icon(Icons.keyboard_hide, color: Colors.white),
+              onPressed: _toggleKeyboard,
+            )
+          else
+            IconButton(
+              tooltip: t('Show the keyboard', 'Mostrar o teclado'),
+              icon: const Icon(Icons.keyboard, color: Colors.white),
+              onPressed: _toggleKeyboard,
+            ),
           mod('ControlLeft', 'Ctrl'),
-          mod('AltLeft', 'Alt'),
+          mod('AltLeft', mac ? '⌥' : 'Alt'),
           mod('ShiftLeft', 'Shift'),
-          mod('MetaLeft', 'Win/⌘'),
+          mod('MetaLeft', mac ? '⌘' : 'Win'),
           key('Escape', 'Esc'),
           key('Tab', 'Tab'),
           key('ArrowLeft', '←'),
           key('ArrowUp', '↑'),
           key('ArrowDown', '↓'),
           key('ArrowRight', '→'),
+          gap,
+          shortcut('KeyC', Icons.copy, t('Copy', 'Copiar')),
+          shortcut('KeyV', Icons.paste, t('Paste', 'Colar')),
+          shortcut('KeyX', Icons.content_cut, t('Cut', 'Recortar')),
+          shortcut('KeyZ', Icons.undo, t('Undo', 'Desfazer')),
+          shortcut('KeyA', Icons.select_all, t('All', 'Tudo')),
+          gap,
           key('Home', 'Home'),
           key('End', 'End'),
           key('PageUp', 'PgUp'),
@@ -836,50 +945,151 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver {
   }
 }
 
+/// One tool in the tools sheet.
+class _ToolTile extends StatelessWidget {
+  const _ToolTile({required this.icon, required this.label, required this.onTap, this.on = false, this.danger = false});
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool on;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = danger ? scheme.error : (on ? scheme.primary : scheme.onSurface);
+    return SizedBox(
+      width: 84,
+      child: Material(
+        color: on ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+            child: Column(children: [
+              Icon(icon, color: color),
+              const SizedBox(height: 6),
+              Text(label, textAlign: TextAlign.center, maxLines: 2, style: TextStyle(fontSize: 12, color: color)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A ring that grows and fades where a click happened (orange for the right button).
+class _RippleRing extends StatelessWidget {
+  const _RippleRing({required this.secondary});
+  final bool secondary;
+
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 350),
+        builder: (_, v, _) => Opacity(
+          opacity: (1 - v) * 0.9,
+          child: Transform.scale(
+            scale: 0.35 + 0.65 * v,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: secondary ? Colors.orangeAccent : Colors.white, width: 3),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
 class _ScreenPainter extends CustomPainter {
-  _ScreenPainter({required this.image, required this.dst, required this.zoom, required this.pan, required this.cursor});
+  _ScreenPainter({required this.image, required this.shown, required this.cursor, required this.loupe});
 
   final ui.Image? image;
-  final Rect dst;
-  final double zoom;
-  final Offset pan;
+
+  /// Where the picture is drawn (zoom and pan applied).
+  final Rect shown;
+
+  /// The pointer, on screen.
   final Offset? cursor;
+
+  /// The magnifier's target, on screen.
+  final Offset? loupe;
+
+  static const _loupeRadius = 60.0, _loupeZoom = 2.5, _loupeLift = 110.0;
 
   @override
   void paint(Canvas canvas, Size size) {
     final img = image;
     if (img == null) return;
-    canvas.save();
-    canvas.translate(pan.dx, pan.dy);
-    canvas.scale(zoom);
     final src = Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble());
-    canvas.drawImageRect(img, src, dst, Paint()..filterQuality = FilterQuality.medium);
-    canvas.restore();
+    final paint = Paint()..filterQuality = FilterQuality.medium;
+    canvas.drawImageRect(img, src, shown, paint);
     final c = cursor;
-    if (c != null) {
-      final p = Offset(dst.left + c.dx * dst.width, dst.top + c.dy * dst.height) * zoom + pan;
-      // An arrow pointer: white with a dark outline, so it shows on any background.
-      final path = Path()
-        ..moveTo(p.dx, p.dy)
-        ..lineTo(p.dx, p.dy + 18)
-        ..lineTo(p.dx + 4.5, p.dy + 13.5)
-        ..lineTo(p.dx + 8, p.dy + 20.5)
-        ..lineTo(p.dx + 10.5, p.dy + 19.5)
-        ..lineTo(p.dx + 7, p.dy + 12.5)
-        ..lineTo(p.dx + 13, p.dy + 12.5)
-        ..close();
-      canvas.drawPath(path, Paint()..color = Colors.white);
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = Colors.black
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2,
-      );
-    }
+    if (c != null) _arrow(canvas, c);
+    final target = loupe;
+    if (target != null) _magnifier(canvas, size, img, src, paint, target);
+  }
+
+  /// An arrow pointer: white with a dark outline, so it shows on any background.
+  void _arrow(Canvas canvas, Offset p) {
+    final path = Path()
+      ..moveTo(p.dx, p.dy)
+      ..lineTo(p.dx, p.dy + 18)
+      ..lineTo(p.dx + 4.5, p.dy + 13.5)
+      ..lineTo(p.dx + 8, p.dy + 20.5)
+      ..lineTo(p.dx + 10.5, p.dy + 19.5)
+      ..lineTo(p.dx + 7, p.dy + 12.5)
+      ..lineTo(p.dx + 13, p.dy + 12.5)
+      ..close();
+    canvas.drawPath(path, Paint()..color = Colors.white);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+  }
+
+  /// A round magnifier above the finger (below it near the top), centered on what the
+  /// finger points at, with a cross on the exact spot.
+  void _magnifier(Canvas canvas, Size size, ui.Image img, Rect src, Paint paint, Offset target) {
+    const r = _loupeRadius;
+    var center = target - const Offset(0, _loupeLift);
+    if (center.dy < r + 8) center = target + const Offset(0, _loupeLift);
+    center = Offset(center.dx.clamp(r + 4, math.max(size.width - r - 4, r + 4)), center.dy);
+    Rect around(Rect a) => Rect.fromLTRB(
+          (a.left - target.dx) * _loupeZoom + center.dx,
+          (a.top - target.dy) * _loupeZoom + center.dy,
+          (a.right - target.dx) * _loupeZoom + center.dx,
+          (a.bottom - target.dy) * _loupeZoom + center.dy,
+        );
+    final circle = Path()..addOval(Rect.fromCircle(center: center, radius: r));
+    canvas.drawShadow(circle, Colors.black, 6, false);
+    canvas.save();
+    canvas.clipPath(circle);
+    canvas.drawColor(Colors.black, BlendMode.src);
+    canvas.drawImageRect(img, src, around(shown), paint);
+    final cross = Paint()
+      ..color = Colors.redAccent
+      ..strokeWidth = 1.5;
+    canvas.drawLine(center - const Offset(10, 0), center + const Offset(10, 0), cross);
+    canvas.drawLine(center - const Offset(0, 10), center + const Offset(0, 10), cross);
+    canvas.restore();
+    canvas.drawCircle(
+      center,
+      r,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..color = Colors.white,
+    );
   }
 
   @override
   bool shouldRepaint(_ScreenPainter old) =>
-      old.image != image || old.dst != dst || old.zoom != zoom || old.pan != pan || old.cursor != cursor;
+      old.image != image || old.shown != shown || old.cursor != cursor || old.loupe != loupe;
 }

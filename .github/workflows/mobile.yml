@@ -37,11 +37,13 @@ jobs:
           key: android
           # Cargokit builds the Rust side into Flutter's build folder, not target/.
           workspaces: ". -> mobile/build/rust_lib_rdesk/build"
-      - name: Analyze
+      # The tests are plain Dart (the touch gestures): no device, no Rust.
+      - name: Analyze and test
         working-directory: mobile
         run: |
           flutter pub get
-          flutter analyze lib
+          flutter analyze lib test
+          flutter test
       # A debug build would compile the Rust side for arm64, x86 and x64 (cargokit always
       # adds the emulators' to debug builds); a release build for one processor is one.
       - name: Build the APK (arm64)

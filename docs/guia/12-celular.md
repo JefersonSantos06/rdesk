@@ -32,35 +32,65 @@ Com um Apple ID gratuito, a instalação vale **7 dias**: reinstale do mesmo jei
 
 Toque num computador para conectar. Tocar e segurar mostra as opções: **Arquivos**, **Terminal** e copiar o ID.
 
-Na tela do computador, no **modo touchpad** (o padrão):
+Na primeira vez, o app mostra os gestos. Eles também ficam no botão flutuante (**Gestos**) e em *Configurações → Controle remoto*.
+
+### Modo touchpad (o padrão)
+
+A tela funciona como o touchpad de um notebook:
 
 | Gesto | O que faz |
 |---|---|
-| Arrastar um dedo | move o ponteiro |
+| Deslizar um dedo | move o ponteiro: devagar é preciso, rápido vai longe |
 | Tocar | clique |
-| Tocar e segurar, e arrastar | arrastar (segura o botão) |
+| Dois toques | clique duplo |
+| Tocar, tocar de novo e deslizar | arrastar (selecionar texto, mover janelas) |
+| Tocar e segurar | botão direito |
+| Deslizar dois dedos | rolar (um movimento rápido continua rolando) |
+
+### Modo toque direto
+
+Você toca na tela do computador onde quer, como numa tela sensível ao toque:
+
+| Gesto | O que faz |
+|---|---|
+| Tocar | clique ali mesmo |
+| Deslizar um dedo | rolar |
+| Tocar e segurar | uma lupa acima do dedo mostra o ponto exato |
+| …e deslizar | arrastar |
+| …ou soltar | botão direito |
+| Deslizar dois dedos | mover a vista ampliada |
+
+### Nos dois modos
+
+| Gesto | O que faz |
+|---|---|
+| Pinça | aumentar e diminuir |
 | Tocar com dois dedos | botão direito |
-| Arrastar com dois dedos | rolar |
-| Pinça | zoom (o ponteiro puxa a tela) |
+| Dois toques com dois dedos | ampliar ali, ou voltar |
 | Tocar com três dedos | abrir ou fechar o teclado |
 
-No **modo toque direto** (botão da mão na barra), você toca onde quer clicar. Tocar e segurar é o botão direito.
+Um mouse ligado no celular (Bluetooth ou USB-C) funciona como no computador.
 
-A barra de cima (o ✕ desconecta):
+### O botão flutuante
 
-- **teclado**;
-- **teclas**: Ctrl, Alt, Shift e Win ficam presos até a próxima tecla, então Ctrl + C no teclado do celular vira Ctrl+C no computador; também Esc, Tab, setas e F1–F12;
-- **modo de toque**;
-- **tela** (com vários monitores);
-- **qualidade**: *Velocidade* para dados móveis; *Resolução: completa* para ver a imagem sem redução;
-- **enviar a área de transferência**;
-- **arquivos**;
-- **terminal**;
-- **atalhos** (Ctrl+Alt+Del, Alt+Tab).
+O botão redondo no canto abre as ferramentas. Arraste-o para onde atrapalhar menos. A bolinha mostra a conexão: verde, boa; amarela, lenta; vermelha, caída.
 
-Para esconder a barra, use a seta à direita; uma alça no topo traz a barra de volta.
+- **Teclado** e **Teclas**: a barra de teclas aparece sozinha sobre o teclado do celular.
+  - Ctrl, Alt, Shift e Win ficam presos até a próxima tecla, então Ctrl + C no teclado do celular vira Ctrl+C no computador.
+  - Também tem Esc, Tab, setas, **Copiar**, **Colar**, **Recortar**, **Desfazer** e **Tudo** (com ⌘ num Mac), Home/End, PgUp/PgDn, Del e F1–F12.
+- **Touchpad** ou **Toque direto**: troca o modo. O app lembra a escolha.
+- **Gestos**: as tabelas acima.
+- **Tela** (com vários monitores).
+- **Qualidade**: *Velocidade* para dados móveis; *Resolução: completa* para ver a imagem sem redução.
+- **Girar**: automático, deitado ou em pé. Deitado, a tela do computador fica maior.
+- **Atalhos**: Ctrl+Alt+Del, Ctrl+Shift+Esc, Alt+Tab e a tecla Windows (num Mac, ⌘+Tab e ⌘+Espaço).
+- **Enviar copiado**: manda o texto copiado no celular para o computador.
+- **Arquivos** e **Terminal**.
+- **Desconectar**.
 
-O que o computador copia vai para a área de transferência do celular. Para mandar o texto do celular, use o botão da barra.
+Em *Configurações → Controle remoto* ficam o modo de toque padrão e a velocidade do ponteiro.
+
+O que o computador copia vai para a área de transferência do celular.
 
 ## Computadores com cadeado extra
 

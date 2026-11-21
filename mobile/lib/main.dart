@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'src/computers_page.dart';
 import 'src/i18n.dart';
+import 'src/prefs.dart';
 import 'src/rust/api/app.dart' as api;
 import 'src/rust/frb_generated.dart';
 import 'src/sign_in_page.dart';
@@ -15,6 +16,7 @@ Future<void> main() async {
   await RustLib.init();
   final dir = await getApplicationSupportDirectory();
   await api.start(dataDir: dir.path, deviceName: await _deviceName(), portuguese: pt);
+  await Prefs.load();
   final signedIn = await api.account() != null;
   final localOnly = !signedIn && await api.localOnly();
   runApp(RdeskApp(home: signedIn || localOnly ? ComputersPage(localOnly: localOnly) : const SignInPage()));

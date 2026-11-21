@@ -16,19 +16,28 @@ O app do celular **acessa** computadores. O celular não pode ser acessado: no i
   - os salvos no celular para a rede local ou o Tailscale (sem servidor).
 - **Sessão**:
   - **Imagem**: o host reduz a imagem para o tamanho da tela do celular, o que economiza dados móveis. Em *Qualidade → Resolução: completa* você pede a imagem inteira.
-  - **Toque, modo touchpad** (o padrão):
-    - arrastar move o ponteiro;
-    - tocar clica;
-    - tocar e segurar arrasta (o botão fica pressionado até soltar);
-    - dois dedos tocam o botão direito;
-    - dois dedos arrastando rolam a tela;
-    - pinça dá zoom;
-    - três dedos abrem o teclado.
-  - **Toque, modo toque direto**: toca e arrasta onde o dedo está; tocar e segurar é o botão direito.
+  - **Toque, modo touchpad** (o padrão), como o touchpad de um notebook:
+    - deslizar move o ponteiro, com aceleração (devagar é preciso, rápido vai longe);
+    - tocar clica; dois toques são um clique duplo;
+    - tocar, tocar de novo e deslizar arrasta;
+    - tocar e segurar é o botão direito;
+    - dois dedos deslizando rolam, com inércia.
+  - **Toque, modo toque direto**, como uma tela sensível ao toque:
+    - tocar clica ali;
+    - deslizar um dedo rola;
+    - tocar e segurar mostra uma lupa; deslizar em seguida arrasta, soltar é o botão direito;
+    - dois dedos movem a vista ampliada.
+  - **Nos dois modos**: pinça dá zoom; dois dedos tocando são o botão direito; dois toques com dois dedos ampliam ali ou voltam; três dedos abrem o teclado.
+  - Os gestos ficam em `lib/src/touch.dart`, sem interface e com testes (`flutter test`).
+  - **Mouse**: um mouse ligado no celular aponta direto, como no computador.
+  - **Ferramentas**: um botão flutuante, que se arrasta para qualquer lado, abre a folha de ferramentas (teclado, teclas, modo, gestos, tela, qualidade, girar, atalhos, área de transferência, arquivos, terminal, desconectar).
   - **Ponteiro**: o celular desenha o ponteiro do computador, cuja posição o host informa.
-  - **Teclado**: o teclado do celular (acentos inclusive), e uma barra com Ctrl/Alt/Shift/Win fixáveis, Esc, Tab, setas, Home/End, PgUp/PgDn, Del e F1–F12. Ctrl+Alt+Del, Alt+Tab e Ctrl+Shift+Esc ficam no menu.
+  - **Teclado**: o teclado do celular (acentos inclusive). Sobre ele aparece uma barra com:
+    - Ctrl/Alt/Shift/Win fixáveis, Esc, Tab e setas;
+    - copiar, colar, recortar, desfazer e selecionar tudo (com ⌘ quando o computador é um Mac);
+    - Home/End, PgUp/PgDn, Del e F1–F12.
   - **Teclado físico**: um teclado Bluetooth ou USB-C também funciona.
-  - **Área de transferência**: o que o computador copia vai para o celular; o botão da barra envia a do celular ao computador.
+  - **Área de transferência**: o que o computador copia vai para o celular; a ferramenta *Enviar copiado* manda a do celular ao computador.
   - **Arquivos**: navegar, baixar (depois compartilhar ou abrir no celular) e enviar.
   - **Terminal**: abas de terminal, com uma barra de teclas.
   - **Reconexão**: ao voltar para o app, a sessão reconecta na hora com o token de retomada, sem pedir senha de novo.

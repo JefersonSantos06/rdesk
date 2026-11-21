@@ -2,10 +2,13 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
 import 'device_key.dart';
+import 'help.dart';
 import 'i18n.dart';
+import 'prefs.dart';
 import 'rust/api/app.dart' as api;
 import 'rust/api/device_key.dart' as dk;
 import 'sign_in_page.dart';
+import 'touch.dart';
 
 /// The account, this phone's key, and about.
 class SettingsPage extends StatefulWidget {
@@ -110,6 +113,34 @@ class _SettingsPageState extends State<SettingsPage> {
             onTap: () => Navigator.of(context)
                 .pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SignInPage()), (_) => false),
           ),
+        _Section(t('Remote control', 'Controle remoto')),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: SegmentedButton<TouchMode>(
+            segments: [
+              ButtonSegment(value: TouchMode.touchpad, icon: const Icon(Icons.mouse_outlined), label: Text(t('Touchpad', 'Touchpad'))),
+              ButtonSegment(value: TouchMode.direct, icon: const Icon(Icons.touch_app_outlined), label: Text(t('Direct touch', 'Toque direto'))),
+            ],
+            selected: {Prefs.touchMode},
+            onSelectionChanged: (s) => setState(() => Prefs.touchMode = s.first),
+          ),
+        ),
+        ListTile(
+          title: Text(t('Pointer speed (touchpad)', 'Velocidade do ponteiro (touchpad)')),
+          subtitle: Slider(
+            value: Prefs.sensitivity,
+            min: 0.5,
+            max: 2,
+            divisions: 6,
+            label: '${Prefs.sensitivity.toStringAsFixed(2)}×',
+            onChanged: (v) => setState(() => Prefs.sensitivity = v),
+          ),
+        ),
+        ListTile(
+          leading: const Icon(Icons.help_outline),
+          title: Text(t('Gestures', 'Gestos')),
+          onTap: () => showGestureHelp(context, Prefs.touchMode),
+        ),
         _Section(t('This phone\'s key', 'Chave deste celular')),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),

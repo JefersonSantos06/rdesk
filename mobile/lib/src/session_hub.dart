@@ -26,6 +26,9 @@ class SessionHub extends ChangeNotifier {
   bool connected = false;
   String? fatal;
   String hostname = '';
+
+  /// The computer's system: "windows", "macos", "linux" (empty with an older app core).
+  String hostOs = '';
   Access? access;
   List<Monitor> monitors = [];
   int activeMonitor = 0;
@@ -53,6 +56,7 @@ class SessionHub extends ChangeNotifier {
         if (e.ok) fatal = null;
       case EventKind.connected:
         hostname = e.text;
+        hostOs = e.detail;
         if (e.monitors.isNotEmpty) {
           monitors = e.monitors;
           activeMonitor = e.activeMonitor;

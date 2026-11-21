@@ -452,6 +452,8 @@ fn forward(shared: &Arc<Shared>, sink: &Arc<StreamSink<SessionEvent>>, e: UiEven
         UiEvent::Connected(info) => SessionEvent {
             kind: EventKind::Connected,
             text: info.hostname,
+            // The computer's system ("windows", "macos", "linux"): shortcuts use ⌘ on a Mac.
+            detail: info.os,
             monitors: info.monitors.iter().map(monitor).collect(),
             active_monitor: info.active_monitor,
             ..Default::default()
