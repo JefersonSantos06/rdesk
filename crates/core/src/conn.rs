@@ -472,6 +472,8 @@ async fn reconnect_loop(
     let mut monitor = opts.monitor;
     let mut video = opts.video;
     let mut ext = opts.extensions.clone();
+    // Frames per second and JPEG quality chosen in the app (until then, the host's own).
+    let mut quality: Option<(u8, u8)> = None;
     let mut failures = 0u32;
     let mut password_hint: Option<String> = None;
     loop {
@@ -485,6 +487,7 @@ async fn reconnect_loop(
             &mut monitor,
             &mut video,
             &mut ext,
+            &mut quality,
             &mut password_hint,
             &mut cmd_rx,
             &view,
@@ -501,6 +504,7 @@ async fn reconnect_loop(
                         None | Some(Cmd::Quit) => return,
                         Some(Cmd::Reconnect) => break,
                         Some(Cmd::ShowScreen) => video = true,
+                        Some(Cmd::SetQuality { max_fps, jpeg_quality }) => quality = Some((max_fps, jpeg_quality)),
                         Some(c) => ext.remember(&c),
                     }
                 }
@@ -535,6 +539,9 @@ async fn reconnect_loop(
                             None | Some(Cmd::Quit) => return,
                             Some(Cmd::Reconnect) => break,
                             Some(Cmd::ShowScreen) => video = true,
+                            Some(Cmd::SetQuality { max_fps, jpeg_quality }) => {
+                                quality = Some((max_fps, jpeg_quality));
+                            }
                             Some(c) => ext.remember(&c),
                         }
                     }
@@ -691,6 +698,7 @@ async fn once(
     monitor: &mut Option<u32>,
     video: &mut bool,
     ext: &mut Extensions,
+    quality: &mut Option<(u8, u8)>,
     password_hint: &mut Option<String>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
@@ -819,7 +827,22 @@ async fn once(
 
     // The clipboard goes both ways: only with full control.
     let clipboard = opts.clipboard && access.input;
-    match run_session(&conn, ctrl_w, ctrl_r, monitor, video, ext, cmd_rx, view, notify, clipboard, access.input).await {
+    match run_session(
+        &conn,
+        ctrl_w,
+        ctrl_r,
+        monitor,
+        video,
+        ext,
+        quality,
+        cmd_rx,
+        view,
+        notify,
+        clipboard,
+        access.input,
+    )
+    .await
+    {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -854,6 +877,7 @@ async fn run_session(
     monitor: &mut Option<u32>,
     video: &mut bool,
     ext: &mut Extensions,
+    quality: &mut Option<(u8, u8)>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
     view: &SharedView,
     notify: &Notify,
@@ -867,6 +891,10 @@ async fn run_session(
 
     if let Some(m) = *monitor {
         write_msg(&mut ctrl_w, &ClientMsg::SelectMonitor { id: m }).await?;
+    }
+    // A reconnect starts with the host's own settings: keep what was chosen in the app.
+    if let Some((max_fps, jpeg_quality)) = *quality {
+        write_msg(&mut ctrl_w, &ClientMsg::SetQuality { max_fps, jpeg_quality }).await?;
     }
 
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<ClientMsg>();
@@ -1080,6 +1108,7 @@ async fn run_session(
                     }
                     Cmd::FullFrame => { let _ = ctrl_tx.send(ClientMsg::RequestFullFrame); }
                     Cmd::SetQuality { max_fps, jpeg_quality } => {
+                        *quality = Some((max_fps, jpeg_quality));
                         let _ = ctrl_tx.send(ClientMsg::SetQuality { max_fps, jpeg_quality });
                     }
                     Cmd::ListDir(path) => {

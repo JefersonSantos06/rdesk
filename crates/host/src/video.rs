@@ -210,12 +210,15 @@ pub async fn run(
     let mut consecutive_errors = 0u32;
 
     loop {
-        // Housekeeping: settings, acks, finished writes, stale frames.
-        if settings.has_changed().unwrap_or(true) {
-            let s = *settings.borrow_and_update();
-            if settings.has_changed().is_err() {
-                return Ok(());
-            }
+        // Housekeeping: settings, acks, finished writes, stale frames. The settings are read
+        // every turn: the wait below (`settings.changed()`) marks a new value seen, so asking
+        // `has_changed` here lost every change that came during it (most of them: frames per
+        // second, quality, monitor).
+        if settings.has_changed().is_err() {
+            return Ok(());
+        }
+        let s = *settings.borrow_and_update();
+        if s != current {
             if s.monitor != current.monitor || s.epoch != current.epoch || s.max_size != current.max_size {
                 sched = None;
                 full_pending = true;
