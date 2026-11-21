@@ -57,6 +57,22 @@ Confira **no computador que deveria estar online**:
   **serviço** instalado.
 - Tente *Monitor → Atualizar imagem* na barra.
 
+**…no Mac, depois de uma atualização, o aviso de permissões volta e ligar a chave não resolve**
+Até a versão 0.6.0 o app era assinado de um jeito que muda a cada versão, e o macOS passa a
+ver o rdesk atualizado como outro programa, embora a chave antiga continue ligada nos
+Ajustes. Apague as permissões antigas no Terminal:
+
+```sh
+tccutil reset ScreenCapture dev.rdesk.rdesk
+tccutil reset Accessibility dev.rdesk.rdesk
+```
+
+Ou, em *Ajustes do Sistema → Privacidade e Segurança*, em **Acessibilidade** e em **Gravação
+de Tela**: selecione o rdesk, clique em **−**, depois em **+** e escolha o `rdesk.app` de novo.
+Em seguida saia do rdesk (ícone da barra de menus → *Sair do rdesk*), abra de novo e libere as
+duas. As versões seguintes são assinadas sempre com o mesmo certificado e mantêm as
+permissões nas atualizações.
+
 **…vejo a tela mas o mouse e o teclado não funcionam**
 - O seu acesso pode ser **só visualizar** (o painel *Info* mostra o nível).
 - **Mac**: falta a permissão **Acessibilidade** (botão **Abrir Acessibilidade** em *Este
