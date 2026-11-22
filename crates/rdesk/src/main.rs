@@ -31,6 +31,10 @@ struct Cli {
     /// More logging (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+    /// Use this saved account instead of the one in use, for this command only: its number
+    /// in `rdesk server list`, its server, its server's name or its e-mail.
+    #[arg(long, global = true, value_name = "ACCOUNT")]
+    account: Option<String>,
     /// Without a command: open the app window (saved computers, this computer's host, settings).
     #[command(subcommand)]
     cmd: Option<Command>,
@@ -96,15 +100,19 @@ enum Command {
     /// Groups of users (to share computers with).
     #[command(subcommand)]
     Groups(GroupsCmd),
-    /// Sign in to your rdesk server (opens the browser: Google/GitHub + second factor).
+    /// Sign in to an rdesk server (opens the browser: Google/GitHub + second factor). The
+    /// account is saved next to the others and is used from now on.
     Login {
         /// Server address, e.g. rdesk.example.com (default: the last one used).
         server: Option<String>,
     },
-    /// Sign out (ends this computer's session on the server).
+    /// Sign out of the account in use (ends this computer's session on its server).
     Logout,
     /// Who is signed in, until when, and whether the relay answers.
     Whoami,
+    /// The servers you signed in to: list them, change the one in use.
+    #[command(subcommand)]
+    Server(ServerCmd),
     /// Install the version released on your server (Linux, as root: the .deb; run by
     /// rdesk-update.timer).
     Update {
@@ -485,6 +493,16 @@ impl From<AuthArg> for AuthPref {
     }
 }
 
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// The saved accounts (server and e-mail), the one in use marked with *.
+    #[command(alias = "ls")]
+    List,
+    /// Use another saved account from now on: its number in the list, its server, its
+    /// server's name or its e-mail.
+    Use { account: String },
+}
+
 #[derive(Args, Clone)]
 struct AuthArgs {
     #[arg(long, value_enum)]
@@ -809,6 +827,9 @@ fn main() -> Result<()> {
     } else if service {
         rdesk_common::i18n::set(rdesk_common::i18n::system());
     }
+    if let Some(sel) = &cli.account {
+        Session::pin(&Session::find(sel)?.key());
+    }
     let Some(cmd) = cli.cmd else {
         return no_command();
     };
@@ -840,6 +861,7 @@ fn main() -> Result<()> {
         Command::Login { server } => runtime()?.block_on(login(server)),
         Command::Logout => runtime()?.block_on(logout()),
         Command::Whoami => runtime()?.block_on(whoami()),
+        Command::Server(c) => server_cmd(c),
         Command::Update { server, machine, check } => runtime()?.block_on(update(&server, machine, check)),
         Command::Users(u) => runtime()?.block_on(users_cmd(u)),
         Command::AgentKeys { agent_sock } => runtime()?.block_on(agent_keys(agent_sock)),
@@ -1429,7 +1451,40 @@ async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()
 
 /// The saved session, or an error telling how to get one.
 fn session() -> Result<Session> {
-    Session::load().ok_or_else(|| anyhow!("not signed in: run `rdesk login <server>`"))
+    Session::load().ok_or_else(|| match Session::active_key().and_then(|k| Session::find(&k).ok()) {
+        Some(s) => anyhow!("the sign-in to {} ended: run `rdesk login {}`", s.label(), s.server),
+        None => anyhow!("not signed in: run `rdesk login <server>` (or `rdesk server use`)"),
+    })
+}
+
+fn server_cmd(c: ServerCmd) -> Result<()> {
+    match c {
+        ServerCmd::List => {
+            let all = Session::all();
+            if all.is_empty() {
+                println!("No accounts. Run `rdesk login <server>`.");
+                return Ok(());
+            }
+            let active = Session::active_key();
+            for (i, s) in all.iter().enumerate() {
+                let mark = if active.as_deref() == Some(s.key().as_str()) { "*" } else { " " };
+                let state =
+                    if s.expired() { "sign in again".to_string() } else { format!("{} more day(s)", s.days_left()) };
+                println!("{mark} {}  {}  {}  ({}, {state})", i + 1, s.server_name, s.user.email, s.server);
+            }
+            Ok(())
+        }
+        ServerCmd::Use { account } => {
+            let s = Session::find(&account)?;
+            Session::activate(&s.key())?;
+            if s.expired() {
+                println!("Using {}. Its sign-in ended: run `rdesk login {}`.", s.label(), s.server);
+            } else {
+                println!("Using {}.", s.label());
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn login(server: Option<String>) -> Result<()> {
@@ -1455,14 +1510,21 @@ async fn login(server: Option<String>) -> Result<()> {
 
 async fn logout() -> Result<()> {
     let Some(s) = Session::load() else {
-        println!("Not signed in.");
+        // Its sign-in had already ended: just forget it.
+        match Session::active_key().and_then(|k| Session::find(&k).ok()) {
+            Some(s) => {
+                Session::remove(&s.key())?;
+                println!("Removed {}.", s.label());
+            }
+            None => println!("Not signed in."),
+        }
         return Ok(());
     };
     if let Err(e) = s.api()?.logout().await {
         eprintln!("warning: the server did not confirm ({e:#}); the local session is removed anyway");
     }
-    Session::clear()?;
-    println!("Signed out of {}.", s.server_name);
+    Session::remove(&s.key())?;
+    println!("Signed out of {}.", s.label());
     Ok(())
 }
 
@@ -1472,6 +1534,10 @@ async fn whoami() -> Result<()> {
         println!("Not signed in. Run `rdesk login <server>`.");
         return Ok(());
     };
+    let others = Session::all().len().saturating_sub(1);
+    if others > 0 {
+        println!("{others} other saved account(s): `rdesk server list`.");
+    }
     match s.api()?.me().await {
         Ok(me) => println!(
             "{} on {} ({}){}, {} more day(s)",
@@ -1482,12 +1548,12 @@ async fn whoami() -> Result<()> {
             s.days_left()
         ),
         Err(e) if e.downcast_ref::<account::NotSignedIn>().is_some() => {
-            Session::clear()?;
-            bail!("the server ended this session ({e:#}): run `rdesk login` again");
+            Session::end(&s.key())?;
+            bail!("the server ended this session ({e:#}): run `rdesk login {}` again", s.server);
         }
         Err(e) => println!("{} on {} (server not reachable: {e:#})", s.user.email, s.server),
     }
-    let net = config::load_network();
+    let net = s.network();
     let ep = transport::bind(None, &net, &Default::default(), Role::Client).await?;
     let r = transport::wait_relay(&ep, &net, std::time::Duration::from_secs(8)).await;
     ep.close().await;
@@ -1573,6 +1639,8 @@ struct Target {
     entry: HostEntry,
     id: [u8; 32],
     machine: Option<rdesk_client::conn::MachineTarget>,
+    /// The account it was found with ("server · e-mail"), for the window's title.
+    account: Option<String>,
     cfg: ClientConfig,
     net: NetworkConfig,
 }
@@ -1587,6 +1655,7 @@ async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
     let local = cfg.hosts.values().find(|e| {
         !e.name.is_empty() && (e.name.to_lowercase() == wanted || (wanted.len() >= 8 && e.id.starts_with(&wanted)))
     });
+    let mut via: Option<Session> = None;
     let (name, id_hex, addr, machine) = match target.split_once('@') {
         // Direct, without the server (the computer must allow it: local network, own login).
         Some((id, addr)) => {
@@ -1606,7 +1675,8 @@ async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
             if !m.can_access {
                 bail!("{} is not shared with you", m.name);
             }
-            let target = rdesk_client::conn::MachineTarget { id: m.id, addrs: m.addrs.clone() };
+            let target = rdesk_client::conn::MachineTarget { id: m.id, addrs: m.addrs.clone(), account: Some(s.key()) };
+            via = Some(s);
             (m.name.clone(), m.endpoint_id.clone(), String::new(), Some(target))
         }
     };
@@ -1633,8 +1703,9 @@ async fn resolve_target(target: &str, a: &AuthArgs) -> Result<Target> {
         entry.identity = a.identity.clone();
     }
     // Without the server: no relay, the address or the local network (mDNS) only.
-    let net = if machine.is_some() { config::load_network() } else { NetworkConfig::default() };
-    Ok(Target { name, entry, id, machine, cfg, net })
+    let net = via.as_ref().map(Session::network).unwrap_or_default();
+    let account = via.map(|s| s.label());
+    Ok(Target { name, entry, id, machine, account, cfg, net })
 }
 
 #[cfg(feature = "client")]
@@ -1687,6 +1758,7 @@ fn connect(a: ConnectArgs) -> Result<()> {
         open_files: a.files,
         open_terminal: a.terminal,
         control_stdin: a.controlled,
+        account: t.account,
     })
 }
 
@@ -1873,9 +1945,9 @@ async fn cli_login(
     ep: &transport::Endpoint,
 ) -> Result<(transport::Connection, transport::SendStream, transport::RecvStream)> {
     let ticket = match &t.machine {
-        Some(m) => Some(
-            rdesk_client::conn::get_ticket(m.id, ep.id().as_bytes(), &mut None).await.map_err(|(_, e)| anyhow!(e))?,
-        ),
+        Some(m) => {
+            Some(rdesk_client::conn::get_ticket(m, ep.id().as_bytes(), &mut None).await.map_err(|(_, e)| anyhow!(e))?)
+        }
         None => None,
     };
     let mut direct: Vec<String> = t.machine.as_ref().map(|m| m.addrs.clone()).unwrap_or_default();

@@ -1,5 +1,8 @@
-//! Signing in to the rdesk server. Without a session the app shows only the sign-in
-//! screen; the session (10 days) is checked with the server at start.
+//! Signing in to rdesk servers. Several accounts may be saved (a personal server, a
+//! company's, each with its own e-mail) but only one is in use: the app shows that server's
+//! computers, and changing to another is explicit ("Change server" in the sidebar). Without
+//! an account in use the app shows only the sign-in screen; the session (10 days) is checked
+//! with the server at start.
 //!
 //! Also a few small pieces shared by the sign-in screen, Add a computer, Settings, Groups
 //! and Admin (option cards, clickable rows, the "more" menu).
@@ -23,7 +26,14 @@ enum Check {
 }
 
 pub(super) struct Account {
+    /// The account in use, if its sign-in has not ended.
     session: Option<Session>,
+    /// Every saved account (one per server and e-mail), read again when they change.
+    saved: Vec<Session>,
+    /// When the saved accounts were last read (the command line may change them).
+    saved_read: Instant,
+    /// Signing in to one more server while another is in use: the sign-in screen shows.
+    pub(super) adding: bool,
     server: String,
     login_job: Option<Receiver<Result<Session, String>>>,
     check_job: Option<Receiver<Check>>,
@@ -31,8 +41,8 @@ pub(super) struct Account {
     error: Option<String>,
     /// The sign-in screen's "Only share this computer" card is open.
     share_open: bool,
-    /// "Sign out?" is asked.
-    confirm_sign_out: bool,
+    /// "Sign out of …?" is asked for this account.
+    confirm_remove: Option<Session>,
     /// Set when the user signed in or out (the shell starts/stops the host).
     pub(super) changed: bool,
     pub(super) toast: Option<(String, bool, Instant)>,
@@ -58,14 +68,25 @@ where
 impl Account {
     pub(super) fn new(ctx: &egui::Context) -> Self {
         let session = Session::load();
+        let saved = Session::all();
+        // In use but its sign-in ended: sign in to the same server again.
+        let ended = match &session {
+            None => active_of(&saved).cloned(),
+            Some(_) => None,
+        };
         let server = session
             .as_ref()
+            .or(ended.as_ref())
             .map(|s| s.server.clone())
             .or_else(|| config::load_toml::<ClientConfig>(config::CLIENT_CONFIG).ok().and_then(|c| c.server))
             // Downloaded from the server's page as rdesk@server.exe.
             .or_else(config::server_from_exe_name)
             .unwrap_or_default();
         let mut a = Self::with(session, server);
+        a.saved = saved;
+        if let Some(s) = ended {
+            a.error = Some(ended_text(&s));
+        }
         a.check(ctx);
         a
     }
@@ -73,13 +94,16 @@ impl Account {
     fn with(session: Option<Session>, server: String) -> Self {
         Self {
             session,
+            saved: Vec::new(),
+            saved_read: Instant::now(),
+            adding: false,
             server,
             login_job: None,
             check_job: None,
             logout_job: None,
             error: None,
             share_open: false,
-            confirm_sign_out: false,
+            confirm_remove: None,
             changed: false,
             toast: None,
         }
@@ -87,6 +111,73 @@ impl Account {
 
     pub(super) fn session(&self) -> Option<&Session> {
         self.session.as_ref()
+    }
+
+    /// Every saved account, the one in use too.
+    pub(super) fn saved(&self) -> &[Session] {
+        &self.saved
+    }
+
+    /// Is `s` the account in use (signed in or not)?
+    pub(super) fn is_active(&self, s: &Session) -> bool {
+        match &self.session {
+            Some(a) => a.key() == s.key(),
+            None => Session::active_key().as_deref() == Some(s.key().as_str()),
+        }
+    }
+
+    fn reload_saved(&mut self) {
+        self.saved = Session::all();
+        self.saved_read = Instant::now();
+    }
+
+    /// Use the saved account `key` from now on: the app shows its server's computers. Its
+    /// sign-in may have ended: then the sign-in screen asks for it again.
+    pub(super) fn switch_to(&mut self, ctx: &egui::Context, key: &str) {
+        if !self.adding && self.session.as_ref().is_some_and(|s| s.key() == key) {
+            return;
+        }
+        if let Err(e) = Session::activate(key) {
+            self.toast = Some((format!("{e:#}"), true, Instant::now()));
+            return;
+        }
+        self.adding = false;
+        self.login_job = None;
+        self.session = Session::load();
+        self.reload_saved();
+        self.changed = true;
+        match self.session.clone() {
+            Some(s) => {
+                self.error = None;
+                self.server = s.server.clone();
+                self.toast = Some((tf!("Now using {}.", "Agora em {}.", s.label()), false, Instant::now()));
+                self.check(ctx);
+            }
+            None => {
+                if let Some(s) = self.saved.iter().find(|s| s.key() == key) {
+                    self.server = s.server.clone();
+                    self.error = Some(ended_text(s));
+                }
+            }
+        }
+    }
+
+    /// Show the sign-in screen to add one more server (the one in use stays until it is done).
+    pub(super) fn start_adding(&mut self) {
+        self.adding = true;
+        self.server.clear();
+        self.error = None;
+        self.share_open = false;
+    }
+
+    /// Back from adding a server, to the one in use.
+    fn cancel_adding(&mut self) {
+        self.adding = false;
+        self.login_job = None;
+        self.error = None;
+        if let Some(s) = &self.session {
+            self.server = s.server.clone();
+        }
     }
 
     pub(super) fn signed_in(&self) -> bool {
@@ -115,9 +206,14 @@ impl Account {
         }));
     }
 
+    /// The account in use ended (expired, or the server ended it): it stays saved, to sign in
+    /// to again.
     fn signed_out(&mut self, why: &str) {
-        let _ = Session::clear();
-        self.session = None;
+        if let Some(s) = self.session.take() {
+            let _ = Session::end(&s.key());
+            self.server = s.server;
+        }
+        self.reload_saved();
         self.changed = true;
         self.error = Some(why.to_string());
     }
@@ -133,8 +229,10 @@ impl Account {
                     cfg.server = Some(s.server.clone());
                     let _ = config::ensure_config_dir().and_then(|_| config::save_toml(config::CLIENT_CONFIG, &cfg));
                     self.toast =
-                        Some((tf!("Signed in as {}.", "Você entrou como {}.", s.user.email), false, Instant::now()));
+                        Some((tf!("Signed in as {}.", "Você entrou como {}.", s.label()), false, Instant::now()));
                     self.session = Some(s);
+                    self.adding = false;
+                    self.reload_saved();
                     self.error = None;
                     self.changed = true;
                 }
@@ -161,6 +259,20 @@ impl Account {
                 "Seu acesso expirou (10 dias). Entre de novo."
             ));
         }
+        // Changed elsewhere (`rdesk login`, `rdesk server use`): follow it.
+        if self.saved_read.elapsed() >= std::time::Duration::from_secs(5) && self.login_job.is_none() {
+            let before = self.session.as_ref().map(Session::key);
+            self.reload_saved();
+            let now = Session::load();
+            if now.as_ref().map(Session::key) != before && (now.is_some() || before.is_some()) {
+                self.session = now;
+                self.changed = true;
+                if let Some(s) = &self.session {
+                    self.server = s.server.clone();
+                    self.error = None;
+                }
+            }
+        }
     }
 
     fn start_login(&mut self, ctx: &egui::Context) {
@@ -179,17 +291,27 @@ impl Account {
         }));
     }
 
-    pub(super) fn sign_out(&mut self, ctx: &egui::Context) {
-        if let Some(s) = self.session.take() {
+    /// Sign out of the account `s` (here and on its server) and forget it. If it was in use,
+    /// none is: the sign-in screen offers the other saved ones.
+    pub(super) fn remove(&mut self, ctx: &egui::Context, s: &Session) {
+        let key = s.key();
+        if !s.expired() {
+            let s = s.clone();
             self.logout_job = Some(spawn(ctx, move || async move {
                 if let Ok(api) = s.api() {
                     let _ = api.logout().await;
                 }
             }));
         }
-        let _ = Session::clear();
-        self.changed = true;
-        self.toast = Some((t!("Signed out.", "Você saiu.").into(), false, Instant::now()));
+        let _ = Session::remove(&key);
+        if self.session.as_ref().is_some_and(|a| a.key() == key) {
+            self.session = None;
+            self.server = s.server.clone();
+            self.error = None;
+            self.changed = true;
+        }
+        self.reload_saved();
+        self.toast = Some((tf!("Signed out of {}.", "Você saiu de {}.", s.label()), false, Instant::now()));
     }
 
     /// The whole window when nobody is signed in: a card to sign in, and below it the two
@@ -213,7 +335,47 @@ impl Account {
                 ui.add_space(((avail - w) / 2.0).max(0.0));
                 ui.vertical(|ui| {
                     ui.set_width(w);
+                    if self.adding {
+                        let back = match &self.session {
+                            Some(s) => tf!("Back to {}", "Voltar para {}", s.server_name),
+                            None => t!("Back", "Voltar").to_string(),
+                        };
+                        if ui::secondary(ui, ui::with_icon(icons::ARROW_LEFT, &back)).clicked() {
+                            self.cancel_adding();
+                        }
+                        ui.add_space(space::S);
+                    }
                     ui::card(ui, |ui| self.sign_in_card(ui, &ctx));
+                    // Saved accounts other than the one being signed in to: use one of them.
+                    let others: Vec<Session> = self
+                        .saved
+                        .iter()
+                        .filter(|s| {
+                            // Not the one in use ("Back" returns to it), nor the one typed in.
+                            self.session.as_ref().is_none_or(|a| a.key() != s.key())
+                                && (self.adding
+                                    || account::normalize_server(&self.server).ok().as_ref() != Some(&s.server))
+                        })
+                        .cloned()
+                        .collect();
+                    if !others.is_empty() {
+                        ui.add_space(space::L);
+                        ui::caption(ui, t!("Or use a saved server:", "Ou use um servidor salvo:"));
+                        ui.add_space(space::XS);
+                        let mut chosen = None;
+                        rows_card(ui, &others, |ui, s| {
+                            let (resp, _) = list_row(ui, 44.0, false, |ui| account_line(ui, s, false));
+                            if resp.clicked() {
+                                chosen = Some(s.key());
+                            }
+                        });
+                        if let Some(key) = chosen {
+                            self.switch_to(&ctx, &key);
+                        }
+                    }
+                    if self.adding {
+                        return;
+                    }
                     ui.add_space(space::L);
                     ui::caption(ui, t!("Or, without signing in:", "Ou, sem entrar:"));
                     ui.add_space(space::XS);
@@ -279,10 +441,14 @@ impl Account {
             ui.label(RichText::new("rdesk").size(26.0).strong());
             ui.add(
                 egui::Label::new(
-                    RichText::new(t!(
-                        "Sign in to your rdesk server to use the app",
-                        "Entre no seu servidor rdesk para usar o app"
-                    ))
+                    RichText::new(if self.adding {
+                        t!(
+                            "Sign in to one more rdesk server; you change between them in the sidebar",
+                            "Entre em mais um servidor rdesk; você troca entre eles na barra lateral"
+                        )
+                    } else {
+                        t!("Sign in to your rdesk server to use the app", "Entre no seu servidor rdesk para usar o app")
+                    })
                     .color(p.muted),
                 )
                 .wrap(),
@@ -369,7 +535,7 @@ impl Account {
                 },
                 |ui| {
                     if ui::secondary(ui, ui::with_icon(icons::SIGN_OUT, t!("Sign out", "Sair"))).clicked() {
-                        self.confirm_sign_out = true;
+                        self.confirm_remove = Some(s.clone());
                     }
                 },
             );
@@ -392,11 +558,12 @@ impl Account {
                 ],
             );
         });
-        if self.confirm_sign_out {
+        self.other_accounts(ui, &ctx);
+        if let Some(r) = self.confirm_remove.clone() {
             match ui::confirm(
                 &ctx,
                 "sign-out",
-                &tf!("Sign out of {}?", "Sair de {}?", s.server_name),
+                &tf!("Sign out of {}?", "Sair de {}?", r.label()),
                 t!(
                     "To use the server's computers again you sign in again with the browser.",
                     "Para usar os computadores do servidor de novo, você entra outra vez pelo navegador."
@@ -405,14 +572,95 @@ impl Account {
                 false,
             ) {
                 Some(true) => {
-                    self.confirm_sign_out = false;
-                    self.sign_out(&ctx);
+                    self.confirm_remove = None;
+                    self.remove(&ctx, &r);
                 }
-                Some(false) => self.confirm_sign_out = false,
+                Some(false) => self.confirm_remove = None,
                 None => {}
             }
         }
     }
+
+    /// The other saved servers (use one, sign out of it) and "Add a server".
+    fn other_accounts(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let others: Vec<Session> = self.saved.iter().filter(|s| !self.is_active(s)).cloned().collect();
+        ui.add_space(space::L);
+        ui::row(
+            ui,
+            |ui| {
+                ui.label(RichText::new(t!("Other servers", "Outros servidores")).strong());
+            },
+            |ui| {
+                if ui::secondary(ui, ui::with_icon(icons::PLUS, t!("Add a server", "Adicionar servidor"))).clicked() {
+                    self.start_adding();
+                }
+            },
+        );
+        ui.add_space(space::XS);
+        if others.is_empty() {
+            ui::caption(
+                ui,
+                t!(
+                    "Signed in to more than one rdesk server (yours, your company's), you change between them \
+                     in the sidebar; each keeps its own e-mail and its computers stay apart.",
+                    "Com mais de um servidor rdesk (o seu, o da empresa), você troca entre eles na barra lateral; \
+                     cada um tem o seu e-mail e os computadores de um não aparecem no outro."
+                ),
+            );
+            return;
+        }
+        let mut chosen = None;
+        let mut remove = None;
+        rows_card(ui, &others, |ui, s| {
+            ui::row(
+                ui,
+                |ui| account_line(ui, s, false),
+                |ui| {
+                    more_menu(ui, t!("More", "Mais"), |ui| {
+                        if menu_item_danger(ui, icons::SIGN_OUT, t!("Sign out", "Sair")).clicked() {
+                            remove = Some(s.clone());
+                        }
+                    });
+                    let text = if s.expired() { t!("Sign in", "Entrar") } else { t!("Use", "Usar") };
+                    if ui::secondary(ui, text).clicked() {
+                        chosen = Some(s.key());
+                    }
+                },
+            );
+        });
+        if let Some(key) = chosen {
+            self.switch_to(ctx, &key);
+        }
+        if remove.is_some() {
+            self.confirm_remove = remove;
+        }
+    }
+}
+
+/// The account in use among `saved`, signed in or not.
+fn active_of(saved: &[Session]) -> Option<&Session> {
+    let key = Session::active_key()?;
+    saved.iter().find(|s| s.key() == key)
+}
+
+fn ended_text(s: &Session) -> String {
+    tf!("Your sign-in to {} ended. Sign in again.", "Seu acesso a {} terminou. Entre de novo.", s.label())
+}
+
+/// One saved account in a list: its avatar, server name and e-mail, and how long it lasts.
+pub(super) fn account_line(ui: &mut Ui, s: &Session, active: bool) {
+    ui::avatar(ui, &s.user.email, 28.0);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let name = if active { RichText::new(&s.server_name).strong() } else { RichText::new(&s.server_name) };
+        ui::truncate(ui, name);
+        let state = if s.expired() {
+            tf!("{} · sign in again", "{} · entre de novo", s.user.email)
+        } else {
+            s.user.email.clone()
+        };
+        ui::truncate(ui, ui::muted(state).size(size::SMALL));
+    });
 }
 
 /// Seconds since 1970.
@@ -588,6 +836,29 @@ impl Account {
         Self::with(session, server.into())
     }
 
+    /// With these accounts saved.
+    pub(super) fn with_saved(mut self, saved: Vec<Session>) -> Self {
+        self.saved = saved;
+        self
+    }
+
+    /// Three saved accounts: the sample one (in use), a company's with another e-mail, and
+    /// another company's whose sign-in ended.
+    pub(super) fn sample_saved() -> Vec<Session> {
+        let home = Self::sample_session(true);
+        let mut x = home.clone();
+        x.server = "https://rdesk.empresa-x.com.br".into();
+        x.server_name = "Empresa X — Infraestrutura e Suporte".into();
+        x.user.email = "jeferson.santos@empresa-x.com.br".into();
+        x.user.id = 42;
+        let mut y = x.clone();
+        y.server = "https://acesso.empresa-y.com".into();
+        y.server_name = "Empresa Y".into();
+        y.user.email = "jsantos@empresa-y.com".into();
+        y.expires_at = 0;
+        vec![home, x, y]
+    }
+
     /// A session with long names.
     pub(super) fn sample_session(admin: bool) -> Session {
         Session {
@@ -652,6 +923,18 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
             let mut a = Account::sample(None, "rdesk.familia-santos-silva.exemplo.com.br");
             a.share_open = true;
             login(a, true)
+        }),
+        // The account in use ended: its server pre-filled, the others to choose from.
+        screen("login-saved", || {
+            let saved = Account::sample_saved();
+            let mut a = Account::sample(None, "acesso.empresa-y.com").with_saved(saved.clone());
+            a.error = Some(ended_text(&saved[2]));
+            login(a, false)
+        }),
+        screen("login-adding", || {
+            let mut a = Account::sample(Some(Account::sample_session(true)), "").with_saved(Account::sample_saved());
+            a.adding = true;
+            login(a, false)
         }),
     ]
 }

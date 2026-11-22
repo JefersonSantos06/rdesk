@@ -33,6 +33,31 @@ compartilhados com você e os salvos neste aparelho para a rede local.
 Se a janela de um computador já estiver aberta, **Mostrar** (no lugar de *Conectar*) traz
 ela para a frente. **Arquivos** e **Terminal** também abrem direto nela.
 
+## Mais de um servidor
+
+Você pode entrar em vários servidores rdesk no mesmo app: o seu, o da empresa X, o da
+empresa Y. Cada um com o e-mail que você usa nele (podem ser e-mails diferentes, e até dois
+e-mails no mesmo servidor).
+
+O app mostra **um servidor de cada vez**. A lista de computadores, os grupos e o admin são
+sempre os do servidor em uso, e nada de um aparece no outro.
+
+- **Trocar**: clique na conta no pé da barra lateral (nome do servidor e e-mail). Abre a
+  lista dos servidores salvos; escolha outro. Os outros continuam logados (cada um pelos
+  seus 10 dias), então trocar não pede login de novo.
+- **Adicionar**: no mesmo menu, **Adicionar servidor**. Entre pelo navegador como sempre;
+  o novo servidor fica salvo e passa a ser o em uso. **Voltar** desiste e fica no atual.
+- **Gerenciar**: em *Configurações → Conta* ficam o servidor em uso e os **outros
+  servidores**, cada um com **Usar** e **⋯ → Sair**.
+- Se o login de um servidor terminou (10 dias, ou o admin encerrou), ele continua na lista
+  com *entre de novo*: escolhê-lo abre o login já com o endereço dele.
+
+As **janelas já abertas continuam** quando você troca: cada uma fica no servidor de onde
+veio (o título mostra o servidor e o e-mail) e reconecta por ele.
+
+O **host** deste computador não muda com a troca: ele continua cadastrado no servidor em
+que foi cadastrado e acessível por quem tem acesso lá.
+
 ## Conectar
 
 1. Selecione o computador e clique em **Conectar**.

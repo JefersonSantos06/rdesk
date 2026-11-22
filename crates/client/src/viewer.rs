@@ -62,6 +62,9 @@ pub struct ViewerOpts {
     /// Started by the app: read `show`, `files` or `terminal` lines on standard input (the
     /// app asks an open session window to come forward).
     pub control_stdin: bool,
+    /// The account the computer was opened with ("server · e-mail"), in the title: it stays
+    /// when the app changes to another server.
+    pub account: Option<String>,
 }
 
 pub fn run(opts: ViewerOpts) -> Result<()> {
@@ -93,6 +96,7 @@ pub fn run(opts: ViewerOpts) -> Result<()> {
     app.player = player;
     app.video = video;
     app.terminal_on_connect = opts.open_terminal;
+    app.account = opts.account;
     if opts.open_files {
         app.open_panel(Tab::Files);
         app.list(app.remote_path.clone());
@@ -264,6 +268,8 @@ impl Shell {
 struct App {
     handle: Handle,
     name: String,
+    /// "Server · e-mail" of the account it was opened with.
+    account: Option<String>,
     egui: egui::Context,
     gfx: Option<Gfx>,
     tex: Option<TextureHandle>,
@@ -362,6 +368,7 @@ impl App {
         Self {
             handle,
             name,
+            account: None,
             egui,
             gfx: None,
             tex: None,
@@ -504,7 +511,10 @@ impl App {
     fn update_title(&self) {
         if let Some(g) = &self.gfx {
             let host = self.host.as_ref().map(|h| h.hostname.as_str()).unwrap_or(&self.name);
-            g.window.set_title(&format!("rdesk — {host} — {}", self.status));
+            match &self.account {
+                Some(a) => g.window.set_title(&format!("rdesk — {host} ({a}) — {}", self.status)),
+                None => g.window.set_title(&format!("rdesk — {host} — {}", self.status)),
+            }
         }
     }
 
@@ -2043,7 +2053,10 @@ impl ApplicationHandler<UiEvent> for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title(format!("rdesk — {}", self.name))
+            .with_title(match &self.account {
+                Some(a) => format!("rdesk — {} ({a})", self.name),
+                None => format!("rdesk — {}", self.name),
+            })
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 420.0));
         let window = Arc::new(el.create_window(attrs).expect("create window"));

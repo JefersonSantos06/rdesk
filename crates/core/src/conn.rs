@@ -453,14 +453,21 @@ pub struct ConnectOpts {
 pub struct MachineTarget {
     pub id: i64,
     pub addrs: Vec<String>,
+    /// [`Session::key`] of the account it was listed with: tickets come from that account
+    /// even after the app changed to another one. `None`: the account in use.
+    pub account: Option<String>,
 }
 
 /// A ticket and when it expires (Unix seconds).
 pub type CachedTicket = Option<(Vec<u8>, i64)>;
 
-/// A still-valid ticket for `machine` and this endpoint, from the cache or the server.
-/// `Err((fatal, message))`.
-pub async fn get_ticket(machine: i64, client: &[u8; 32], cache: &mut CachedTicket) -> Result<Vec<u8>, (bool, String)> {
+/// A still-valid ticket for `machine` and this endpoint, from the cache or the server of the
+/// account it was listed with. `Err((fatal, message))`.
+pub async fn get_ticket(
+    machine: &MachineTarget,
+    client: &[u8; 32],
+    cache: &mut CachedTicket,
+) -> Result<Vec<u8>, (bool, String)> {
     let now =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     if let Some((t, exp)) = cache
@@ -468,18 +475,22 @@ pub async fn get_ticket(machine: i64, client: &[u8; 32], cache: &mut CachedTicke
     {
         return Ok(t.clone());
     }
-    let Some(session) = Session::load() else {
+    let session = match &machine.account {
+        Some(key) => Session::load_account(key),
+        None => Session::load(),
+    };
+    let Some(session) = session else {
         return Err((
             true,
             t!(
-                "Not signed in to rdesk: sign in in the app (or `rdesk login`).",
-                "Você não entrou no rdesk: entre pelo app (ou `rdesk login`)."
+                "Not signed in to this computer's rdesk server: sign in in the app (or `rdesk login`).",
+                "Você não está conectado ao servidor rdesk deste computador: entre pelo app (ou `rdesk login`)."
             )
             .into(),
         ));
     };
     let api = session.api().map_err(|e| (true, format!("{e:#}")))?;
-    match api.ticket(machine, client).await {
+    match api.ticket(machine.id, client).await {
         Ok((bytes, r)) => {
             *cache = Some((bytes.clone(), r.expires_at));
             Ok(bytes)
@@ -801,7 +812,7 @@ async fn once(
     // time, both happen at once (the endpoint's ID comes from a key made beforehand).
     let ticket_res = if let Some(ep) = endpoint.clone() {
         match &opts.machine {
-            Some(m) => Some(get_ticket(m.id, ep.id().as_bytes(), ticket).await),
+            Some(m) => Some(get_ticket(m, ep.id().as_bytes(), ticket).await),
             None => None,
         }
     } else {
@@ -810,7 +821,7 @@ async fn once(
         let bind = transport::bind(Some(key), &opts.net, &opts.transport, Role::Client);
         let fetch = async {
             match &opts.machine {
-                Some(m) => Some(get_ticket(m.id, &client_id, ticket).await),
+                Some(m) => Some(get_ticket(m, &client_id, ticket).await),
                 None => None,
             }
         };

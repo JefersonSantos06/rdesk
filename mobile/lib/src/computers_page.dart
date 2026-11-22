@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
+import 'accounts.dart';
 import 'i18n.dart';
 import 'rust/api/app.dart' as api;
 import 'rust/api/session.dart';
@@ -190,7 +191,26 @@ class _ComputersPageState extends State<ComputersPage> {
     final saved = _saved.where((c) => _matches(c.name, '${c.addr} ${c.hostId}')).toList();
     return Scaffold(
       appBar: AppBar(
-        title: Text(t('Computers', 'Computadores')),
+        title: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => showServerSwitcher(context),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Flexible(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  Text(t('Computers', 'Computadores')),
+                  Text(
+                    _account == null ? t('Without a server', 'Sem servidor') : '${_account!.serverName} · ${_account!.email}',
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ]),
+              ),
+              const Icon(Icons.arrow_drop_down),
+            ]),
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: t('Settings', 'Configurações'),

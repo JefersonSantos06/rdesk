@@ -15,6 +15,12 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Código TOTP já usado é recusado; 5 códigos errados encerram a tentativa.
 - [ ] *Admin*: adicionar e-mail, tornar admin, desativar (a pessoa é deslogada), remover.
 - [ ] Sessão revogada/desativada no servidor: o app volta para a tela de login ao abrir.
+- [ ] Atualizando de 0.7 (com `session.json`): o app abre já logado, e o arquivo vira `accounts.json`.
+- [ ] Dois servidores com e-mails diferentes: *Adicionar servidor* na barra lateral; trocar entre eles muda a lista inteira (nada de um aparece no outro), sem pedir login.
+- [ ] Com uma janela aberta no servidor A, trocar para o B: a janela continua (título com A · e-mail), e depois de derrubar a rede ela reconecta pelo A.
+- [ ] Login de um servidor expirado/revogado: ele fica na lista com *entre de novo*; escolher abre o login com o endereço dele.
+- [ ] `rdesk server list` / `rdesk server use 2` / `rdesk machines list --account …`; o app aberto acompanha a troca feita na linha de comando em alguns segundos.
+- [ ] Celular: tocar no título dos computadores troca de servidor e adiciona servidor; uma sessão aberta continua no servidor dela.
 
 ## Computadores, grupos e acesso
 - [ ] *This computer* → *Register this computer*: aparece em *My computers* de quem cadastrou; continua *Online* depois de fazer logout no app.

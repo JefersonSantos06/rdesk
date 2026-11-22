@@ -400,12 +400,9 @@ pub struct NetworkConfig {
     pub token: Option<String>,
 }
 
-/// For connecting to others: the signed-in user's session.
+/// For connecting to others: the account in use.
 pub fn load_network() -> NetworkConfig {
-    match crate::account::Session::load() {
-        Some(s) => NetworkConfig { relay: Some(s.relay_url), token: Some(s.token) },
-        None => NetworkConfig::default(),
-    }
+    crate::account::Session::load().map(|s| s.network()).unwrap_or_default()
 }
 
 /// For the host: this computer's own registration (works with nobody signed in).

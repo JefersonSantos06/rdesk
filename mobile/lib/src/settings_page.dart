@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
+import 'accounts.dart';
 import 'device_key.dart';
 import 'help.dart';
 import 'i18n.dart';
@@ -104,6 +105,12 @@ class _SettingsPageState extends State<SettingsPage> {
             title: Text(a.name.isEmpty ? a.email : a.name),
             subtitle: Text('${a.email}\n${a.serverName} · ${t('${a.daysLeft} more days', 'mais ${a.daysLeft} dias')}'),
             isThreeLine: true,
+          ),
+          ListTile(
+            leading: const Icon(Icons.swap_horiz),
+            title: Text(t('Change server', 'Trocar servidor')),
+            subtitle: Text(t('Or add one: each keeps its own e-mail', 'Ou adicione um: cada um tem o seu e-mail')),
+            onTap: () => showServerSwitcher(context),
           ),
           ListTile(leading: const Icon(Icons.logout), title: Text(t('Sign out', 'Sair')), onTap: _signOut),
         ] else

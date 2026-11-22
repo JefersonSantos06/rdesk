@@ -20,8 +20,19 @@ Nos exemplos abaixo, troque `rdesk` pelo caminho do seu sistema. `rdesk --help` 
 ```sh
 rdesk login rdesk.seu-dominio.com   # abre o navegador: Google/GitHub + segundo fator
 rdesk whoami                        # quem está logado, até quando, e se o relay responde
-rdesk logout
+rdesk logout                        # sai do servidor em uso
 ```
+
+Com mais de um servidor (veja [Mais de um servidor](05-usar.md#mais-de-um-servidor)), cada
+`rdesk login` adiciona uma conta e passa a usá-la; as outras continuam logadas.
+
+```sh
+rdesk server list                   # as contas salvas; * marca a em uso
+rdesk server use 2                  # usar outra: o número da lista, o servidor, o nome dele ou o e-mail
+rdesk machines list --account rdesk.empresa-x.com.br   # só neste comando, sem trocar a em uso
+```
+
+`--account` vale para qualquer comando (`connect`, `send`, `shell`…).
 
 ## Abrir o app
 
@@ -189,7 +200,7 @@ Normalmente você não precisa mexer neles: o app cuida de tudo.
 
 | O quê | Windows | Mac | Linux |
 |---|---|---|---|
-| Configurações do app (`client.toml`), login (`session.json`), logs | `%APPDATA%\rdesk\rdesk\config\` | `~/Library/Application Support/dev.rdesk.rdesk/` | `~/.config/rdesk/` |
+| Configurações do app (`client.toml`), logins (`accounts.json`), logs | `%APPDATA%\rdesk\rdesk\config\` | `~/Library/Application Support/dev.rdesk.rdesk/` | `~/.config/rdesk/` |
 | Host (`host.toml`, identidade, senha, chaves) | a mesma pasta; com o serviço: `C:\ProgramData\rdesk\` | a mesma pasta | a mesma pasta |
 
 O `host.toml`, para quem quiser ajustar à mão:

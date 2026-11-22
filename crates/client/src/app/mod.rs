@@ -1,7 +1,9 @@
 //! The desktop app: one window with its pages (Computers, This computer, Settings, and
 //! Admin for system admins), a tray icon, and the built-in host. Nothing but the sign-in
-//! screen is available until the user signs in to the rdesk server. Closing the window
-//! keeps it in the tray, like AnyDesk; a second launch just shows the running window.
+//! screen is available until the user signs in to an rdesk server. Several servers may be
+//! saved; the app shows one at a time and changes from the account at the bottom of the
+//! sidebar. Closing the window keeps it in the tray, like AnyDesk; a second launch just
+//! shows the running window.
 
 mod access;
 mod account;
@@ -299,9 +301,37 @@ impl App {
             pending: self.computers.pending_requests(),
             host,
             account: self.account.session().map(|s| (s.user.email.clone(), s.server_name.clone())),
+            saved: self.account.saved().iter().map(|s| (s.clone(), self.account.is_active(s))).collect(),
+            #[cfg(test)]
+            open_menu: false,
             sessions: self.computers.open_sessions(),
         }
     }
+
+    /// What the sidebar asked for.
+    fn nav(&mut self, n: Nav, ctx: &egui::Context) {
+        match n {
+            Nav::Go(page) => self.go(page, ctx),
+            Nav::Switch(key) => {
+                // Out of the local-network mode: an account whose sign-in ended asks for it.
+                if self.local_mode {
+                    self.local_mode = false;
+                    set_local_only(false);
+                }
+                self.account.switch_to(ctx, &key);
+            }
+            Nav::AddServer => self.account.start_adding(),
+        }
+    }
+}
+
+/// What the sidebar asks for.
+pub(super) enum Nav {
+    Go(Page),
+    /// Use this saved account ([`rdesk_common::account::Session::key`]).
+    Switch(String),
+    /// Sign in to one more server.
+    AddServer,
 }
 
 /// The sidebar's contents (kept apart from the pages so it can be drawn on its own).
@@ -316,14 +346,20 @@ pub(super) struct Sidebar {
     pub host: Option<(egui::Color32, String)>,
     /// Signed in as (e-mail, server name).
     pub account: Option<(String, String)>,
+    /// Every saved account, and whether it is the one in use.
+    pub saved: Vec<(rdesk_common::account::Session, bool)>,
+    /// The gallery: draw the server menu open.
+    #[cfg(test)]
+    pub open_menu: bool,
     /// Session windows open from this app.
     pub sessions: usize,
 }
 
-/// The sidebar; returns the page clicked.
-pub(super) fn sidebar(ui: &mut egui::Ui, m: &Sidebar) -> Option<Page> {
+/// The sidebar; returns what was clicked.
+pub(super) fn sidebar(ui: &mut egui::Ui, m: &Sidebar) -> Option<Nav> {
     let p = ui::pal(ui);
     let mut go = None;
+    let mut nav = None;
     ui.add_space(space::S);
     ui.horizontal(|ui| {
         ui.add_space(space::S);
@@ -353,26 +389,80 @@ pub(super) fn sidebar(ui: &mut egui::Ui, m: &Sidebar) -> Option<Page> {
         ui.add_space(space::S);
         let account = egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| match &m.account {
-                Some((email, server)) => {
-                    ui::avatar(ui, email, 28.0);
-                    ui.vertical(|ui| {
-                        ui.add(egui::Label::new(email.as_str()).truncate());
-                        ui.add(egui::Label::new(ui::muted(server.as_str()).size(ui::size::SMALL)).truncate());
-                    });
-                }
-                None => {
-                    ui.label(egui::RichText::new(icons::WIFI_SLASH).size(ui::size::ICON).color(p.muted));
-                    ui.add(
-                        egui::Label::new(ui::muted(t!("Without a server", "Sem servidor")).size(ui::size::SMALL))
-                            .truncate(),
-                    );
-                }
-            });
+            ui::row(
+                ui,
+                |ui| match &m.account {
+                    Some((email, server)) => {
+                        ui::avatar(ui, email, 28.0);
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(server.as_str()).truncate().selectable(false));
+                            ui.add(
+                                egui::Label::new(ui::muted(email.as_str()).size(ui::size::SMALL))
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                        });
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(icons::WIFI_SLASH).size(ui::size::ICON).color(p.muted));
+                        ui.add(
+                            egui::Label::new(ui::muted(t!("Without a server", "Sem servidor")).size(ui::size::SMALL))
+                                .truncate()
+                                .selectable(false),
+                        );
+                    }
+                },
+                |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(icons::CARET_UP).color(p.muted)).selectable(false));
+                },
+            );
         });
-        if account.response.interact(egui::Sense::click()).on_hover_text(t!("Account", "Conta")).clicked() {
-            go = Some(Page::Settings);
+        let resp = account
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(t!("Change server", "Trocar servidor"));
+        #[cfg(test)]
+        if m.open_menu {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
         }
+        egui::Popup::menu(&resp).align(egui::RectAlign::TOP_START).width(resp.rect.width().max(240.0)).show(|ui| {
+            if !m.saved.is_empty() {
+                ui.label(ui::muted(t!("Servers", "Servidores")).size(ui::size::SMALL));
+                for (s, active) in &m.saved {
+                    let state = if s.expired() {
+                        rdesk_common::tf!("{} · sign in again", "{} · entre de novo", s.user.email)
+                    } else {
+                        s.user.email.clone()
+                    };
+                    let mut text = egui::text::LayoutJob::default();
+                    let body = egui::FontId::proportional(ui::size::BODY);
+                    let small = egui::FontId::proportional(ui::size::SMALL);
+                    text.append(
+                        &s.server_name,
+                        0.0,
+                        egui::TextFormat { font_id: body, color: p.text, ..Default::default() },
+                    );
+                    text.append(
+                        &format!("\n{state}"),
+                        0.0,
+                        egui::TextFormat { font_id: small, color: p.muted, ..Default::default() },
+                    );
+                    if ui.add(egui::Button::selectable(*active, text).min_size(egui::Vec2::new(0.0, 40.0))).clicked()
+                        && !active
+                    {
+                        nav = Some(Nav::Switch(s.key()));
+                    }
+                }
+                ui.separator();
+            }
+            if account::menu_item(ui, icons::PLUS, t!("Add a server", "Adicionar servidor")).clicked() {
+                nav = Some(Nav::AddServer);
+            }
+            if account::menu_item(ui, icons::GEAR_SIX, t!("Manage accounts", "Gerenciar contas")).clicked() {
+                go = Some(Page::Settings);
+            }
+        });
         ui.separator();
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             // Top-down again, at the end of the bottom-up space.
@@ -399,7 +489,7 @@ pub(super) fn sidebar(ui: &mut egui::Ui, m: &Sidebar) -> Option<Page> {
             }
         });
     });
-    go
+    nav.or(go.map(Nav::Go))
 }
 
 /// The sidebar's width: room for the longest Portuguese label plus a count.
@@ -419,8 +509,16 @@ impl eframe::App for App {
         self.admin.tick(ctx, self.account.session());
         self.groups.tick(ctx);
         if std::mem::take(&mut self.account.changed) {
-            // A different user (or none): their list, not the previous one's.
-            self.computers.refresh();
+            // A different account (or none): its list, nothing of the previous one's.
+            self.computers.reset();
+            self.groups = groups::GroupsPage::new();
+            self.admin = admin::AdminPage::new();
+            if self.page == Page::Groups {
+                self.groups.reload(ctx);
+            }
+            if self.page == Page::Admin {
+                self.admin.reload(ctx, self.account.session());
+            }
             // Signing in ends the local-network-only mode (signing out shows the sign-in page).
             if self.account.signed_in() && self.local_mode {
                 self.local_mode = false;
@@ -516,7 +614,7 @@ impl eframe::App for App {
             egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(space::XL as i8, space::L as i8 + 4))
         };
         let p = ui::pal(ui);
-        if !self.account.signed_in() && !self.local_mode {
+        if (!self.account.signed_in() && !self.local_mode) || self.account.adding {
             #[cfg(feature = "host")]
             let host = &mut self.host;
             let mut go_local = false;
@@ -545,8 +643,8 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(p.bg_alt).inner_margin(egui::Margin::same(space::S as i8)))
             .show(ui, |ui| sidebar(ui, &model))
             .inner;
-        if let Some(page) = clicked {
-            self.go(page, &ctx);
+        if let Some(n) = clicked {
+            self.nav(n, &ctx);
         }
         let mut sign_in = false;
         egui::CentralPanel::default().frame(page_frame(&p)).show(ui, |ui| match self.page {

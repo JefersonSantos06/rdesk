@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use flutter_rust_bridge::{DartFnFuture, frb};
-use rdesk_common::config::{self, ClientConfig, NetworkConfig};
+use rdesk_common::account::Session;
+use rdesk_common::config::{self, ClientConfig};
 use rdesk_core::conn::{
     self, Cmd, ConnectOpts, Extensions, Handle, MachineTarget, PasswordAnswer, PasswordReply, UiEvent,
 };
@@ -203,7 +204,14 @@ impl RdSession {
         let key = config::format_host_id(&id);
         let mut entry = cfg.hosts.get(&key).cloned().unwrap_or_default();
         entry.id = key;
-        let machine = self.target.machine_id.map(|id| MachineTarget { id, addrs: self.target.addrs.clone() });
+        // A computer on the server: through the account in use now, which this session keeps
+        // when the app changes to another server.
+        let via = self.target.machine_id.and(Session::load());
+        let machine = self.target.machine_id.map(|id| MachineTarget {
+            id,
+            addrs: self.target.addrs.clone(),
+            account: via.as_ref().map(Session::key),
+        });
         if machine.is_none()
             && let Some(a) = self.target.addrs.first()
         {
@@ -213,7 +221,7 @@ impl RdSession {
         entry.password_ref = None;
         entry.agent_socket = None;
         entry.identity = None;
-        let net = if machine.is_some() { config::load_network() } else { NetworkConfig::default() };
+        let net = via.as_ref().map(Session::network).unwrap_or_default();
         let (w, h) = (self.options.max_width, self.options.max_height);
         let opts = ConnectOpts {
             name: self.target.name.clone(),

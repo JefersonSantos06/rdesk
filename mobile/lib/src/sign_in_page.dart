@@ -5,26 +5,53 @@ import 'computers_page.dart';
 import 'i18n.dart';
 import 'rust/api/app.dart' as api;
 
-/// Sign in to the rdesk server in the phone's browser (Google/GitHub + second factor), or
-/// use the app without a server (computers on this network only).
+/// Sign in to an rdesk server in the phone's browser (Google/GitHub + second factor), use a
+/// server already saved, or use the app without a server (computers on this network only).
 class SignInPage extends StatefulWidget {
-  const SignInPage({super.key});
+  const SignInPage({super.key, this.server, this.adding = false});
+
+  /// Pre-filled server (one whose sign-in ended).
+  final String? server;
+
+  /// Signing in to one more server while another is in use: a way back, nothing about
+  /// using the app without a server.
+  final bool adding;
 
   @override
   State<SignInPage> createState() => _SignInPageState();
 }
 
 class _SignInPageState extends State<SignInPage> {
-  final _server = TextEditingController();
+  late final _server = TextEditingController(text: widget.server);
   bool _busy = false;
   String? _error;
+  List<api.SavedAccount> _saved = [];
 
   @override
   void initState() {
     super.initState();
-    api.lastServer().then((s) {
-      if (s != null && _server.text.isEmpty && mounted) setState(() => _server.text = s);
+    if (!widget.adding && widget.server == null) {
+      api.lastServer().then((s) {
+        if (s != null && _server.text.isEmpty && mounted) setState(() => _server.text = s);
+      });
+    }
+    api.accounts().then((a) {
+      if (mounted) setState(() => _saved = a);
     });
+  }
+
+  Future<void> _use(api.SavedAccount s) async {
+    final now = await api.useAccount(key: s.account.key);
+    if (!mounted) return;
+    if (now == null) {
+      setState(() {
+        _server.text = s.account.server;
+        _error = t('Your sign-in to ${s.account.serverName} ended. Sign in again.',
+            'Seu acesso a ${s.account.serverName} terminou. Entre de novo.');
+      });
+      return;
+    }
+    Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const ComputersPage()), (_) => false);
   }
 
   Future<void> _signIn() async {
@@ -42,7 +69,7 @@ class _SignInPageState extends State<SignInPage> {
       final back = await FlutterWebAuth2.authenticate(url: url, callbackUrlScheme: 'rdesk');
       await api.finishSignIn(callbackUrl: back);
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const ComputersPage()));
+      Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const ComputersPage()), (_) => false);
     } catch (e) {
       final msg = e.toString();
       final cancelled = msg.contains('CANCELED') || msg.contains('canceled') || msg.contains('cancelled');
@@ -63,7 +90,9 @@ class _SignInPageState extends State<SignInPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final others = _saved.where((s) => widget.adding || !s.active).toList();
     return Scaffold(
+      appBar: widget.adding ? AppBar(title: Text(t('Add a server', 'Adicionar servidor'))) : null,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -78,7 +107,10 @@ class _SignInPageState extends State<SignInPage> {
                   Text('rdesk', textAlign: TextAlign.center, style: theme.textTheme.headlineMedium),
                   const SizedBox(height: 4),
                   Text(
-                    t('Reach your computers from the phone.', 'Acesse seus computadores pelo celular.'),
+                    widget.adding
+                        ? t('Sign in to one more rdesk server; you change between them on the computers page.',
+                            'Entre em mais um servidor rdesk; você troca entre eles na página de computadores.')
+                        : t('Reach your computers from the phone.', 'Acesse seus computadores pelo celular.'),
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                   ),
@@ -108,6 +140,21 @@ class _SignInPageState extends State<SignInPage> {
                     const SizedBox(height: 12),
                     Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
                   ],
+                  if (others.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    Text(t('Or use a saved server:', 'Ou use um servidor salvo:'), style: theme.textTheme.labelLarge),
+                    for (final s in others)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.dns_outlined),
+                        title: Text(s.account.serverName),
+                        subtitle: Text(s.expired
+                            ? t('${s.account.email} · sign in again', '${s.account.email} · entre de novo')
+                            : s.account.email),
+                        onTap: _busy ? null : () => _use(s),
+                      ),
+                  ],
+                  if (widget.adding) const SizedBox.shrink() else ...[
                   const SizedBox(height: 32),
                   const Divider(),
                   const SizedBox(height: 8),
@@ -125,6 +172,7 @@ class _SignInPageState extends State<SignInPage> {
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                   ),
+                  ],
                 ],
               ),
             ),

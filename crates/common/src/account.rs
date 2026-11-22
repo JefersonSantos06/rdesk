@@ -2,7 +2,8 @@
 //!
 //! The sign-in runs in the browser (Google/GitHub + second factor) and comes back to a
 //! one-shot HTTP listener on 127.0.0.1; the app then trades the code for a session
-//! (PKCE). The session is kept in `session.json` (owner-only) and lasts 10 days.
+//! (PKCE). A session lasts 10 days. Every account signed in to (one per server and user)
+//! is kept in `accounts.json` (owner-only); one of them is in use at a time.
 
 use std::time::Duration;
 
@@ -21,6 +22,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config;
 
+/// The accounts this person signed in to (one per server and user), and which one is in use.
+pub const ACCOUNTS_FILE: &str = "accounts.json";
+/// Before several accounts: the one sign-in. Moved into [`ACCOUNTS_FILE`] the first time.
 pub const SESSION_FILE: &str = "session.json";
 /// This computer's registration with the server (its own credential).
 pub const MACHINE_FILE: &str = "machine.json";
@@ -48,22 +52,186 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-impl Session {
-    /// The saved session, if there is one that has not expired.
-    pub fn load() -> Option<Self> {
-        let path = config::config_path(SESSION_FILE).ok()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let s: Self = serde_json::from_str(&text).ok()?;
-        (!s.expired()).then_some(s)
+/// `accounts.json`: every account signed in to on this device, and the one in use. Only one
+/// is used at a time: the app shows one server's computers, and changing is explicit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct Accounts {
+    /// [`Session::key`] of the account in use.
+    #[serde(default)]
+    active: Option<String>,
+    #[serde(default)]
+    sessions: Vec<Session>,
+}
+
+impl Accounts {
+    fn read() -> Self {
+        let Ok(path) = config::config_path(ACCOUNTS_FILE) else { return Self::default() };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => Self::migrate(),
+        }
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// The one `session.json` of earlier versions becomes the first account (and is in use).
+    fn migrate() -> Self {
+        let Ok(old) = config::config_path(SESSION_FILE) else { return Self::default() };
+        let Some(s) = std::fs::read_to_string(&old).ok().and_then(|t| serde_json::from_str::<Session>(&t).ok()) else {
+            return Self::default();
+        };
+        let a = Self { active: Some(s.key()), sessions: vec![s] };
+        match a.write() {
+            Ok(()) => {
+                let _ = remove_if_present(&old);
+            }
+            Err(e) => tracing::warn!("moving {SESSION_FILE} into {ACCOUNTS_FILE}: {e:#}"),
+        }
+        a
+    }
+
+    fn write(&self) -> Result<()> {
         config::ensure_config_dir()?;
-        config::write_private(&config::config_path(SESSION_FILE)?, serde_json::to_string_pretty(self)?.as_bytes())
+        config::write_private(&config::config_path(ACCOUNTS_FILE)?, serde_json::to_string_pretty(self)?.as_bytes())
     }
 
+    fn get(&self, key: &str) -> Option<&Session> {
+        self.sessions.iter().find(|s| s.key() == key)
+    }
+}
+
+/// The account this process uses instead of the one in use (see [`Session::pin`]).
+static PINNED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+impl Session {
+    /// Identifies an account: the server and the user on it. One server may have several
+    /// (different e-mails), and every server has its own.
+    pub fn key(&self) -> String {
+        format!("{}#{}", self.server, self.user.id)
+    }
+
+    /// "Server name · e-mail", how the app names an account.
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.server_name, self.user.email)
+    }
+
+    /// The account in use (or the one this process is [pinned](Self::pin) to), if it has not
+    /// expired.
+    pub fn load() -> Option<Self> {
+        match PINNED.get() {
+            Some(key) => Self::load_account(key),
+            None => {
+                let a = Accounts::read();
+                a.get(a.active.as_deref()?).filter(|s| !s.expired()).cloned()
+            }
+        }
+    }
+
+    /// The account `key`, if it is saved and has not expired.
+    pub fn load_account(key: &str) -> Option<Self> {
+        Accounts::read().get(key).filter(|s| !s.expired()).cloned()
+    }
+
+    /// Every saved account, expired ones too (they ask to sign in again), in the order they
+    /// were added.
+    pub fn all() -> Vec<Self> {
+        Accounts::read().sessions
+    }
+
+    /// [`Session::key`] of the account in use (or pinned), expired or not.
+    pub fn active_key() -> Option<String> {
+        PINNED.get().cloned().or_else(|| Accounts::read().active)
+    }
+
+    /// For the rest of this process, use the account `key` instead of the one in use: a
+    /// session window keeps the account it was opened with when the app changes to another.
+    pub fn pin(key: &str) {
+        let _ = PINNED.set(key.to_string());
+    }
+
+    /// The saved account `sel` names: its key, its number in [`Session::all`] (from 1), its
+    /// server's address or name, or its e-mail. Several match: an error naming them.
+    pub fn find(sel: &str) -> Result<Self> {
+        let all = Self::all();
+        let sel = sel.trim();
+        if let Some(s) = all.iter().find(|s| s.key() == sel) {
+            return Ok(s.clone());
+        }
+        if let Ok(n) = sel.parse::<usize>() {
+            return all.get(n.wrapping_sub(1)).cloned().with_context(|| format!("there is no account number {n}"));
+        }
+        let lower = sel.to_lowercase();
+        let host = normalize_server(sel).ok();
+        let found: Vec<&Session> = all
+            .iter()
+            .filter(|s| {
+                Some(&s.server) == host.as_ref()
+                    || s.server_name.to_lowercase() == lower
+                    || s.user.email.to_lowercase() == lower
+            })
+            .collect();
+        match found.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => bail!("no saved account matches {sel:?} (see `rdesk server list`)"),
+            many => bail!(
+                "{sel:?} matches several accounts: {} (use its number from `rdesk server list`)",
+                many.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// Save this account (replacing an older sign-in of the same one) and use it.
+    pub fn save(&self) -> Result<()> {
+        let mut a = Accounts::read();
+        let key = self.key();
+        match a.sessions.iter_mut().find(|s| s.key() == key) {
+            Some(s) => *s = self.clone(),
+            None => a.sessions.push(self.clone()),
+        }
+        a.active = Some(key);
+        a.write()
+    }
+
+    /// Use the saved account `key` from now on. It may have expired: then the app asks to
+    /// sign in to it again.
+    pub fn activate(key: &str) -> Result<()> {
+        let mut a = Accounts::read();
+        if a.get(key).is_none() {
+            bail!("no saved account {key}");
+        }
+        a.active = Some(key.to_string());
+        a.write()
+    }
+
+    /// The server ended the account `key` (revoked, user disabled): keep it in the list, to
+    /// sign in to again.
+    pub fn end(key: &str) -> Result<()> {
+        let mut a = Accounts::read();
+        let Some(s) = a.sessions.iter_mut().find(|s| s.key() == key) else { return Ok(()) };
+        s.expires_at = 0;
+        s.token.clear();
+        a.write()
+    }
+
+    /// Forget the account `key` (signed out). If it was in use, none is until one is chosen.
+    pub fn remove(key: &str) -> Result<()> {
+        let mut a = Accounts::read();
+        a.sessions.retain(|s| s.key() != key);
+        if a.active.as_deref() == Some(key) {
+            a.active = None;
+        }
+        a.write()
+    }
+
+    /// Forget the account in use (signed out).
     pub fn clear() -> Result<()> {
-        remove_if_present(&config::config_path(SESSION_FILE)?)
+        match Self::active_key() {
+            Some(key) => Self::remove(&key),
+            None => Ok(()),
+        }
+    }
+
+    /// How to reach others with this account: its server's relay and its token.
+    pub fn network(&self) -> config::NetworkConfig {
+        config::NetworkConfig { relay: Some(self.relay_url.clone()), token: Some(self.token.clone()) }
     }
 
     pub fn expired(&self) -> bool {
@@ -692,6 +860,7 @@ mod tests {
     #[test]
     fn registration_is_a_host_file() {
         assert!(config::HOST_FILES.contains(&MACHINE_FILE));
+        assert!(!config::HOST_FILES.contains(&ACCOUNTS_FILE), "the sign-ins belong to the person");
         assert!(!config::HOST_FILES.contains(&SESSION_FILE), "the sign-in belongs to the person");
     }
 

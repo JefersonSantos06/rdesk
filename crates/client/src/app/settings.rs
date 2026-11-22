@@ -556,6 +556,15 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
     vec![
         screen("settings-account", || page(SettingsPage::sample(Section::Account), true)),
         screen("settings-account-local", || page(SettingsPage::sample(Section::Account), false)),
+        screen("settings-account-servers", || {
+            let mut s = SettingsPage::sample(Section::Account);
+            let mut a = Account::sample(Some(Account::sample_session(true)), "").with_saved(Account::sample_saved());
+            move |ui: &mut Ui| {
+                with_sidebar(ui, super::Page::Settings, |ui| {
+                    s.show(ui, &mut a, false);
+                });
+            }
+        }),
         screen("settings-general", || page(SettingsPage::sample(Section::General), true)),
         screen("settings-general-applying", || {
             let mut s = SettingsPage::sample(Section::General);

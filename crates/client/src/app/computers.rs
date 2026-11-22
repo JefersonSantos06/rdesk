@@ -99,7 +99,9 @@ async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<Wo
         }
         shared.lock().unwrap().refreshing = true;
         ctx.request_repaint();
-        let (list, requests) = match Session::load() {
+        let session = Session::load();
+        let account = session.as_ref().map(Session::key);
+        let (list, requests) = match session {
             // With a presence proof: this computer is listed whoever registered it.
             Some(s) => match presence::api(&s, Some(Here::View)).await {
                 Ok(api) => {
@@ -110,6 +112,12 @@ async fn worker(shared: Arc<Mutex<Snapshot>>, mut rx: mpsc::UnboundedReceiver<Wo
             },
             None => (Err(t!("not signed in", "você não entrou em um servidor").into()), Some(Vec::new())),
         };
+        // The app changed to another server meanwhile: this list is not its.
+        if Session::load().map(|s| s.key()) != account {
+            shared.lock().unwrap().refreshing = false;
+            next = Instant::now();
+            continue;
+        }
         {
             let mut snap = shared.lock().unwrap();
             if let Some(r) = requests {
@@ -601,6 +609,17 @@ impl Computers {
         let _ = self.tx.send(WorkerCmd::Refresh);
     }
 
+    /// Another account is in use: forget the last one's list (nothing of one server shows
+    /// on another) and ask for the new one.
+    pub(super) fn reset(&mut self) {
+        {
+            let mut snap = self.shared.lock().unwrap();
+            snap.machines = None;
+            snap.requests.clear();
+        }
+        self.refresh();
+    }
+
     fn session_open(&self, target: &str) -> bool {
         #[cfg(test)]
         if self.fake_sessions.iter().any(|t| t == target) {
@@ -693,11 +712,11 @@ impl Computers {
             return;
         }
         if let Some(e) = self.locals.iter().find(|e| e.name.to_lowercase() == lower).cloned() {
-            self.spawn_session(&local_target(&e), &e.name, Open::Screen);
+            self.spawn_session(&local_target(&e), &e.name, Open::Screen, None);
             return;
         }
         match t.split_once('@') {
-            Some((id, _)) if parse_host_id(id).is_ok() => self.spawn_session(t, t, Open::Screen),
+            Some((id, _)) if parse_host_id(id).is_ok() => self.spawn_session(t, t, Open::Screen, None),
             _ => self.notify(
                 tf!(
                     "{t}: no computer with that name or ID (ID@address for one on the LAN).",
@@ -713,17 +732,20 @@ impl Computers {
             self.notify(tf!("{} is not shared with you.", "{} não está compartilhado com você.", m.name), true);
             return;
         }
-        self.spawn_session(&m.endpoint_id, &m.name, how);
+        // The list is the account in use's: the window keeps that account.
+        self.spawn_session(&m.endpoint_id, &m.name, how, Session::active_key());
     }
 
     fn open_item(&mut self, it: &Item, how: Open) {
         match it {
             Item::Server(m) => self.open(m, how),
-            Item::Local(e) => self.spawn_session(&local_target(e), &e.name, how),
+            Item::Local(e) => self.spawn_session(&local_target(e), &e.name, how, None),
         }
     }
 
-    fn spawn_session(&mut self, target: &str, label: &str, how: Open) {
+    /// Open a session window to `target`; one on a server keeps `account` (its [`Session::key`])
+    /// whatever account the app changes to while it is open.
+    fn spawn_session(&mut self, target: &str, label: &str, how: Open, account: Option<String>) {
         // Its own screen (a picture of itself, endlessly) or files: only its terminal.
         let id = target.split('@').next().unwrap_or(target);
         let id = parse_host_id(id).map(|b| config::format_host_id(&b)).unwrap_or_else(|_| id.to_string());
@@ -757,6 +779,9 @@ impl Computers {
         };
         let mut cmd = std::process::Command::new(&self.exe);
         cmd.args(["connect", target, "--controlled"]);
+        if let Some(a) = &account {
+            cmd.args(["--account", a]);
+        }
         match how {
             Open::Screen => {}
             Open::Files => {

@@ -28,6 +28,13 @@ Com um Apple ID gratuito, a instalação vale **7 dias**: reinstale do mesmo jei
 - **Com servidor**: digite o endereço do servidor e toque em **Entrar pelo navegador**. É o mesmo login do computador (Google ou GitHub e o segundo fator), e no fim o navegador volta sozinho para o app.
 - **Sem servidor** (rede de casa ou Tailscale): **Usar nesta rede, sem servidor**. Depois, em **＋ Nesta rede**, coloque o nome, o **ID do host** (o computador mostra em *Este computador*) e o endereço (IP ou nome do Tailscale). No Android, o endereço pode ficar vazio se o computador anuncia na rede (mDNS). No iPhone, coloque sempre o endereço.
 
+### Mais de um servidor
+
+Toque no título da página de computadores (o servidor e o e-mail em uso) para **trocar de
+servidor** ou **adicionar servidor**. Cada servidor guarda o seu login e o seu e-mail; a
+lista mostra só os computadores do servidor em uso. Uma sessão aberta continua no servidor
+de onde veio. Também em *Configurações → Conta → Trocar servidor*.
+
 ## Usar
 
 Toque num computador para conectar. Tocar e segurar mostra as opções: **Arquivos**, **Terminal** e copiar o ID.

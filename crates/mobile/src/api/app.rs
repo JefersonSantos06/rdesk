@@ -56,6 +56,8 @@ pub fn app_version() -> String {
 /// Who is signed in, and to which server.
 #[derive(Debug, Clone)]
 pub struct Account {
+    /// Identifies the account among the saved ones (server and user).
+    pub key: String,
     pub server: String,
     pub server_name: String,
     pub email: String,
@@ -66,6 +68,7 @@ pub struct Account {
 
 fn account_of(s: &Session) -> Account {
     Account {
+        key: s.key(),
         server: s.server.clone(),
         server_name: s.server_name.clone(),
         email: s.user.email.clone(),
@@ -75,9 +78,53 @@ fn account_of(s: &Session) -> Account {
     }
 }
 
-/// The saved sign-in, if it has not expired.
+/// The account in use, if its sign-in has not expired.
 pub fn account() -> Option<Account> {
     Session::load().map(|s| account_of(&s))
+}
+
+/// An account saved on the phone: one per server and e-mail. One is in use at a time.
+#[derive(Debug, Clone)]
+pub struct SavedAccount {
+    pub account: Account,
+    /// The one in use.
+    pub active: bool,
+    /// Its sign-in ended: choosing it asks to sign in again.
+    pub expired: bool,
+}
+
+/// Every saved account, in the order they were added.
+pub fn accounts() -> Vec<SavedAccount> {
+    let active = Session::active_key();
+    Session::all()
+        .iter()
+        .map(|s| SavedAccount {
+            account: account_of(s),
+            active: active.as_deref() == Some(s.key().as_str()),
+            expired: s.expired(),
+        })
+        .collect()
+}
+
+/// Use the saved account `key` from now on. Returns it, or `None` when its sign-in ended
+/// (sign in to its server again).
+pub fn use_account(key: String) -> Result<Option<Account>> {
+    Session::activate(&key)?;
+    let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG).unwrap_or_default();
+    if let Some(s) = Session::all().into_iter().find(|s| s.key() == key) {
+        cfg.server = Some(s.server);
+    }
+    cfg.app.local_only = false;
+    let _ = config::save_toml(config::CLIENT_CONFIG, &cfg);
+    Ok(Session::load().map(|s| account_of(&s)))
+}
+
+/// Sign out of the saved account `key`, here and on its server.
+pub async fn remove_account(key: String) -> Result<()> {
+    if let Some(s) = Session::load_account(&key) {
+        let _ = run(async move { s.api()?.logout().await }).await;
+    }
+    Session::remove(&key)
 }
 
 /// The server last signed in to (to pre-fill the sign-in page).
@@ -119,8 +166,8 @@ pub async fn finish_sign_in(callback_url: String) -> Result<Account> {
     Ok(account_of(&session))
 }
 
-/// Sign out here and on the server (the server part may fail when offline; the phone
-/// forgets the sign-in anyway).
+/// Sign out of the account in use, here and on its server (the server part may fail when
+/// offline; the phone forgets the sign-in anyway).
 pub async fn sign_out() -> Result<()> {
     if let Some(s) = Session::load() {
         let _ = run(async move { s.api()?.logout().await }).await;

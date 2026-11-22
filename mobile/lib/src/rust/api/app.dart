@@ -8,7 +8,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `account_of`, `offer`, `start_log`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Where the app keeps its files and how it is named; call once at start.
 /// `data_dir`: the app's private directory; `device_name`: the phone's name (shown to the
@@ -26,8 +26,21 @@ Future<void> start({
 /// The app's version (`MAJOR.MINOR.PATCH`).
 Future<String> appVersion() => RustLib.instance.api.crateApiAppAppVersion();
 
-/// The saved sign-in, if it has not expired.
+/// The account in use, if its sign-in has not expired.
 Future<Account?> account() => RustLib.instance.api.crateApiAppAccount();
+
+/// Every saved account, in the order they were added.
+Future<List<SavedAccount>> accounts() =>
+    RustLib.instance.api.crateApiAppAccounts();
+
+/// Use the saved account `key` from now on. Returns it, or `None` when its sign-in ended
+/// (sign in to its server again).
+Future<Account?> useAccount({required String key}) =>
+    RustLib.instance.api.crateApiAppUseAccount(key: key);
+
+/// Sign out of the saved account `key`, here and on its server.
+Future<void> removeAccount({required String key}) =>
+    RustLib.instance.api.crateApiAppRemoveAccount(key: key);
 
 /// The server last signed in to (to pre-fill the sign-in page).
 Future<String?> lastServer() => RustLib.instance.api.crateApiAppLastServer();
@@ -47,8 +60,8 @@ Future<String> beginSignIn({required String server}) =>
 Future<Account> finishSignIn({required String callbackUrl}) =>
     RustLib.instance.api.crateApiAppFinishSignIn(callbackUrl: callbackUrl);
 
-/// Sign out here and on the server (the server part may fail when offline; the phone
-/// forgets the sign-in anyway).
+/// Sign out of the account in use, here and on its server (the server part may fail when
+/// offline; the phone forgets the sign-in anyway).
 Future<void> signOut() => RustLib.instance.api.crateApiAppSignOut();
 
 /// The computers on the server (signed in only).
@@ -89,6 +102,8 @@ Future<String> downloadUpdate({required String dir}) =>
 
 /// Who is signed in, and to which server.
 class Account {
+  /// Identifies the account among the saved ones (server and user).
+  final String key;
   final String server;
   final String serverName;
   final String email;
@@ -97,6 +112,7 @@ class Account {
   final PlatformInt64 daysLeft;
 
   const Account({
+    required this.key,
     required this.server,
     required this.serverName,
     required this.email,
@@ -107,6 +123,7 @@ class Account {
 
   @override
   int get hashCode =>
+      key.hashCode ^
       server.hashCode ^
       serverName.hashCode ^
       email.hashCode ^
@@ -119,6 +136,7 @@ class Account {
       identical(this, other) ||
       other is Account &&
           runtimeType == other.runtimeType &&
+          key == other.key &&
           server == other.server &&
           serverName == other.serverName &&
           email == other.email &&
@@ -213,6 +231,35 @@ class Computer {
           isMine == other.isMine &&
           addrs == other.addrs &&
           direct == other.direct;
+}
+
+/// An account saved on the phone: one per server and e-mail. One is in use at a time.
+class SavedAccount {
+  final Account account;
+
+  /// The one in use.
+  final bool active;
+
+  /// Its sign-in ended: choosing it asks to sign in again.
+  final bool expired;
+
+  const SavedAccount({
+    required this.account,
+    required this.active,
+    required this.expired,
+  });
+
+  @override
+  int get hashCode => account.hashCode ^ active.hashCode ^ expired.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SavedAccount &&
+          runtimeType == other.runtimeType &&
+          account == other.account &&
+          active == other.active &&
+          expired == other.expired;
 }
 
 /// A computer saved on this phone, reached without the server (local network, Tailscale).

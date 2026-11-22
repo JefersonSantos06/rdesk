@@ -64,7 +64,13 @@ pub(crate) fn page(ui: &mut egui::Ui, draw: impl FnOnce(&mut egui::Ui)) {
 
 /// The sidebar next to `draw`, as in the window.
 pub(crate) fn with_sidebar(ui: &mut egui::Ui, page_: super::Page, draw: impl FnOnce(&mut egui::Ui)) {
+    sidebar_and(ui, page_, false, draw);
+}
+
+/// [`with_sidebar`], with the server menu open if `open_menu`.
+fn sidebar_and(ui: &mut egui::Ui, page_: super::Page, open_menu: bool, draw: impl FnOnce(&mut egui::Ui)) {
     let p = ui::pal(ui);
+    let saved = super::account::Account::sample_saved();
     let model = super::Sidebar {
         page: page_,
         signed_in: true,
@@ -72,6 +78,8 @@ pub(crate) fn with_sidebar(ui: &mut egui::Ui, page_: super::Page, draw: impl FnO
         pending: 2,
         host: Some((p.warning, "em uso por Ana Beatriz".into())),
         account: Some(("jeferson.santos.silva@exemplo.com.br".into(), "rdesk da Família Santos".into())),
+        saved: saved.into_iter().enumerate().map(|(i, s)| (s, i == 0)).collect(),
+        open_menu,
         sessions: 1,
     };
     egui::Panel::left("nav")
@@ -108,6 +116,13 @@ fn own() -> Vec<Screen> {
         screen("shell-sidebar", || {
             |ui: &mut egui::Ui| {
                 with_sidebar(ui, super::Page::Computers, |ui| {
+                    ui::page_title(ui, "Computadores", Some("Os computadores que você pode acessar"));
+                })
+            }
+        }),
+        screen("shell-sidebar-servers", || {
+            |ui: &mut egui::Ui| {
+                sidebar_and(ui, super::Page::Computers, true, |ui| {
                     ui::page_title(ui, "Computadores", Some("Os computadores que você pode acessar"));
                 })
             }
