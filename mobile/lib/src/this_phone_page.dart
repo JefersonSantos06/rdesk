@@ -6,9 +6,10 @@ import 'package:material_ui/material_ui.dart';
 import 'i18n.dart';
 import 'rust/api/app.dart' as app;
 import 'rust/api/host.dart' as api;
+import 'screen_share.dart';
 
-/// This phone as a host: other devices connect to it. For now the host shows a test
-/// picture and only logs the input it gets; sharing the real screen and touch come next.
+/// This phone as a host: other devices connect to it and see its screen. Touches from the
+/// other side are only logged for now (view only).
 class ThisPhonePage extends StatefulWidget {
   const ThisPhonePage({super.key});
 
@@ -57,6 +58,23 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
       _busy = false;
       _view = api.hostStatus();
     });
+  }
+
+  /// Share the screen (Android asks first), then accept connections.
+  Future<void> _turnOn() async {
+    if (!await ScreenShare.start()) {
+      throw t(
+        'Android did not allow sharing the screen, so access stays off.',
+        'O Android não permitiu compartilhar a tela, então o acesso continua desligado.',
+      );
+    }
+    await api.startHost();
+  }
+
+  /// The host first: stopping the screen while it runs reports the screen as lost.
+  Future<void> _turnOff() async {
+    await api.stopHost();
+    await ScreenShare.stop();
   }
 
   /// Changes to the password or the server take effect when the host starts again.
@@ -112,8 +130,8 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Text(
             t(
-              'Test stage: whoever connects sees a test picture, not this phone\'s screen, and touches are only logged.',
-              'Fase de teste: quem conectar vê uma imagem de teste, não a tela deste celular, e os toques só são registrados.',
+              'Whoever connects sees this phone\'s screen while access is on. View only for now: their touches do not reach the phone yet. Android stops sharing when the screen locks.',
+              'Quem se conectar vê a tela deste celular enquanto o acesso estiver ligado. Por enquanto só visualização: os toques de lá ainda não chegam ao celular. O Android para o compartilhamento quando a tela bloqueia.',
             ),
             style: theme.textTheme.bodySmall,
           ),
@@ -123,7 +141,7 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
           title: Text(t('Allow access to this phone', 'Permitir acesso a este celular')),
           subtitle: Text(state),
           value: running,
-          onChanged: _busy ? null : (on) => _do(() => on ? api.startHost() : api.stopHost()),
+          onChanged: _busy ? null : (on) => _do(on ? _turnOn : _turnOff),
         ),
         if (v?.error != null)
           Padding(

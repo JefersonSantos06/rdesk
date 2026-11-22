@@ -111,6 +111,31 @@ Se o computador pede a própria senha ou chave além do servidor, o app oferece 
 
   A partir daí, o celular entra com a digital ou o rosto. A chave fica no chip de segurança do celular e não sai dele, nem num backup.
 
+## Acessar este celular (Android, em teste)
+
+O celular Android também pode ser o acessado: quem se conectar a ele vê a tela dele. Por enquanto é **só visualização**: os toques de quem está do outro lado ainda não chegam ao celular.
+
+1. No app, em *Configurações → Este celular*, ligue **Permitir acesso a este celular**.
+2. O Android pergunta se pode mostrar notificações (é o aviso de que a tela está sendo compartilhada) e depois se o rdesk pode **gravar ou transmitir a tela inteira**. Toque em **Iniciar**.
+3. Para entrar no celular, use uma destas formas:
+   - **Pelo servidor**: toque em **Adicionar ao meu servidor**. O celular aparece na sua lista de computadores, como qualquer outro.
+   - **Na rede local ou no Tailscale**: toque em **Definir uma senha** e conecte com o **ID do host** que a página mostra e o endereço do celular.
+
+Enquanto o acesso estiver ligado, a notificação *Compartilhando a tela deste celular* fica na barra. O botão **Parar** dela desliga tudo.
+
+O compartilhamento também acaba sozinho:
+
+- quando a tela bloqueia, porque o Android encerra a gravação;
+- quando você para a transmissão pelo próprio sistema.
+
+Nesses casos, volte em *Este celular* e ligue de novo. O Android pede a permissão a cada vez.
+
+Limitações desta fase:
+
+- **Só visualização**: os toques do outro lado ainda não chegam ao celular.
+- **Movimento**: a tela vai em blocos de imagem, sem vídeo H.264, então rolar ou abrir apps fica lento (poucos quadros por segundo).
+- **Sem som.**
+
 ## Bom saber
 
 - **Ao sair do app**: o celular desliga a rede dele, e a sessão cai. Ao voltar, ela reconecta sozinha, sem pedir senha de novo (por até 10 minutos).

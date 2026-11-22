@@ -114,6 +114,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Monitores com escala diferente (100 %/150 %): cliques caem no lugar certo, inclusive nas bordas.
 - [ ] Monitor à esquerda do primário (coordenadas negativas): cliques corretos.
 
+## Celular Android como acessado
+- [ ] *Configurações → Este celular → Permitir acesso*: o Android pede notificações (13+) e depois a tela inteira; com **Iniciar**, aparece o ícone de transmissão e a notificação *Compartilhando a tela deste celular*.
+- [ ] Recusar a captura: a chave continua desligada e a página diz por quê.
+- [ ] Do computador (`rdesk connect <ID>@<ip>` com a senha do celular, ou pelo servidor depois de *Adicionar ao meu servidor*): a imagem é a tela do celular, em pé; a página mostra quem está conectado.
+- [ ] Girar o celular: a imagem passa a deitada, sem faixas pretas.
+- [ ] **Parar** na notificação: o ícone some, o host para e a chave volta a desligada.
+- [ ] Bloquear a tela (celular com PIN): o compartilhamento acaba, o host para e a página pede para ligar de novo.
+
 ## Teclado
 - [ ] Layout US e ABNT2 no host: digitar `ç ã é ~ ^ ' " / ?` (teclas `IntlRo`, `IntlBackslash`, teclas mortas).
 - [ ] AltGr (Windows) produz `@`, `€`, etc.

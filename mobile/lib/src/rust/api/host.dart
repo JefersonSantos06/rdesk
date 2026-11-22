@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `host`, `view`
+// These functions are ignored because they are not marked as `pub`: `host`, `screen_stopped`, `view`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Host`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
@@ -17,7 +17,8 @@ HostView hostStatus() => RustLib.instance.api.crateApiHostHostStatus();
 /// Send the status to `sink` now and whenever it changes (one watcher: a new call replaces it).
 Stream<HostView> watchHost() => RustLib.instance.api.crateApiHostWatchHost();
 
-/// Start accepting connections (nothing happens if it is running already).
+/// Start accepting connections (nothing happens if it is running already). On Android, share
+/// the screen first (the app's `ScreenShare.start`): the host sends what it shows.
 Future<void> startHost() => RustLib.instance.api.crateApiHostStartHost();
 
 /// Stop accepting connections and end the current session.
@@ -69,6 +70,9 @@ class HostView {
 
   /// Who is connected now.
   final String? sessionClient;
+
+  /// The phone's screen is being shared (Android); otherwise the test picture goes out.
+  final bool sharingScreen;
   final bool hasPassword;
 
   /// Newest last.
@@ -82,6 +86,7 @@ class HostView {
     this.registration,
     this.registrationError,
     this.sessionClient,
+    required this.sharingScreen,
     required this.hasPassword,
     required this.events,
   });
@@ -98,6 +103,7 @@ class HostView {
       registration.hashCode ^
       registrationError.hashCode ^
       sessionClient.hashCode ^
+      sharingScreen.hashCode ^
       hasPassword.hashCode ^
       events.hashCode;
 
@@ -113,6 +119,7 @@ class HostView {
           registration == other.registration &&
           registrationError == other.registrationError &&
           sessionClient == other.sessionClient &&
+          sharingScreen == other.sharingScreen &&
           hasPassword == other.hasPassword &&
           events == other.events;
 }

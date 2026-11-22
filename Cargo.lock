@@ -6921,6 +6921,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "flutter_rust_bridge",
+ "jni 0.21.1",
  "p256 0.13.2",
  "rdesk-common",
  "rdesk-core",

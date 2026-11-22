@@ -1,6 +1,6 @@
-//! This phone as a host: other devices connect to it. First step: the host runs inside the
-//! app with a test picture and logged input (no screen capture or touch injection yet), so
-//! the connection, the sign-in and the server registration can be tried end to end.
+//! This phone as a host: other devices connect to it. On Android it shares the screen (the
+//! app's MediaProjection, see [`crate::screen`]); touches from the other side are only
+//! logged for now. Elsewhere (and without a shared screen) it sends a test picture.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -29,6 +29,8 @@ pub struct HostView {
     pub registration_error: Option<String>,
     /// Who is connected now.
     pub session_client: Option<String>,
+    /// The phone's screen is being shared (Android); otherwise the test picture goes out.
+    pub sharing_screen: bool,
     pub has_password: bool,
     /// Newest last.
     pub events: Vec<String>,
@@ -77,6 +79,7 @@ fn view(h: &Host) -> HostView {
         registration,
         registration_error,
         session_client: st.session.map(|s| s.client),
+        sharing_screen: crate::screen::sharing(),
         has_password: admin::has_password(),
         events: st.events.into_iter().map(|e| e.text).collect(),
     }
@@ -96,26 +99,57 @@ pub fn watch_host(sink: StreamSink<HostView>) -> Result<()> {
     Ok(())
 }
 
-/// Start accepting connections (nothing happens if it is running already).
+/// Start accepting connections (nothing happens if it is running already). On Android, share
+/// the screen first (the app's `ScreenShare.start`): the host sends what it shows.
 pub fn start_host() -> Result<()> {
     let h = host();
     admin::ensure_initialized()?;
     if h.handle.lock().unwrap().as_ref().is_some_and(|x| !x.is_finished()) {
         return Ok(());
     }
-    // Until the screen and touch backends exist: the test picture and logged input.
-    let opts = RunOpts { fake_capture: true, fake_input: true, ..Default::default() };
+    let screen = crate::screen::sharing();
+    if screen {
+        rdesk_host::capture::set_screen_source(|| Box::new(crate::screen::PhoneScreen));
+    }
+    // Touches are not injected yet: they are only logged.
+    let opts = RunOpts { fake_capture: !screen, fake_input: true, ..Default::default() };
     // Started outside the lock: the reporter's first update reads the status (and the lock).
     let started = HostHandle::start(opts, rt().handle(), h.reporter.clone());
     *h.handle.lock().unwrap() = Some(started);
     h.reporter.event(
-        rdesk_common::t!(
-            "Test picture: the screen is not shared yet",
-            "Imagem de teste: a tela ainda não é compartilhada"
-        ),
+        if screen {
+            rdesk_common::t!(
+                "Sharing this phone's screen (view only: touches are not passed on yet)",
+                "Compartilhando a tela deste celular (só visualização: os toques ainda não são repassados)"
+            )
+        } else {
+            rdesk_common::t!("Test picture: the screen is not shared", "Imagem de teste: a tela não está compartilhada")
+        },
         false,
     );
     Ok(())
+}
+
+/// The screen stopped being shared (from the app's Kotlin): the host stops with it, since
+/// nobody could see the phone any more. `by_person`: from the notification's Stop button.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn screen_stopped(by_person: bool) {
+    let h = host();
+    if h.handle.lock().unwrap().as_ref().is_none_or(|x| x.is_finished()) {
+        return;
+    }
+    h.reporter.event(
+        if by_person {
+            rdesk_common::t!("Screen sharing stopped from the notification", "Compartilhamento da tela parado pela notificação")
+        } else {
+            rdesk_common::t!(
+                "Screen sharing ended (the screen locked, or it was stopped from the system): turn access on again",
+                "O compartilhamento da tela acabou (a tela bloqueou, ou ele foi parado pelo sistema): ligue o acesso de novo"
+            )
+        },
+        !by_person,
+    );
+    rt().spawn(stop_host());
 }
 
 /// Stop accepting connections and end the current session.

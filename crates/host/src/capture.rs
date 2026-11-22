@@ -2,10 +2,11 @@
 //! platform handles are not `Send`).
 //!
 //! Backends: `xcap` (Windows / macOS / X11), the desktop portal on Wayland
-//! (`wayland`), nothing yet on phones (they get the test pattern), and a synthetic animated test pattern (`RDESK_FAKE_CAPTURE=1`) for
-//! tests and machines without a display.
+//! (`wayland`), one the program around the host brings ([`set_screen_source`]: the phone
+//! app's MediaProjection on Android), and a synthetic animated test pattern
+//! (`RDESK_FAKE_CAPTURE=1`) for tests and machines without a display.
 
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::time::Instant;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -48,7 +49,13 @@ impl Capturer {
         std::thread::Builder::new()
             .name("rdesk-capture".into())
             .spawn(move || {
-                let mut backend: Box<dyn Backend> = if fake { Box::new(Synthetic::new()) } else { platform_backend() };
+                let mut backend: Box<dyn Backend> = if fake {
+                    Box::new(Synthetic::new())
+                } else if let Some(make) = SOURCE.get() {
+                    make()
+                } else {
+                    platform_backend()
+                };
                 let mut cursor = crate::cursor::Reader::new();
                 while let Ok(req) = rx.recv() {
                     // Started by the service: the sign-in, lock and UAC screens are another desktop.
@@ -93,9 +100,19 @@ impl Capturer {
     }
 }
 
-trait Backend {
+/// Where the pictures come from. Runs on the capture thread, so it may block (briefly: the
+/// video loop waits for [`Backend::grab`]).
+pub trait Backend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>>;
     fn grab(&mut self, id: u32) -> Result<Frame>;
+}
+
+static SOURCE: OnceLock<fn() -> Box<dyn Backend>> = OnceLock::new();
+
+/// Take the screen from the program the host runs in (the phone app) instead of this
+/// system's own capture. Set once, before the host starts; `make` runs on the capture thread.
+pub fn set_screen_source(make: fn() -> Box<dyn Backend>) {
+    let _ = SOURCE.set(make);
 }
 
 #[cfg(target_os = "linux")]
@@ -113,10 +130,10 @@ fn platform_backend() -> Box<dyn Backend> {
     Box::new(XcapBackend::default())
 }
 
-/// Phones: no screen backend yet (Android's MediaProjection comes next), the test pattern.
+/// Phones whose app brought no screen ([`set_screen_source`]): the test pattern.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn platform_backend() -> Box<dyn Backend> {
-    tracing::warn!("this phone cannot share its screen yet: sending the test pattern");
+    tracing::warn!("no screen to share: sending the test pattern");
     Box::new(Synthetic::new())
 }
 

@@ -24,6 +24,10 @@ ssh-key = { version = "0.6", features = ["p256", "std"] }
 p256 = { version = "0.13", features = ["ecdsa", "std"] }
 zeroize = "1"
 
+# The screen's pictures come from the app's Kotlin (MediaProjection) through JNI.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [lints.rust]
 # flutter_rust_bridge's generated code uses this cfg.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
