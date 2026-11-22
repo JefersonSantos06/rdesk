@@ -476,6 +476,14 @@ async fn serve_audio(r: &mut transport::RecvStream, w: &mut transport::SendStrea
     }
 }
 
+/// The black screen at the computer goes away (the session ended).
+fn privacy_off() {
+    #[cfg(windows)]
+    if let Err(e) = crate::win::privacy::set(false) {
+        tracing::warn!("black screen: {e:#}");
+    }
+}
+
 /// What the extensions stream works with.
 struct ExtCtx<'a> {
     settings: &'a watch::Sender<VideoSettings>,
@@ -715,8 +723,7 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
     }
     // Whoever is at the computer gets it back as soon as the session ends.
     if privacy_on {
-        #[cfg(windows)]
-        let _ = crate::win::privacy::set(false);
+        privacy_off();
     }
     if blocked {
         let (rtx, _) = tokio::sync::oneshot::channel();

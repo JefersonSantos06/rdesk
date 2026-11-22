@@ -173,9 +173,9 @@ mod win {
 
     /// A color pointer (BGRA). Old ones have no alpha: the AND mask says what is transparent.
     pub(super) fn colour_cursor(bgra: &[u8], mask: Option<&[u8]>, w: u32, h: u32) -> Vec<u8> {
-        let has_alpha = bgra.chunks_exact(4).any(|p| p[3] != 0);
+        let has_alpha = bgra.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
         let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for (i, p) in bgra.chunks_exact(4).enumerate() {
+        for (i, p) in bgra.as_chunks::<4>().0.iter().enumerate() {
             let a = if has_alpha {
                 p[3]
             } else {

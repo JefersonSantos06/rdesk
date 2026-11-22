@@ -76,8 +76,9 @@ fn platform_ask(text: &str, timeout: Duration) -> Answer {
 #[cfg(target_os = "linux")]
 fn platform_ask(text: &str, timeout: Duration) -> Answer {
     // zenity: 0 yes, 1 no, 5 timed out.
+    let secs = timeout.as_secs().to_string();
     let out = std::process::Command::new("zenity")
-        .args(["--question", "--title", TITLE(), "--text", text, "--timeout", &timeout.as_secs().to_string()])
+        .args(["--question", "--title", TITLE(), "--text", text, "--timeout", secs.as_str()])
         .status();
     match out.map(|s| s.code()) {
         Ok(Some(0)) => Answer::Allowed,

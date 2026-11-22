@@ -59,7 +59,9 @@ pub fn png_decode(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     buf.truncate(info.buffer_size());
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+        }
         c => return Err(anyhow!("unexpected PNG color type {c:?}")),
     };
     ensure!(rgba.len() == (w * h * 4) as usize, "PNG decoded to the wrong size");
