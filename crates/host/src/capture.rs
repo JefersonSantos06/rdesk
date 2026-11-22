@@ -59,7 +59,7 @@ impl Capturer {
                     #[cfg(not(target_os = "linux"))]
                     Box::new(XcapBackend::default())
                 };
-                let mut cursor = crate::cursor::Reader::default();
+                let mut cursor = crate::cursor::Reader::new();
                 while let Ok(req) = rx.recv() {
                     // Started by the service: the sign-in, lock and UAC screens are another desktop.
                     #[cfg(windows)]

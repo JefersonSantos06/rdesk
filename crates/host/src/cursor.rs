@@ -61,6 +61,10 @@ pub struct Reader;
 
 #[cfg(not(windows))]
 impl Reader {
+    pub fn new() -> Self {
+        Reader
+    }
+
     pub fn read(&mut self) -> Option<Current> {
         None
     }
@@ -88,6 +92,10 @@ mod win {
     }
 
     impl Reader {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
         pub fn read(&mut self) -> Option<Current> {
             // SAFETY: plain Win32 calls on a zeroed, sized struct.
             let mut ci: CURSORINFO = unsafe { zeroed() };
