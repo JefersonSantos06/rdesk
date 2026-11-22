@@ -3038,6 +3038,62 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
     ]
 }
 
+/// macOS: what the host still needs (Screen Recording, Accessibility), with buttons that
+/// open the right pane of System Settings. Nothing when both are given.
+#[cfg(target_os = "macos")]
+fn mac_permissions_banner(ui: &mut Ui) {
+    use rdesk_host::mac_permissions::{self as mp, Pane};
+    use std::sync::Mutex;
+    use std::time::Duration;
+    // Asked every couple of seconds, not every frame.
+    static CACHE: Mutex<Option<(Instant, bool, bool)>> = Mutex::new(None);
+    let (screen, input) = {
+        let mut c = CACHE.lock().unwrap();
+        match *c {
+            Some((at, s, i)) if at.elapsed() < Duration::from_secs(2) => (s, i),
+            _ => {
+                let (s, i) = (mp::screen_allowed(), mp::input_allowed());
+                *c = Some((Instant::now(), s, i));
+                (s, i)
+            }
+        }
+    };
+    if screen && input {
+        return;
+    }
+    ui.add_space(space::M);
+    let text = match (screen, input) {
+        (false, false) => t!(
+            "macOS has not given rdesk Screen Recording nor Accessibility: others see no screen and cannot click.",
+            "O macOS não deu ao rdesk Gravação de Tela nem Acessibilidade: quem conecta não vê a tela nem consegue clicar."
+        ),
+        (false, true) => t!(
+            "macOS has not given rdesk Screen Recording: others see no screen.",
+            "O macOS não deu ao rdesk Gravação de Tela: quem conecta não vê a tela."
+        ),
+        _ => t!(
+            "macOS has not given rdesk Accessibility: others see the screen but cannot click or type.",
+            "O macOS não deu ao rdesk Acessibilidade: quem conecta vê a tela, mas não consegue clicar nem digitar."
+        ),
+    };
+    ui::banner(ui, Tone::Warning, text, None);
+    ui.horizontal_wrapped(|ui| {
+        if !screen && ui::secondary(ui, t!("Open Screen Recording", "Abrir Gravação de Tela")).clicked() {
+            mp::open_settings(Pane::ScreenRecording);
+        }
+        if !input && ui::secondary(ui, t!("Open Accessibility", "Abrir Acessibilidade")).clicked() {
+            mp::open_settings(Pane::Accessibility);
+        }
+    });
+    ui::caption(
+        ui,
+        t!(
+            "Add rdesk there and turn it on, then quit rdesk (tray icon) and open it again.",
+            "Adicione o rdesk lá e ligue a chave; depois saia do rdesk (ícone da barra de menus) e abra de novo."
+        ),
+    );
+}
+
 #[cfg(test)]
 mod sample {
     use std::collections::VecDeque;
@@ -3200,60 +3256,4 @@ mod sample {
             l("Telas", "2 encontradas: 2560×1440 e 1920×1080", true),
         ]
     }
-}
-
-/// macOS: what the host still needs (Screen Recording, Accessibility), with buttons that
-/// open the right pane of System Settings. Nothing when both are given.
-#[cfg(target_os = "macos")]
-fn mac_permissions_banner(ui: &mut Ui) {
-    use rdesk_host::mac_permissions::{self as mp, Pane};
-    use std::sync::Mutex;
-    use std::time::Duration;
-    // Asked every couple of seconds, not every frame.
-    static CACHE: Mutex<Option<(Instant, bool, bool)>> = Mutex::new(None);
-    let (screen, input) = {
-        let mut c = CACHE.lock().unwrap();
-        match *c {
-            Some((at, s, i)) if at.elapsed() < Duration::from_secs(2) => (s, i),
-            _ => {
-                let (s, i) = (mp::screen_allowed(), mp::input_allowed());
-                *c = Some((Instant::now(), s, i));
-                (s, i)
-            }
-        }
-    };
-    if screen && input {
-        return;
-    }
-    ui.add_space(space::M);
-    let text = match (screen, input) {
-        (false, false) => t!(
-            "macOS has not given rdesk Screen Recording nor Accessibility: others see no screen and cannot click.",
-            "O macOS não deu ao rdesk Gravação de Tela nem Acessibilidade: quem conecta não vê a tela nem consegue clicar."
-        ),
-        (false, true) => t!(
-            "macOS has not given rdesk Screen Recording: others see no screen.",
-            "O macOS não deu ao rdesk Gravação de Tela: quem conecta não vê a tela."
-        ),
-        _ => t!(
-            "macOS has not given rdesk Accessibility: others see the screen but cannot click or type.",
-            "O macOS não deu ao rdesk Acessibilidade: quem conecta vê a tela, mas não consegue clicar nem digitar."
-        ),
-    };
-    ui::banner(ui, Tone::Warning, text, None);
-    ui.horizontal_wrapped(|ui| {
-        if !screen && ui::secondary(ui, t!("Open Screen Recording", "Abrir Gravação de Tela")).clicked() {
-            mp::open_settings(Pane::ScreenRecording);
-        }
-        if !input && ui::secondary(ui, t!("Open Accessibility", "Abrir Acessibilidade")).clicked() {
-            mp::open_settings(Pane::Accessibility);
-        }
-    });
-    ui::caption(
-        ui,
-        t!(
-            "Add rdesk there and turn it on, then quit rdesk (tray icon) and open it again.",
-            "Adicione o rdesk lá e ligue a chave; depois saia do rdesk (ícone da barra de menus) e abra de novo."
-        ),
-    );
 }

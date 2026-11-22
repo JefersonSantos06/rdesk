@@ -95,10 +95,17 @@ async fn shell_runs_a_command() {
             TermHost::Exited(c) => panic!("the shell exited at once ({c})"),
         }
     }
-    // The command's output is the joined word, which its echo (two words) is not.
+    // The command's output, not the echo of what was typed: a shell prints both words on one
+    // line of their own, PowerShell one word per line. The echo ("echo rdesk-term ok-marker",
+    // colored by PSReadLine on Windows) is neither.
     link.tx.send(TermClient::Input(b"echo rdesk-term ok-marker\r".to_vec())).unwrap();
     link.tx.send(TermClient::Resize { cols: 120, rows: 40 }).unwrap();
-    while !output.contains("rdesk-term ok-marker\r\n") && !output.contains("rdesk-term ok-marker\n") {
+    let ran = |o: &str| {
+        let plain = strip_ansi(o);
+        let lines: Vec<&str> = plain.split('\n').map(|l| l.trim_end_matches('\r')).collect();
+        lines.contains(&"rdesk-term ok-marker") || lines.windows(2).any(|w| w[0] == "rdesk-term" && w[1] == "ok-marker")
+    };
+    while !ran(&output) {
         assert!(start.elapsed() < Duration::from_secs(60), "no output from the command: {output:?}");
         match next(&mut link, "running the command", &output).await.expect("the terminal closed") {
             TermHost::Output(b) => {
@@ -120,4 +127,43 @@ async fn shell_runs_a_command() {
     assert_eq!(exited, Some(0));
     c.conn.close(transport::close::NORMAL, b"");
     h.shutdown().await;
+}
+
+/// The text without terminal escape sequences (colors, cursor moves, window titles).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            if c != '\u{8}' {
+                out.push(c);
+            }
+            continue;
+        }
+        match it.next() {
+            // CSI: parameters, then a final byte in @..~.
+            Some('[') => {
+                for d in it.by_ref() {
+                    if ('@'..='~').contains(&d) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ESC \.
+            Some(']') => {
+                while let Some(d) = it.next() {
+                    if d == '\u{7}' || (d == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn escape_sequences_are_stripped() {
+    assert_eq!(strip_ansi("\u{1b}[?25h\u{1b}[mrdesk-term\r\n\u{1b}]0;title\u{7}x"), "rdesk-term\r\nx");
 }
