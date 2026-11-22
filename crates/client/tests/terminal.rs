@@ -102,7 +102,9 @@ async fn shell_runs_a_command() {
     link.tx.send(TermClient::Resize { cols: 120, rows: 40 }).unwrap();
     let ran = |o: &str| {
         let plain = strip_ansi(o);
-        let lines: Vec<&str> = plain.split('\n').map(|l| l.trim_end_matches('\r')).collect();
+        // A carriage return starts the line over, as on screen.
+        let lines: Vec<&str> =
+            plain.split('\n').map(|l| l.trim_end_matches('\r').rsplit('\r').next().unwrap_or("")).collect();
         lines.contains(&"rdesk-term ok-marker") || lines.windows(2).any(|w| w[0] == "rdesk-term" && w[1] == "ok-marker")
     };
     while !ran(&output) {
@@ -166,4 +168,14 @@ fn strip_ansi(s: &str) -> String {
 #[test]
 fn escape_sequences_are_stripped() {
     assert_eq!(strip_ansi("\u{1b}[?25h\u{1b}[mrdesk-term\r\n\u{1b}]0;title\u{7}x"), "rdesk-term\r\nx");
+}
+
+/// What the CI's bash printed (shell integration marks, bracketed paste, a carriage return).
+#[test]
+fn bash_output_with_shell_integration_counts() {
+    let bash = "runner:~$ echo rdesk-term ok-marker\r\n\u{1b}[?2004l\r\u{1b}]3008;start=x;type=command\u{1b}\\rdesk-term ok-marker\r\n\u{1b}]3008;end=x\u{1b}\\runner:~$ ";
+    let plain = strip_ansi(bash);
+    let lines: Vec<&str> =
+        plain.split('\n').map(|l| l.trim_end_matches('\r').rsplit('\r').next().unwrap_or("")).collect();
+    assert!(lines.contains(&"rdesk-term ok-marker"), "{lines:?}");
 }
