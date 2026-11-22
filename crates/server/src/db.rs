@@ -173,6 +173,10 @@ const SCHEMA: &[&str] = &[
     ALTER TABLE machines ADD COLUMN version TEXT NOT NULL DEFAULT '';
     ALTER TABLE machines ADD COLUMN update_ring TEXT NOT NULL DEFAULT 'all';
     "#,
+    // v7: Wake-on-LAN. The network cards each computer reported.
+    r#"
+    ALTER TABLE machines ADD COLUMN macs TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 pub fn now() -> i64 {

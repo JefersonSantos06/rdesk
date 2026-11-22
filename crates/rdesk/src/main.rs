@@ -154,6 +154,16 @@ enum Command {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Port tunnels until Ctrl+C: each `-L LOCAL:HOST:PORT` makes port LOCAL here lead to
+    /// HOST:PORT as reached from that computer (`localhost` is the computer itself).
+    #[cfg(feature = "client")]
+    Tunnel {
+        target: String,
+        #[arg(short = 'L', required = true)]
+        forward: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// A shell on a computer, in this terminal (as whoever is signed in there).
     #[cfg(feature = "client")]
     Shell {
@@ -345,6 +355,8 @@ enum MachinesCmd {
     },
     /// The last sessions on a computer (its managers and system admins).
     History { machine: String },
+    /// Turn on a computer that is off (Wake-on-LAN, sent by a computer that is on, on its network).
+    Wake { machine: String },
     /// Computers waiting for your approval (asked with your e-mail; admins: also without one).
     Requests,
     /// Approve a waiting computer (by its code, as it shows it): it becomes yours.
@@ -839,6 +851,8 @@ fn main() -> Result<()> {
         Command::Ls { target, path, auth } => runtime()?.block_on(cli_ls(target, path, auth)),
         #[cfg(feature = "client")]
         Command::Shell { target, admin, auth } => runtime()?.block_on(cli_shell(target, admin, auth)),
+        #[cfg(feature = "client")]
+        Command::Tunnel { target, forward, auth } => runtime()?.block_on(cli_tunnel(target, forward, auth)),
     }
 }
 
@@ -1255,6 +1269,12 @@ async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
                 println!("  {}", u.email);
             }
         }
+        MachinesCmd::Wake { machine } => {
+            let list = api.machines().await?;
+            let m = find_machine(&list, &machine)?;
+            let r = api.wake(m.id).await?;
+            println!("asked {} computer(s) on its network to wake {}", r.helpers, m.name);
+        }
         MachinesCmd::History { machine } => {
             let list = api.machines().await?;
             let m = find_machine(&list, &machine)?;
@@ -1635,8 +1655,14 @@ fn connect(a: ConnectArgs) -> Result<()> {
         // A terminal opens without the picture (and the host does not capture the screen)
         // until the window asks for it.
         video: a.headless || !a.terminal,
-        extensions: Default::default(),
+        // The window adapts the picture to the link and shows the host's pointer.
+        extensions: rdesk_client::conn::Extensions {
+            auto_quality: !a.headless,
+            cursor_shape: !a.headless,
+            ..Default::default()
+        },
         device_key: None,
+        audio: None,
     };
     if a.headless {
         return rdesk_client::headless::run(
@@ -1721,6 +1747,30 @@ impl Drop for RawTerminal {
 }
 
 /// `rdesk shell`: the computer's shell in this terminal.
+#[cfg(feature = "client")]
+async fn cli_tunnel(target: String, forward: Vec<String>, a: AuthArgs) -> Result<()> {
+    let specs: Vec<rdesk_client::tunnel::TunnelSpec> =
+        forward.iter().map(|f| rdesk_client::tunnel::TunnelSpec::parse(f)).collect::<Result<_>>()?;
+    let t = resolve_target(&target, &a).await?;
+    let s = cli_session(&t).await?;
+    let mut tasks = tokio::task::JoinSet::new();
+    for spec in specs {
+        eprintln!("localhost:{} -> {}:{} (from {})", spec.local, spec.host, spec.port, t.name);
+        tasks.spawn(rdesk_client::tunnel::forward(s.conn.clone(), spec, |e| eprintln!("tunnel: {e}")));
+    }
+    eprintln!("Ctrl+C to stop.");
+    let r = tokio::select! {
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        r = tasks.join_next() => match r {
+            Some(Ok(Err(e))) => Err(e),
+            _ => Ok(()),
+        },
+        e = s.conn.closed() => Err(anyhow::anyhow!("connection closed: {e}")),
+    };
+    s.close().await;
+    r
+}
+
 #[cfg(feature = "client")]
 async fn cli_shell(target: String, admin: bool, a: AuthArgs) -> Result<()> {
     use rdesk_proto::{TermClient, TermHost};

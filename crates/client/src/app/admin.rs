@@ -809,6 +809,7 @@ impl AdminPage {
                 version: if i % 4 == 3 { String::new() } else { format!("0.{}.{}", 3 + i % 2, i % 3) },
                 ring: if i % 3 == 1 { Ring::Test } else { Ring::All },
                 here: None,
+                can_wake: false,
             })
             .collect();
         a.releases = Some(Releases {

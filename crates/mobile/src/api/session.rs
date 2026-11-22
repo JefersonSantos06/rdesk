@@ -230,8 +230,13 @@ impl RdSession {
                 max_size: (w > 0 && h > 0).then_some((w, h)),
                 cursor: true,
                 clipboard_in_app: true,
+                // 16 MB of tiles, and a picture that follows the phone's link.
+                cache_slots: 1024,
+                auto_quality: true,
+                ..Extensions::default()
             },
             device_key: self.device_key.lock().unwrap().clone(),
+            audio: None,
         };
         let shared = self.shared.clone();
         let sink = Arc::new(sink);
@@ -567,7 +572,8 @@ fn forward(shared: &Arc<Shared>, sink: &Arc<StreamSink<SessionEvent>>, e: UiEven
                 .ok();
             return;
         }
-        UiEvent::Wake | UiEvent::Raise(_) => return,
+        // The phone draws its own pointer and lets the host choose the quality.
+        UiEvent::Wake | UiEvent::Raise(_) | UiEvent::Quality { .. } | UiEvent::CursorShape { .. } => return,
         UiEvent::Quit => ev(EventKind::Closed),
     };
     let _ = sink.add(out);

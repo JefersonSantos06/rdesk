@@ -42,6 +42,10 @@ pub mod close {
     pub const SHUTDOWN: VarInt = VarInt::from_u32(5);
     /// Someone at the host ended the session; don't reconnect.
     pub const KICKED: VarInt = VarInt::from_u32(6);
+    /// The person at the host said no (consent); don't reconnect.
+    pub const DENIED: VarInt = VarInt::from_u32(7);
+    /// Someone else is using the host; the reason says who. Don't reconnect on your own.
+    pub const BUSY: VarInt = VarInt::from_u32(8);
 }
 
 /// The host's long-lived identity: the secret key of its endpoint. Its public half is the

@@ -32,6 +32,7 @@ pub struct InputRect {
 enum Req {
     List(oneshot::Sender<Result<Vec<MonitorDesc>>>),
     Grab(u32, oneshot::Sender<Result<Frame>>),
+    Cursor(oneshot::Sender<Option<crate::cursor::Current>>),
 }
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ impl Capturer {
                     #[cfg(not(target_os = "linux"))]
                     Box::new(XcapBackend::default())
                 };
+                let mut cursor = crate::cursor::Reader::default();
                 while let Ok(req) = rx.recv() {
                     // Started by the service: the sign-in, lock and UAC screens are another desktop.
                     #[cfg(windows)]
@@ -71,6 +73,9 @@ impl Capturer {
                         Req::Grab(id, reply) => {
                             let _ = reply.send(backend.grab(id));
                         }
+                        Req::Cursor(reply) => {
+                            let _ = reply.send(if fake { None } else { cursor.read() });
+                        }
                     }
                 }
             })
@@ -82,6 +87,13 @@ impl Capturer {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Req::List(tx)).map_err(|_| anyhow!("capture thread gone"))?;
         rx.await?
+    }
+
+    /// The pointer's image now (see [`crate::cursor`]); `None` if it cannot be told.
+    pub async fn cursor(&self) -> Option<crate::cursor::Current> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Req::Cursor(tx)).ok()?;
+        rx.await.ok().flatten()
     }
 
     pub async fn grab(&self, id: u32) -> Result<Frame> {
@@ -152,6 +164,63 @@ pub fn packed_to_rgba(src: &[u8], order: Pixels, width: u32, height: u32, stride
 #[derive(Default)]
 struct XcapBackend {
     monitors: Vec<xcap::Monitor>,
+    #[cfg(windows)]
+    dxgi: DxgiState,
+}
+
+/// Desktop Duplication on Windows ([`crate::win::dxgi`]), with GDI (xcap) as the fallback.
+#[cfg(windows)]
+#[derive(Default)]
+struct DxgiState {
+    dup: Option<crate::win::dxgi::Duplication>,
+    /// After a failure, GDI until then.
+    retry_at: Option<Instant>,
+    warned: bool,
+}
+
+#[cfg(windows)]
+impl DxgiState {
+    /// `RDESK_DXGI=0` keeps GDI.
+    fn wanted() -> bool {
+        std::env::var("RDESK_DXGI").map(|v| v != "0").unwrap_or(true)
+    }
+
+    /// The monitor at `rect`, or `None` to use GDI this time.
+    fn grab(&mut self, rect: (i32, i32, u32, u32)) -> Option<Frame> {
+        use crate::win::dxgi::{Duplication, Lost};
+        if !Self::wanted() || self.retry_at.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        for attempt in 0..2 {
+            if self.dup.as_ref().is_none_or(|d| d.rect != rect) {
+                self.dup = None;
+                match Duplication::new(rect) {
+                    Ok(d) => self.dup = Some(d),
+                    Err(e) => return self.failed(e),
+                }
+            }
+            match self.dup.as_mut().expect("just made").grab(0) {
+                Ok(f) => {
+                    self.retry_at = None;
+                    return Some(f);
+                }
+                // Another desktop (sign-in, lock, UAC) or a mode change: make it again, once.
+                Err(e) if e.downcast_ref::<Lost>().is_some() && attempt == 0 => self.dup = None,
+                Err(e) => return self.failed(e),
+            }
+        }
+        None
+    }
+
+    fn failed(&mut self, e: anyhow::Error) -> Option<Frame> {
+        if !self.warned {
+            tracing::info!("desktop duplication unavailable ({e:#}); capturing with GDI");
+            self.warned = true;
+        }
+        self.dup = None;
+        self.retry_at = Some(Instant::now() + std::time::Duration::from_secs(5));
+        None
+    }
 }
 
 impl XcapBackend {
@@ -202,6 +271,14 @@ impl Backend for XcapBackend {
     }
 
     fn grab(&mut self, id: u32) -> Result<Frame> {
+        #[cfg(windows)]
+        {
+            let m = self.find(id)?;
+            let rect = (m.x()?, m.y()?, m.width()?, m.height()?);
+            if let Some(f) = self.dxgi.grab(rect) {
+                return Ok(f);
+            }
+        }
         let img = match self.find(id)?.capture_image() {
             Ok(img) => img,
             Err(e) => {

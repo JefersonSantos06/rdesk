@@ -5,7 +5,7 @@
 //! only) give the window to that panel. Raw winit key events are forwarded as physical
 //! keys.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use egui_wgpu::winit::Painter;
 use egui_winit::winit;
 use rdesk_common::i18n::access_label;
 use rdesk_common::{t, tf};
-use rdesk_proto::{DirEntry, HostInfo, InputEvent, MonitorInfo, MouseButton};
+use rdesk_proto::{DirEntry, Feature, HostInfo, InputEvent, MonitorInfo, MouseButton};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -82,10 +82,15 @@ pub fn run(opts: ViewerOpts) -> Result<()> {
     }
     let name = opts.connect.name.clone();
     let video = opts.connect.video;
-    let handle = conn::spawn(opts.connect, move |ev| {
+    let mut connect = opts.connect;
+    // The window plays the computer's sound.
+    let player = Arc::new(crate::audio::Player::default());
+    connect.audio = Some(player.sink());
+    let handle = conn::spawn(connect, move |ev| {
         let _ = proxy.send_event(ev);
     });
     let mut app = App::new(handle, name, opts.swap_cmd_ctrl, opts.download_dir);
+    app.player = player;
     app.video = video;
     app.terminal_on_connect = opts.open_terminal;
     if opts.open_files {
@@ -134,6 +139,8 @@ enum Confirm {
     CloseShell(u64),
     /// Leave the session with a terminal or transfers going.
     Disconnect,
+    /// Restart the remote computer (in safe mode with networking, or not).
+    Restart { safe_mode: bool },
 }
 
 /// The side panel's tabs.
@@ -150,6 +157,8 @@ enum Tool {
     Monitor,
     Quality,
     Keys,
+    /// Sound, the screen over there, restarting it…
+    Session,
     Files,
     Terminal,
     /// "Show screen", in a window that opened without the picture.
@@ -163,6 +172,7 @@ impl Tool {
             Tool::Monitor => icons::MONITOR,
             Tool::Quality => icons::SLIDERS_HORIZONTAL,
             Tool::Keys => icons::KEYBOARD,
+            Tool::Session => icons::DOTS_THREE,
             Tool::Files => icons::FOLDER,
             Tool::Terminal => icons::TERMINAL_WINDOW,
         }
@@ -173,6 +183,7 @@ impl Tool {
             Tool::Monitor => t!("Monitor", "Monitor"),
             Tool::Quality => t!("Quality", "Qualidade"),
             Tool::Keys => t!("Keys", "Teclas"),
+            Tool::Session => t!("Session", "Sessão"),
             Tool::Files => t!("Files", "Arquivos"),
             Tool::Terminal => t!("Terminal", "Terminal"),
             Tool::Screen => t!("Show screen", "Mostrar tela"),
@@ -194,7 +205,8 @@ impl Preset {
     /// Frames per second and JPEG quality.
     fn values(self) -> (u8, u8) {
         match self {
-            Preset::Auto => (30, 70),
+            // The ceiling: the host lowers quality and size when the link cannot keep up.
+            Preset::Auto => (60, 85),
             Preset::Speed => (60, 50),
             Preset::Quality => (30, 90),
         }
@@ -210,9 +222,10 @@ impl Preset {
 
     fn hint(self) -> &'static str {
         match self {
-            Preset::Auto => {
-                t!("A balance of sharpness and smoothness (30 fps).", "Equilíbrio entre nitidez e fluidez (30 qps).")
-            }
+            Preset::Auto => t!(
+                "Adapts to the connection: as sharp and smooth as it allows (up to 60 fps).",
+                "Se adapta à conexão: tão nítida e fluida quanto ela permitir (até 60 qps)."
+            ),
             Preset::Speed => t!(
                 "Smoother movement, a softer picture: for slow networks and video (60 fps).",
                 "Movimento mais fluido, imagem mais suave: para redes lentas e vídeo (60 qps)."
@@ -277,6 +290,28 @@ struct App {
     swap_cmd_ctrl: bool,
     fps: u8,
     quality: u8,
+    /// Automatic quality is on (the Auto preset), and what the host chose:
+    /// (frames per second, JPEG quality, scale %).
+    auto: bool,
+    auto_choice: Option<(u8, u8, u8)>,
+    /// The host's pointer images by id, the one in use (0: none) and the one set on the
+    /// window, and the cursor egui asked for last (egui sets its own when that changes).
+    cursors: HashMap<u64, winit::window::CustomCursor>,
+    /// What the host's extensions stream offers.
+    features: Vec<Feature>,
+    /// The computer's sound is wanted, and where it plays.
+    sound: bool,
+    /// The black screen and the blocked keyboard over there (the host undoes both when the
+    /// session ends, so a reconnect starts without them).
+    privacy: bool,
+    block_input: bool,
+    /// Port tunnels open in this session, and the one being typed.
+    tunnels: Vec<rdesk_core::tunnel::TunnelSpec>,
+    tunnel_text: String,
+    player: Arc<crate::audio::Player>,
+    cursor_id: u64,
+    cursor_shown: Option<u64>,
+    egui_icon: egui::CursorIcon,
     remote_path: String,
     /// The path being typed (the path bar in edit mode).
     path_edit: Option<String>,
@@ -346,6 +381,19 @@ impl App {
             swap_cmd_ctrl,
             fps,
             quality,
+            auto: true,
+            auto_choice: None,
+            cursors: HashMap::new(),
+            features: Vec::new(),
+            sound: true,
+            privacy: false,
+            block_input: false,
+            tunnels: Vec::new(),
+            tunnel_text: String::new(),
+            player: Arc::new(crate::audio::Player::default()),
+            cursor_id: 0,
+            cursor_shown: None,
+            egui_icon: egui::CursorIcon::Default,
             remote_path: "~".into(),
             path_edit: None,
             listing: None,
@@ -618,7 +666,9 @@ impl App {
         let raw = gfx.state.take_egui_input(&gfx.window);
         let ctx = self.egui.clone();
         let mut out = ctx.run_ui(raw, |ui| self.ui(ui));
+        let icon = out.platform_output.cursor_icon;
         gfx.state.handle_platform_output(&gfx.window, out.platform_output);
+        self.show_remote_cursor(&gfx.window, icon);
         let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
         gfx.painter.paint_and_update_textures(
             ViewportId::ROOT,
@@ -639,6 +689,29 @@ impl App {
             None
         };
         self.gfx = Some(gfx);
+    }
+
+    /// Over the picture, the pointer looks like the host's (an I-beam over text, a hand on
+    /// links), drawn by this computer so it moves without delay. `icon` is what egui asked for
+    /// this frame: it sets that itself whenever it changes, replacing ours.
+    fn show_remote_cursor(&mut self, window: &Window, icon: egui::CursorIcon) {
+        if icon != self.egui_icon {
+            self.egui_icon = icon;
+            self.cursor_shown = None;
+        }
+        let over_picture = self.pointer_inside && icon == egui::CursorIcon::Default && self.screen();
+        let want = over_picture.then(|| self.cursors.get(&self.cursor_id).map(|c| (self.cursor_id, c))).flatten();
+        match want {
+            Some((id, c)) if self.cursor_shown != Some(id) => {
+                window.set_cursor(c.clone());
+                self.cursor_shown = Some(id);
+            }
+            None if self.cursor_shown.is_some() => {
+                window.set_cursor(winit::window::CursorIcon::Default);
+                self.cursor_shown = None;
+            }
+            _ => {}
+        }
     }
 
     // -----------------------------------------------------------------------------------
@@ -777,6 +850,7 @@ impl App {
             if self.access.input {
                 v.push(Tool::Keys);
             }
+            v.push(Tool::Session);
         } else if self.access.screen {
             v.push(Tool::Screen);
         }
@@ -942,6 +1016,7 @@ impl App {
         let (resp, _) = MenuButton::from_button(button).config(config).ui(ui, |ui| match tool {
             Tool::Monitor => self.monitor_menu(ui),
             Tool::Quality => self.quality_menu(ui),
+            Tool::Session => self.session_menu(ui),
             _ => self.keys_menu(ui),
         });
         if compact {
@@ -989,13 +1064,18 @@ impl App {
     fn quality_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(300.0);
         ui.set_max_width(340.0);
-        let current = Preset::ALL.into_iter().find(|p| p.values() == (self.fps, self.quality));
+        let current = if self.auto {
+            Some(Preset::Auto)
+        } else {
+            [Preset::Speed, Preset::Quality].into_iter().find(|p| p.values() == (self.fps, self.quality))
+        };
         ui.spacing_mut().slider_width = 200.0;
         ui.horizontal_wrapped(|ui| {
             for preset in Preset::ALL {
                 let r = ui::chip(ui, current == Some(preset), preset.label());
                 if r.on_hover_text(preset.hint()).clicked() {
                     (self.fps, self.quality) = preset.values();
+                    self.set_auto(preset == Preset::Auto);
                     self.apply_quality();
                 }
             }
@@ -1004,15 +1084,29 @@ impl App {
             Some(p) => ui::caption(ui, p.hint()),
             None => ui::caption(ui, t!("Your own settings.", "Ajuste próprio.")),
         };
+        if self.auto
+            && let Some((_, q, scale)) = self.auto_choice
+        {
+            ui::caption(
+                ui,
+                &if scale < 100 {
+                    tf!("Now: quality {q}, picture at {scale}%.", "Agora: qualidade {q}, imagem a {scale}%.")
+                } else {
+                    tf!("Now: quality {q}, full size.", "Agora: qualidade {q}, tamanho inteiro.")
+                },
+            );
+        }
         ui.separator();
         ui.label(t!("Frames per second", "Quadros por segundo"));
         let r = ui.add(egui::Slider::new(&mut self.fps, 5..=60));
         if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            self.set_auto(false);
             self.apply_quality();
         }
         ui.label(t!("Picture quality", "Qualidade da imagem"));
         let r = ui.add(egui::Slider::new(&mut self.quality, 30..=95));
         if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            self.set_auto(false);
             self.apply_quality();
         }
         ui::caption(ui, t!("Changes apply right away.", "As mudanças valem na hora."));
@@ -1020,6 +1114,141 @@ impl App {
 
     fn apply_quality(&self) {
         self.send(Cmd::SetQuality { max_fps: self.fps, jpeg_quality: self.quality });
+    }
+
+    /// What the session can do besides the picture: sound, and what the host offers.
+    fn session_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(300.0);
+        ui.set_max_width(360.0);
+        let has = |f: Feature| self.features.contains(&f);
+        if has(Feature::Audio) {
+            let mut on = self.sound;
+            let label = ui::with_icon(
+                if on { icons::SPEAKER_HIGH } else { icons::SPEAKER_SLASH },
+                t!("Hear the computer", "Ouvir o computador"),
+            );
+            if ui.checkbox(&mut on, label).changed() {
+                self.sound = on;
+                self.send(Cmd::Audio(on));
+            }
+        } else {
+            ui::caption(
+                ui,
+                t!(
+                    "This computer does not send its sound (only Windows computers with rdesk 0.7 or newer do).",
+                    "Este computador não envia o som (só computadores Windows com rdesk 0.7 ou mais novo)."
+                ),
+            );
+        }
+        self.session_actions(ui);
+    }
+
+    /// What the host offers with full control: the black screen at the computer, blocking its
+    /// keyboard and mouse, restarting it.
+    fn session_actions(&mut self, ui: &mut egui::Ui) {
+        let features = self.features.clone();
+        let has = |f: Feature| features.contains(&f);
+        if !(has(Feature::Privacy) || has(Feature::BlockInput) || has(Feature::Power)) {
+            return;
+        }
+        ui.separator();
+        if has(Feature::Privacy) {
+            let mut on = self.privacy;
+            let label = ui::with_icon(icons::EYE_SLASH, t!("Black screen over there", "Tela preta lá"));
+            let r = ui.checkbox(&mut on, label).on_hover_text(t!(
+                "Whoever is at that computer sees a black screen; you keep seeing it as it is.",
+                "Quem estiver nesse computador vê uma tela preta; você continua vendo a tela como ela é."
+            ));
+            if r.changed() {
+                self.privacy = on;
+                self.send(Cmd::Ext(rdesk_proto::ExtClient::Privacy { on }));
+            }
+        }
+        if has(Feature::BlockInput) {
+            let mut on = self.block_input;
+            let label = ui::with_icon(
+                icons::PROHIBIT,
+                t!("Block its keyboard and mouse", "Bloquear o teclado e o mouse de lá"),
+            );
+            let r = ui.checkbox(&mut on, label).on_hover_text(t!(
+                "Only you control it until the session ends (Ctrl+Alt+Del at that computer gives them back).",
+                "Só você controla até a sessão terminar (Ctrl+Alt+Del nesse computador os devolve)."
+            ));
+            if r.changed() {
+                self.block_input = on;
+                self.send(Cmd::Ext(rdesk_proto::ExtClient::BlockInput { on }));
+            }
+        }
+        if has(Feature::Tunnel) {
+            ui.separator();
+            ui.label(
+                RichText::new(ui::with_icon(icons::ARROWS_LEFT_RIGHT, t!("Port tunnel", "Túnel de porta"))).strong(),
+            );
+            ui::caption(
+                ui,
+                t!(
+                    "A port on this computer that leads to one reachable from there (its remote desktop, SSH, a \
+                     router's page): LOCAL:HOST:PORT, like 13389:localhost:3389.",
+                    "Uma porta neste computador que leva a uma alcançável de lá (a área de trabalho remota dele, \
+                     SSH, a página do roteador): LOCAL:HOST:PORTA, como 13389:localhost:3389."
+                ),
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tunnel_text)
+                        .hint_text("13389:localhost:3389")
+                        .desired_width(200.0),
+                );
+                if ui.button(t!("Open", "Abrir")).clicked() {
+                    match rdesk_core::tunnel::TunnelSpec::parse(self.tunnel_text.trim()) {
+                        Ok(spec) => {
+                            self.toasts.push(
+                                tf!(
+                                    "Tunnel: localhost:{} leads to {}:{} there",
+                                    "Túnel: localhost:{} leva a {}:{} de lá",
+                                    spec.local,
+                                    spec.host,
+                                    spec.port
+                                ),
+                                false,
+                            );
+                            self.tunnels.push(spec.clone());
+                            self.send(Cmd::Tunnel(spec));
+                            self.tunnel_text.clear();
+                        }
+                        Err(e) => self.toasts.push(tf!("Tunnel: {e:#}", "Túnel: {e:#}"), true),
+                    }
+                }
+            });
+            for t in &self.tunnels {
+                ui::caption(ui, &format!("localhost:{} → {}:{}", t.local, t.host, t.port));
+            }
+        }
+        if has(Feature::Power) {
+            ui.separator();
+            if ui
+                .button(ui::with_icon(icons::ARROW_CLOCKWISE, t!("Restart the computer…", "Reiniciar o computador…")))
+                .clicked()
+            {
+                self.confirm = Some(Confirm::Restart { safe_mode: false });
+                ui.close();
+            }
+            if ui
+                .button(ui::with_icon(icons::WRENCH, t!("Restart in safe mode…", "Reiniciar em modo de segurança…")))
+                .clicked()
+            {
+                self.confirm = Some(Confirm::Restart { safe_mode: true });
+                ui.close();
+            }
+        }
+    }
+
+    fn set_auto(&mut self, on: bool) {
+        if self.auto != on {
+            self.auto = on;
+            self.auto_choice = None;
+            self.send(Cmd::AutoQuality(on));
+        }
     }
 
     fn keys_menu(&mut self, ui: &mut egui::Ui) {
@@ -1670,6 +1899,28 @@ impl App {
                     t!("End the shell", "Encerrar o shell"),
                 )
             }
+            Confirm::Restart { safe_mode } => {
+                let host = self.host_name();
+                (
+                    tf!("Restart {host}?", "Reiniciar {host}?"),
+                    if safe_mode {
+                        t!(
+                            "It restarts in safe mode with networking (for removing what does not let Windows start \
+                             well); this window reconnects once it is back. The next restart is a normal one.",
+                            "Ele reinicia em modo de segurança com rede (para remover o que impede o Windows de \
+                             iniciar bem); esta janela reconecta quando ele voltar. O próximo reinício é normal."
+                        )
+                        .to_string()
+                    } else {
+                        t!(
+                            "Unsaved work over there is lost. This window reconnects once it is back.",
+                            "O que não foi salvo lá se perde. Esta janela reconecta quando ele voltar."
+                        )
+                        .to_string()
+                    },
+                    t!("Restart", "Reiniciar"),
+                )
+            }
             Confirm::Disconnect => {
                 let mut lines = Vec::new();
                 match self.shells.iter().filter(|s| s.live()).collect::<Vec<_>>().as_slice() {
@@ -1719,6 +1970,14 @@ impl App {
         match c {
             Confirm::CloseShell(id) => self.remove_shell(id),
             Confirm::Disconnect => self.exit_requested = true,
+            Confirm::Restart { safe_mode } => {
+                let action = if safe_mode {
+                    rdesk_proto::PowerAction::RestartSafeMode
+                } else {
+                    rdesk_proto::PowerAction::Restart
+                };
+                self.send(Cmd::Ext(rdesk_proto::ExtClient::Power(action)));
+            }
         }
     }
 
@@ -1911,11 +2170,33 @@ impl ApplicationHandler<UiEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UiEvent) {
         match event {
-            UiEvent::FrameUpdated
-            | UiEvent::Wake
-            | UiEvent::Extensions(_)
-            | UiEvent::Cursor { .. }
-            | UiEvent::Clipboard(_) => {}
+            UiEvent::Extensions(f) => self.features = f,
+            UiEvent::FrameUpdated | UiEvent::Wake | UiEvent::Cursor { .. } | UiEvent::Clipboard(_) => {}
+            UiEvent::Quality { fps, jpeg_quality, scale_pct } => {
+                self.auto_choice = Some((fps, jpeg_quality, scale_pct));
+            }
+            UiEvent::CursorShape { id, image } => {
+                if let Some(img) = image {
+                    let made = winit::window::CustomCursor::from_rgba(
+                        img.rgba,
+                        img.width,
+                        img.height,
+                        img.hot_x.min(img.width.saturating_sub(1)),
+                        img.hot_y.min(img.height.saturating_sub(1)),
+                    );
+                    match made {
+                        Ok(src) => {
+                            if self.cursors.len() > 64 {
+                                self.cursors.clear();
+                            }
+                            self.cursors.insert(id, el.create_custom_cursor(src));
+                        }
+                        Err(e) => tracing::debug!("pointer image: {e}"),
+                    }
+                }
+                self.cursor_id = id;
+                self.cursor_shown = None;
+            }
             UiEvent::Terminal { admin, result: Ok(slot) } => {
                 self.shells_opening = self.shells_opening.saturating_sub(1);
                 if let Some(link) = slot.0.lock().unwrap().take() {
@@ -2002,6 +2283,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::Connected(h) => {
                 self.connected = true;
+                (self.privacy, self.block_input) = (false, false);
                 if std::mem::take(&mut self.terminal_on_connect) {
                     self.start_terminal(false);
                 }

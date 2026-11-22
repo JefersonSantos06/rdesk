@@ -33,6 +33,11 @@ async fn picture_is_scaled_and_the_pointer_reported() {
     }
 
     let (tx, rx) = mpsc::channel::<UiEvent>();
+    // The sound (Windows hosts): the stream starts even when nothing plays.
+    let (sound_tx, sound_rx) = mpsc::channel::<String>();
+    let sink: conn::AudioSink = std::sync::Arc::new(move |e| {
+        let _ = sound_tx.send(format!("{e:?}").chars().take(20).collect());
+    });
     let opts = ConnectOpts {
         name: format!("ext-test-{}", std::process::id()),
         ask_password_in_ui: true,
@@ -44,8 +49,15 @@ async fn picture_is_scaled_and_the_pointer_reported() {
         net: NetworkConfig::default(),
         clipboard: false,
         video: true,
-        extensions: Extensions { max_size: Some((320, 320)), cursor: true, clipboard_in_app: true },
+        extensions: Extensions {
+            max_size: Some((320, 320)),
+            cursor: true,
+            clipboard_in_app: true,
+            auto_quality: true,
+            ..Default::default()
+        },
         device_key: None,
+        audio: Some(sink),
     };
     let handle = conn::spawn(opts, move |ev| {
         if let UiEvent::PasswordNeeded { reply, .. } = &ev {
@@ -69,6 +81,13 @@ async fn picture_is_scaled_and_the_pointer_reported() {
     }
     let features = features.expect("no answer on the extensions stream");
     assert!(features.contains(&Feature::MaxSize) && features.contains(&Feature::Cursor), "{features:?}");
+    assert!(features.contains(&Feature::Video2) && features.contains(&Feature::AutoQuality), "{features:?}");
+    // Only where there are speakers to listen to (not on a build machine).
+    if std::env::var("RDESK_TEST_AUDIO").is_ok() {
+        assert!(features.contains(&Feature::Audio), "{features:?}");
+        let first = sound_rx.recv_timeout(Duration::from_secs(10)).expect("no sound stream");
+        assert!(first.starts_with("Start"), "{first}");
+    }
     assert!(cursor, "no pointer position came");
     let (w, h) = size.expect("no picture came");
     assert!(w <= 320 && h <= 320 && (w == 320 || h == 320), "picture {w}x{h} does not fit 320x320 snugly");

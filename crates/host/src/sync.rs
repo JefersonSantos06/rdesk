@@ -28,7 +28,11 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
     let mut reported_error = false;
     // The newest version offered so far (the server answers at once only for a newer one).
     let mut update_seen = String::new();
+    let mut macs = Vec::new();
     loop {
+        if macs.is_empty() || cursor == 0 {
+            macs = tokio::task::spawn_blocking(crate::wake::local_macs).await.unwrap_or_default();
+        }
         let addrs: Vec<String> = ep.addr().ip_addrs().map(|a| a.to_string()).collect();
         let sessions: Vec<_> = std::mem::take(&mut *server.records.lock().unwrap());
         let req = AgentSync {
@@ -41,6 +45,7 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
             server_key: policy.server_keys.read().unwrap().first().map(hex::encode).unwrap_or_default(),
             direct: server.direct_on(),
             update_seen: update_seen.clone(),
+            macs: macs.clone(),
         };
         // Sent again next time unless the server confirms them.
         let requeue = |server: &Server, req: AgentSync| {
@@ -87,6 +92,16 @@ pub(crate) async fn run(reg: Registration, ep: Endpoint, server: Arc<Server>, re
                     }
                 }
                 server.enforce_revocations().await;
+                for w in reply.wake {
+                    let sent = tokio::task::spawn_blocking(move || crate::wake::send(&w)).await.unwrap_or(0);
+                    reporter.event(
+                        tf!(
+                            "Sent Wake-on-LAN packets for a computer on this network ({sent})",
+                            "Pacotes Wake-on-LAN enviados para um computador desta rede ({sent})"
+                        ),
+                        false,
+                    );
+                }
                 if let Some(offer) = reply.update
                     && offer.version != update_seen
                 {

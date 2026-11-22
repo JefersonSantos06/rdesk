@@ -18,10 +18,12 @@ use rdesk_common::tiles::{Frame, TileRect};
 use rdesk_common::transport::{self, Connection, ConnectionError, Endpoint, RecvStream, Role, SendStream, close};
 use rdesk_common::{t, tf};
 use rdesk_proto::{
-    ClientMsg, DirEntry, EXT_REV, ExtClient, ExtHost, Feature, FrameAck, FrameHeader, HostInfo, HostMsg, InputEvent,
-    MAX_CONTROL_MSG, MAX_SMALL_MSG, MAX_VIDEO_MSG, MonitorInfo, SessionId, StreamOpen, Tile, expect_msg, read_msg,
-    write_msg,
+    ClientMsg, CursorShape, DirEntry, EXT_REV, ExtClient, ExtHost, Feature, FrameAck, FrameHeader, HostInfo, HostMsg,
+    InputEvent, MAX_CONTROL_MSG, MAX_SMALL_MSG, MAX_VIDEO_MSG, MonitorInfo, SessionId, StreamOpen, Tile, Tile2,
+    TileData, VideoCaps, expect_msg, read_msg, write_msg,
 };
+
+use crate::video2::{DTile, Decoded, Pix, V2};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
@@ -152,6 +154,18 @@ pub enum UiEvent {
     /// Text the host copied, with [`Extensions::clipboard_in_app`] (the app puts it on its
     /// own clipboard).
     Clipboard(String),
+    /// What automatic quality chose ([`Cmd::AutoQuality`]).
+    Quality {
+        fps: u8,
+        jpeg_quality: u8,
+        scale_pct: u8,
+    },
+    /// The host's pointer image changed ([`Extensions::cursor_shape`]): `image` the first time
+    /// an id is seen (keep it), then only the id; id 0 means hidden.
+    CursorShape {
+        id: u64,
+        image: Option<CursorShape>,
+    },
     /// Something to redraw (terminal output).
     Wake,
     Quit,
@@ -192,11 +206,36 @@ pub enum Cmd {
     /// Text the user copied in the app, for the host's clipboard (with
     /// [`Extensions::clipboard_in_app`]).
     Clipboard(String),
+    /// Let the host adapt quality and size to the link (kept across reconnects).
+    AutoQuality(bool),
+    /// Hear the computer's sound, or stop (with [`ConnectOpts::audio`]; kept across reconnects).
+    Audio(bool),
+    /// What the host's extensions offer with full control: restart, the black screen at the
+    /// computer, blocking its keyboard and mouse.
+    Ext(ExtClient),
+    /// A port here that leads to a port reachable from the host (kept across reconnects).
+    Tunnel(crate::tunnel::TunnelSpec),
     Quit,
 }
 
-/// What a client without a mouse of its own (a phone) asks of the session.
-#[derive(Debug, Clone, Default)]
+/// The computer's sound, for the app to play ([`ConnectOpts::audio`]).
+#[derive(Debug, Clone)]
+pub enum AudioEvent {
+    /// Opus packets follow at this rate and channel count.
+    Start {
+        sample_rate: u32,
+        channels: u8,
+    },
+    Packet(Vec<u8>),
+    /// No more for now (turned off, the host has none, the connection dropped).
+    Stop,
+}
+
+/// Where the sound goes (called on the network thread: keep it quick).
+pub type AudioSink = Arc<dyn Fn(AudioEvent) + Send + Sync>;
+
+/// What the session asks of the host's extensions stream.
+#[derive(Debug, Clone)]
 pub struct Extensions {
     /// Scale the picture down to fit this size.
     pub max_size: Option<(u32, u32)>,
@@ -205,12 +244,41 @@ pub struct Extensions {
     /// The clipboard goes through the app ([`UiEvent::Clipboard`], [`Cmd::Clipboard`]) instead
     /// of being watched here.
     pub clipboard_in_app: bool,
+    /// Frames in the second format (in order, cached tiles, copies) when the host has it.
+    pub video2: bool,
+    /// Tiles kept for the second format (64×64 RGBA each: 16 KB).
+    pub cache_slots: u32,
+    /// Let the host adapt quality and size to the link.
+    pub auto_quality: bool,
+    /// Report the host's pointer image ([`UiEvent::CursorShape`]).
+    pub cursor_shape: bool,
+    /// Hear the computer (with [`ConnectOpts::audio`]).
+    pub audio: bool,
+    /// Port tunnels to open in every connection.
+    pub tunnels: Vec<crate::tunnel::TunnelSpec>,
+}
+
+impl Default for Extensions {
+    fn default() -> Self {
+        Self {
+            max_size: None,
+            cursor: false,
+            clipboard_in_app: false,
+            video2: true,
+            // 64 MB.
+            cache_slots: 4096,
+            auto_quality: false,
+            cursor_shape: false,
+            audio: true,
+            tunnels: Vec::new(),
+        }
+    }
 }
 
 impl Extensions {
     /// Whether the session opens the host's extensions stream.
     pub fn wanted(&self) -> bool {
-        self.max_size.is_some() || self.cursor
+        self.max_size.is_some() || self.cursor || self.video2 || self.auto_quality || self.cursor_shape
     }
 
     /// Keep what a command asks for, for the next connection too.
@@ -219,6 +287,12 @@ impl Extensions {
             Cmd::SetMaxSize(0, _) | Cmd::SetMaxSize(_, 0) => self.max_size = None,
             Cmd::SetMaxSize(w, h) => self.max_size = Some((w, h)),
             Cmd::FollowCursor(on) => self.cursor = on,
+            Cmd::AutoQuality(on) => self.auto_quality = on,
+            Cmd::Audio(on) => self.audio = on,
+            Cmd::Tunnel(ref t) => {
+                self.tunnels.retain(|x| x.local != t.local);
+                self.tunnels.push(t.clone());
+            }
             _ => {}
         }
     }
@@ -266,6 +340,8 @@ pub struct View {
     tile_frame: HashMap<(u32, u32), u64>,
     /// Which connection is painting; streams of an older one are ignored.
     session: u64,
+    /// The second frame format, when this connection uses it.
+    v2: Option<V2>,
 }
 
 impl View {
@@ -279,6 +355,7 @@ impl View {
             pending: Arc::new(AtomicBool::new(false)),
             tile_frame: HashMap::new(),
             session: 0,
+            v2: None,
         }
     }
 
@@ -287,6 +364,7 @@ impl View {
     fn begin_session(&mut self) -> u64 {
         self.session += 1;
         self.tile_frame.clear();
+        self.v2 = None;
         self.session
     }
 
@@ -309,6 +387,18 @@ impl View {
             self.paint(frame_id, rect, px)?;
         }
         Ok(())
+    }
+
+    /// Mark a painted rectangle for the UI.
+    fn dirty(&mut self, rect: TileRect) {
+        if !self.full_dirty {
+            self.dirty.push(rect);
+            let (cols, rows) = self.frame.grid();
+            if self.dirty.len() > (cols * rows) as usize {
+                self.full_dirty = true;
+                self.dirty.clear();
+            }
+        }
     }
 
     /// Paint a decoded tile of frame `frame_id`. False when a newer frame already painted it.
@@ -355,6 +445,8 @@ pub struct ConnectOpts {
     pub extensions: Extensions,
     /// Use this device key (a phone's secure hardware) for hosts that ask for a key.
     pub device_key: Option<Arc<dyn rdesk_common::auth::ExternalSigner>>,
+    /// Play the computer's sound here (`None`: never asked for).
+    pub audio: Option<AudioSink>,
 }
 
 #[derive(Debug, Clone)]
@@ -827,7 +919,7 @@ async fn once(
 
     // The clipboard goes both ways: only with full control.
     let clipboard = opts.clipboard && access.input;
-    match run_session(
+    let r = run_session(
         &conn,
         ctrl_w,
         ctrl_r,
@@ -840,9 +932,13 @@ async fn once(
         notify,
         clipboard,
         access.input,
+        opts.audio.clone(),
     )
-    .await
-    {
+    .await;
+    if let Some(a) = &opts.audio {
+        a(AudioEvent::Stop);
+    }
+    match r {
         Ok(true) => {
             conn.close(close::NORMAL, b"bye");
             End::Quit
@@ -859,6 +955,20 @@ async fn once(
                 t!("The session was ended from the host computer.", "A sessão foi encerrada no computador host.")
                     .into(),
             ),
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::DENIED => End::Fatal(
+                t!(
+                    "The person at that computer did not allow the connection.",
+                    "A pessoa nesse computador não permitiu a conexão."
+                )
+                .into(),
+            ),
+            Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::BUSY => {
+                let why = String::from_utf8_lossy(&a.reason).into_owned();
+                End::Fatal(tf!(
+                    "That computer is busy ({why}). Try again when the other session ends.",
+                    "Esse computador está ocupado ({why}). Tente de novo quando a outra sessão terminar."
+                ))
+            }
             Some(ConnectionError::ApplicationClosed(a)) if a.error_code == close::SHUTDOWN => {
                 End::Retry(t!("host restarting", "o host está reiniciando").into())
             }
@@ -883,6 +993,7 @@ async fn run_session(
     notify: &Notify,
     clipboard_on: bool,
     input_allowed: bool,
+    audio: Option<AudioSink>,
 ) -> Result<bool> {
     let mut input = conn.open_uni().await?;
     let _ = input.set_priority(20);
@@ -900,7 +1011,12 @@ async fn run_session(
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<ClientMsg>();
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<u64>();
     let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<String>();
-    let clipboard = if clipboard_on && !ext.clipboard_in_app { ClipboardSync::spawn(clip_tx) } else { None };
+    let (img_tx, mut img_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let clipboard = if clipboard_on && !ext.clipboard_in_app {
+        ClipboardSync::spawn(clip_tx, Some(img_tx)).map(Arc::new)
+    } else {
+        None
+    };
     let clipboard_to_app = clipboard_on && ext.clipboard_in_app;
     let (frame_pending, session) = {
         let mut v = view.lock().unwrap();
@@ -935,6 +1051,9 @@ async fn run_session(
         None
     };
     let ack_conn = conn.clone();
+    // What the host's extensions stream offers (filled in before `ext_ready`).
+    let host_features: Arc<Mutex<Vec<Feature>>> = Arc::new(Mutex::new(Vec::new()));
+    let (ack_view, ack_features, ack_ext) = (view.clone(), host_features.clone(), ext.clone());
     tasks.spawn(async move {
         if video_wanted.await.is_err() {
             // The session is ending without the picture.
@@ -943,7 +1062,20 @@ async fn run_session(
         let _ = tokio::time::timeout(Duration::from_secs(3), ext_ready_rx).await;
         let mut acks = ack_conn.open_uni().await?;
         let _ = acks.set_priority(20);
-        write_msg(&mut acks, &StreamOpen::Acks).await?;
+        // The second frame format when both sides have it; frames will then be read that way.
+        let second = ack_ext.video2 && ack_features.lock().unwrap().contains(&Feature::Video2);
+        if second {
+            let mut v = ack_view.lock().unwrap();
+            if v.session == session {
+                v.v2 = Some(V2::new(ack_ext.cache_slots));
+            }
+        }
+        let open = if second {
+            StreamOpen::Acks2(VideoCaps { cache_slots: ack_ext.cache_slots, h264: cfg!(feature = "h264") })
+        } else {
+            StreamOpen::Acks
+        };
+        write_msg(&mut acks, &open).await?;
         while let Some(id) = ack_rx.recv().await {
             write_msg(&mut acks, &FrameAck { frame_id: id }).await?;
         }
@@ -997,6 +1129,7 @@ async fn run_session(
 
     // Control reader.
     let (mon_tx, mut mon_rx) = mpsc::unbounded_channel::<u32>();
+    let ext_clipboard = clipboard.clone();
     {
         let notify = notify.clone();
         tasks.spawn(async move {
@@ -1026,6 +1159,7 @@ async fn run_session(
 
     // Video frames: one uni stream each.
     {
+        let full_tx = ctrl_tx.clone();
         let conn = conn.clone();
         let view = view.clone();
         let notify = notify.clone();
@@ -1040,12 +1174,38 @@ async fn run_session(
                 let notify = notify.clone();
                 let pending = pending.clone();
                 let ack_tx = ack_tx.clone();
+                let full_tx = full_tx.clone();
                 tokio::spawn(async move {
-                    match read_frame(&mut s, &view, session).await {
-                        Ok(id) => {
-                            let _ = ack_tx.send(id);
+                    let second = view.lock().unwrap().v2.is_some();
+                    if second {
+                        if let Err(e) = read_frame2(&mut s, &view, session, &ack_tx).await {
+                            tracing::debug!("frame stream: {e:#}");
+                            if e.downcast_ref::<BadFrame>().is_some() {
+                                // What is on screen is no longer what the host thinks: start over.
+                                let _ = full_tx.send(ClientMsg::RequestFullFrame);
+                            }
                         }
-                        Err(e) => tracing::trace!("frame stream: {e:#}"),
+                        // Frames waiting for a missing one: look again once it is given up on.
+                        if view.lock().unwrap().v2.as_ref().is_some_and(V2::blocked) {
+                            let (view, ack_tx, pending) = (view.clone(), ack_tx.clone(), pending.clone());
+                            let (notify, full_tx) = (notify.clone(), full_tx.clone());
+                            tokio::spawn(async move {
+                                tokio::time::sleep(crate::video2::GAP_WAIT).await;
+                                if drain2(&view, session, &ack_tx).is_err() {
+                                    let _ = full_tx.send(ClientMsg::RequestFullFrame);
+                                }
+                                if !pending.swap(true, Ordering::AcqRel) {
+                                    notify(UiEvent::FrameUpdated);
+                                }
+                            });
+                        }
+                    } else {
+                        match read_frame(&mut s, &view, session).await {
+                            Ok(id) => {
+                                let _ = ack_tx.send(id);
+                            }
+                            Err(e) => tracing::trace!("frame stream: {e:#}"),
+                        }
                     }
                     if !pending.swap(true, Ordering::AcqRel) {
                         notify(UiEvent::FrameUpdated);
@@ -1056,8 +1216,37 @@ async fn run_session(
     }
     // The extensions stream (picture size, pointer), for clients that ask for it.
     let (ext_tx, ext_rx) = mpsc::unbounded_channel::<ExtClient>();
+    let (feat_tx, feat_rx) = tokio::sync::watch::channel::<Option<Vec<Feature>>>(None);
     if let Some(ready) = ext_ready {
-        tasks.spawn(extensions(conn.clone(), ext.clone(), ext_rx, ready, notify.clone()));
+        tasks.spawn(extensions(
+            conn.clone(),
+            ext.clone(),
+            ext_rx,
+            ready,
+            notify.clone(),
+            host_features,
+            feat_tx,
+            ext_clipboard,
+        ));
+    }
+    // Images copied here go on the extensions stream (once the host takes them).
+    {
+        let ext_tx = ext_tx.clone();
+        tasks.spawn(async move {
+            while let Some(png) = img_rx.recv().await {
+                let _ = ext_tx.send(ExtClient::ClipImage(png));
+            }
+            std::future::pending::<Result<()>>().await
+        });
+    }
+    // Port tunnels: each listens here while the session lasts.
+    for t in ext.tunnels.clone() {
+        tasks.spawn(tunnel_task(conn.clone(), t, notify.clone()));
+    }
+    // The computer's sound, while wanted.
+    let (audio_on_tx, audio_on_rx) = tokio::sync::watch::channel(ext.audio);
+    if let Some(sink) = audio {
+        tasks.spawn(audio_stream(conn.clone(), feat_rx, audio_on_rx, sink));
     }
     let mut transfer_id = 0u64;
     let mut list_req = 0u32;
@@ -1083,6 +1272,23 @@ async fn run_session(
                     Cmd::FollowCursor(on) => {
                         ext.remember(&Cmd::FollowCursor(on));
                         let _ = ext_tx.send(ExtClient::Cursor { on });
+                    }
+                    Cmd::AutoQuality(on) => {
+                        ext.remember(&Cmd::AutoQuality(on));
+                        let _ = ext_tx.send(ExtClient::AutoQuality { on });
+                    }
+                    Cmd::Audio(on) => {
+                        ext.remember(&Cmd::Audio(on));
+                        let _ = audio_on_tx.send(on);
+                    }
+                    Cmd::Ext(m) => {
+                        let _ = ext_tx.send(m);
+                    }
+                    Cmd::Tunnel(t) => {
+                        if !ext.tunnels.contains(&t) {
+                            ext.remember(&Cmd::Tunnel(t.clone()));
+                            tasks.spawn(tunnel_task(conn.clone(), t, notify.clone()));
+                        }
                     }
                     Cmd::Clipboard(text) => {
                         if clipboard_to_app {
@@ -1149,12 +1355,16 @@ async fn run_session(
 
 /// Run the extensions stream. Never ends on its own (the session must not end with it):
 /// a host without extensions just leaves the stream unanswered.
+#[allow(clippy::too_many_arguments)]
 async fn extensions(
     conn: Connection,
     want: Extensions,
     mut rx: mpsc::UnboundedReceiver<ExtClient>,
     ready: tokio::sync::oneshot::Sender<()>,
     notify: Notify,
+    host_features: Arc<Mutex<Vec<Feature>>>,
+    feat_tx: tokio::sync::watch::Sender<Option<Vec<Feature>>>,
+    clipboard: Option<Arc<ClipboardSync>>,
 ) -> Result<()> {
     // Dropped on any failure, which also lets the picture start.
     let mut ready = Some(ready);
@@ -1166,10 +1376,13 @@ async fn extensions(
             Ok(Some(ExtHost::Hello { features, .. })) => features,
             _ => {
                 notify(UiEvent::Extensions(Vec::new()));
+                let _ = feat_tx.send(Some(Vec::new()));
                 anyhow::bail!("this host has no extensions (an older rdesk)");
             }
         };
         notify(UiEvent::Extensions(features.clone()));
+        *host_features.lock().unwrap() = features.clone();
+        let _ = feat_tx.send(Some(features.clone()));
         let can = |f: Feature| features.contains(&f);
         if can(Feature::MaxSize)
             && let Some((width, height)) = want.max_size
@@ -1179,13 +1392,37 @@ async fn extensions(
         if can(Feature::Cursor) && want.cursor {
             write_msg(&mut w, &ExtClient::Cursor { on: true }).await?;
         }
+        if can(Feature::AutoQuality) && want.auto_quality {
+            write_msg(&mut w, &ExtClient::AutoQuality { on: true }).await?;
+        }
+        if can(Feature::CursorShape) && want.cursor_shape {
+            write_msg(&mut w, &ExtClient::CursorShape { on: true }).await?;
+        }
+        if can(Feature::ClipboardImage)
+            && let Some(c) = &clipboard
+        {
+            write_msg(&mut w, &ExtClient::ClipboardImages { on: true }).await?;
+            c.set_images(true);
+        }
         if let Some(r) = ready.take() {
             let _ = r.send(());
         }
         let read = async {
-            while let Some(m) = read_msg::<_, ExtHost>(&mut r, MAX_SMALL_MSG).await? {
-                if let ExtHost::Cursor { x, y, visible } = m {
-                    notify(UiEvent::Cursor { x, y, visible });
+            // Images make some messages big.
+            while let Some(m) = read_msg::<_, ExtHost>(&mut r, MAX_CONTROL_MSG).await? {
+                match m {
+                    ExtHost::Cursor { x, y, visible } => notify(UiEvent::Cursor { x, y, visible }),
+                    ExtHost::Quality { fps, jpeg_quality, scale_pct } => {
+                        notify(UiEvent::Quality { fps, jpeg_quality, scale_pct })
+                    }
+                    ExtHost::CursorShape { id, image } => notify(UiEvent::CursorShape { id, image }),
+                    ExtHost::ClipImage(png) => {
+                        if let Some(c) = &clipboard {
+                            c.set_image(png);
+                        }
+                    }
+                    ExtHost::Notice(text) => notify(UiEvent::Notice(text)),
+                    ExtHost::Hello { .. } => {}
                 }
             }
             Ok::<_, anyhow::Error>(())
@@ -1195,6 +1432,14 @@ async fn extensions(
                 let allowed = match m {
                     ExtClient::MaxSize { .. } => can(Feature::MaxSize),
                     ExtClient::Cursor { .. } => can(Feature::Cursor),
+                    ExtClient::AutoQuality { .. } => can(Feature::AutoQuality),
+                    ExtClient::CursorShape { .. } => can(Feature::CursorShape),
+                    ExtClient::ClipboardImages { .. } | ExtClient::ClipImage(_) => {
+                        can(Feature::ClipboardImage) && clipboard.is_some()
+                    }
+                    ExtClient::Power(_) => can(Feature::Power),
+                    ExtClient::Privacy { .. } => can(Feature::Privacy),
+                    ExtClient::BlockInput { .. } => can(Feature::BlockInput),
                     ExtClient::Hello { .. } => false,
                 };
                 if allowed {
@@ -1214,6 +1459,63 @@ async fn extensions(
         tracing::debug!("extensions: {e:#}");
     }
     std::future::pending::<Result<()>>().await
+}
+
+/// A port tunnel for the session's lifetime. A port that cannot be opened is told once; the
+/// session goes on.
+async fn tunnel_task(conn: Connection, t: crate::tunnel::TunnelSpec, notify: Notify) -> Result<()> {
+    let n = notify.clone();
+    let what = format!("localhost:{} → {}:{}", t.local, t.host, t.port);
+    if let Err(e) = crate::tunnel::forward(conn, t, move |e| n(UiEvent::Notice(tf!("Tunnel: {e}", "Túnel: {e}")))).await
+    {
+        notify(UiEvent::Notice(tf!("Tunnel {what}: {e:#}", "Túnel {what}: {e:#}")));
+    }
+    std::future::pending().await
+}
+
+/// The audio stream ([`StreamOpen::Audio`]): open while sound is wanted and the host has it.
+/// Never ends on its own (the session must not end with it).
+async fn audio_stream(
+    conn: Connection,
+    mut features: tokio::sync::watch::Receiver<Option<Vec<Feature>>>,
+    mut on: tokio::sync::watch::Receiver<bool>,
+    sink: AudioSink,
+) -> Result<()> {
+    use rdesk_proto::AudioHost;
+    let has = features.wait_for(|f| f.is_some()).await.map(|f| f.as_ref().is_some_and(|f| f.contains(&Feature::Audio)));
+    if !matches!(has, Ok(true)) {
+        return std::future::pending().await;
+    }
+    loop {
+        if on.wait_for(|&v| v).await.is_err() {
+            return std::future::pending().await;
+        }
+        let r: Result<()> = async {
+            let (mut w, mut r) = conn.open_bi().await?;
+            write_msg(&mut w, &StreamOpen::Audio).await?;
+            loop {
+                tokio::select! {
+                    m = read_msg::<_, AudioHost>(&mut r, MAX_SMALL_MSG) => match m? {
+                        Some(AudioHost::Start { sample_rate, channels }) => sink(AudioEvent::Start { sample_rate, channels }),
+                        Some(AudioHost::Packet(p)) => sink(AudioEvent::Packet(p)),
+                        Some(AudioHost::Error(e)) => anyhow::bail!("{e}"),
+                        None => return Ok(()),
+                    },
+                    c = on.changed() => if c.is_err() || !*on.borrow() {
+                        let _ = w.finish();
+                        return Ok(());
+                    },
+                }
+            }
+        }
+        .await;
+        sink(AudioEvent::Stop);
+        if let Err(e) = r {
+            tracing::info!("no sound: {e:#}");
+            // Wait to be asked again (turned off and on).
+            let _ = on.wait_for(|&v| !v).await;
+        }
+    }
 }
 
 async fn read_frame(s: &mut RecvStream, view: &SharedView, session: u64) -> Result<u64> {
@@ -1253,6 +1555,116 @@ async fn read_frame(s: &mut RecvStream, view: &SharedView, session: u64) -> Resu
     v.apply(session, h.monitor_id, h.frame_id, decoded.iter().map(|(r, px)| (*r, px.as_slice())))?;
     v.frames += 1;
     Ok(h.frame_id)
+}
+
+/// A frame of the second format that cannot be applied (the cache or the picture is not what
+/// the host thinks): the client asks for a full frame.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct BadFrame(String);
+
+/// Read a frame of the second format, decode it and apply what is ready, in order
+/// (acknowledging each frame applied).
+async fn read_frame2(
+    s: &mut RecvStream,
+    view: &SharedView,
+    session: u64,
+    acks: &mpsc::UnboundedSender<u64>,
+) -> Result<()> {
+    let h: FrameHeader = expect_msg(s, MAX_VIDEO_MSG).await?;
+    {
+        let mut v = view.lock().unwrap();
+        if v.session != session {
+            return Err(anyhow!("frame from an old connection"));
+        }
+        if h.full {
+            if let Some(v2) = v.v2.as_mut() {
+                v2.skip_to(h.frame_id);
+            }
+            if v.monitor != h.monitor_id || v.frame.width != h.width || v.frame.height != h.height {
+                v.frame = Frame::new(h.width, h.height);
+                v.monitor = h.monitor_id;
+                v.full_dirty = true;
+                v.dirty.clear();
+            }
+        }
+    }
+    let mut scratch = Vec::new();
+    let mut tiles = Vec::new();
+    while let Some(t) = read_msg::<_, Tile2>(s, MAX_VIDEO_MSG).await? {
+        let rect = TileRect { x: t.x, y: t.y, w: t.w as u32, h: t.h as u32 };
+        let pix = match t.data {
+            TileData::Cached(slot) => Pix::Cached(slot),
+            TileData::Copy { x, y } => Pix::Copy { x, y },
+            TileData::H264(au) => Pix::H264(au),
+            data => {
+                rdesk_common::tiles::decode_tile2(&data, rect.w, rect.h, &mut scratch)?;
+                Pix::Pixels(std::mem::take(&mut scratch))
+            }
+        };
+        let tile = DTile { rect, pix, store: t.store };
+        if h.full {
+            // Painted as it arrives (see `read_frame`).
+            let mut guard = view.lock().unwrap();
+            let v = &mut *guard;
+            if v.session != session
+                || v.monitor != h.monitor_id
+                || v.v2.as_ref().and_then(|x| x.next) != Some(h.frame_id)
+            {
+                return Err(anyhow!("a newer full frame took over"));
+            }
+            let v2 = v.v2.as_mut().expect("second format");
+            let r = v2.paint_now(&mut v.frame, tile).map_err(|e| BadFrame(format!("{e:#}")))?;
+            v.dirty(r);
+        } else {
+            tiles.push(tile);
+        }
+    }
+    let mut v = view.lock().unwrap();
+    if v.session != session {
+        return Err(anyhow!("frame from an old connection"));
+    }
+    let v2 = v.v2.as_mut().ok_or_else(|| anyhow!("not the second format"))?;
+    if h.full {
+        if v2.next == Some(h.frame_id) {
+            v2.done(h.frame_id);
+            v.frames += 1;
+            let _ = acks.send(h.frame_id);
+        }
+    } else {
+        v2.push(h.frame_id, Decoded { monitor: h.monitor_id, width: h.width, height: h.height, tiles });
+    }
+    drop(v);
+    drain2(view, session, acks)
+}
+
+/// Apply the frames of the second format that are ready, in order.
+fn drain2(view: &SharedView, session: u64, acks: &mpsc::UnboundedSender<u64>) -> Result<()> {
+    let mut guard = view.lock().unwrap();
+    let v = &mut *guard;
+    if v.session != session {
+        return Ok(());
+    }
+    let Some(v2) = v.v2.as_mut() else { return Ok(()) };
+    for (id, f) in v2.ready(Instant::now()) {
+        if f.monitor != v.monitor || f.width != v.frame.width || f.height != v.frame.height {
+            continue;
+        }
+        let painted = v2.apply(&mut v.frame, f).map_err(|e| BadFrame(format!("frame {id}: {e:#}")))?;
+        for r in painted {
+            if !v.full_dirty {
+                v.dirty.push(r);
+            }
+        }
+        let (cols, rows) = v.frame.grid();
+        if v.dirty.len() > (cols * rows) as usize {
+            v.full_dirty = true;
+            v.dirty.clear();
+        }
+        v.frames += 1;
+        let _ = acks.send(id);
+    }
+    Ok(())
 }
 
 fn spawn_push(conn: Connection, path: PathBuf, id: u64, notify: Notify) {

@@ -197,6 +197,8 @@ fn start_notice(reporter: &Reporter, ctl: mpsc::UnboundedSender<Ctl>) {
 pub async fn run(opts: RunOpts) -> Result<()> {
     let (ctl, rx) = mpsc::unbounded_channel();
     if opts.agent {
+        // Started in safe mode by a session's request: the next boot is a normal one.
+        crate::restart::leave_safe_mode();
         // The service closes our standard input to stop us.
         let ctl = ctl.clone();
         std::thread::spawn(move || {
@@ -560,7 +562,46 @@ impl Server {
             bail!("no monitors to share (macOS: grant Screen Recording; Linux: needs X11)");
         }
 
-        // One session at a time: the newest wins (the old link is probably half-dead).
+        // One session at a time. The same person's newer session wins (their old link is
+        // probably half-dead); someone else's waits until it ends instead of throwing them out.
+        // Logins without the server (this computer's own password or key) are all the same
+        // person, as before.
+        let who = match &authed.user {
+            Some(u) => u.label(),
+            None => authed.client_name.clone(),
+        };
+        {
+            let cur = self.current.lock().await;
+            if let Some(old) = cur.as_ref()
+                && !old.task.is_finished()
+                && let (Some(a), Some(b)) = (&old.user, &authed.user)
+                && a.user_id != b.user_id
+            {
+                let reason = tf!("in use by {}", "em uso por {}", a.label());
+                self.reporter.event(
+                    tf!(
+                        "{who} tried to connect while {} is connected",
+                        "{who} tentou conectar enquanto {} está conectado",
+                        a.label()
+                    ),
+                    false,
+                );
+                conn.close(close::BUSY, reason.as_bytes());
+                bail!("{peer}: busy ({reason})");
+            }
+        }
+        // Asking the person at the computer: not for a reconnect.
+        if !matches!(authed.kind, AuthKind::Resume) {
+            let what = authed.access.label();
+            if !crate::consent::ask(&self.shared.cfg.consent, &who, &what).await {
+                conn.close(close::DENIED, b"declined at the computer");
+                self.reporter.event(
+                    tf!("Access by {who} declined at the computer", "Acesso de {who} recusado no computador"),
+                    true,
+                );
+                bail!("{peer}: declined at the computer");
+            }
+        }
         let mut cur = self.current.lock().await;
         if let Some(old) = cur.take() {
             tracing::info!("new session from {peer} replaces the previous one");

@@ -47,6 +47,8 @@ rdesk ls "PC da sala" "~/Documents"                          # lista uma pasta d
 rdesk get "PC da sala" "~/Documents/planilha.xlsx" --out .   # baixa um arquivo
 rdesk shell "PC da sala"                 # um terminal de lá, neste terminal
 rdesk shell "PC da sala" --admin         # como administrador (Windows, controle total)
+rdesk tunnel "PC da sala" -L 13389:localhost:3389   # a porta 13389 daqui leva à 3389 de lá (até Ctrl+C)
+rdesk machines wake "PC da sala"         # ligar pela rede (Wake-on-LAN, por outro computador ligado lá)
 
 rdesk connect "PC da sala" --headless --frames 300   # teste de conexão: mostra latência, fps, velocidade
 ```

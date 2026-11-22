@@ -62,6 +62,15 @@ pub struct MachineRow {
     /// The rdesk version it last reported.
     pub version: String,
     pub ring: rdesk_proto::api::Ring,
+    /// Its network cards on local networks (for Wake-on-LAN).
+    pub macs: Vec<String>,
+}
+
+/// "aa:bb:cc:dd:ee:ff".
+pub fn is_mac(s: &str) -> bool {
+    s.len() == 17
+        && s.split(':').count() == 6
+        && s.split(':').all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 impl MachineRow {
@@ -86,6 +95,7 @@ impl MachineRow {
             } else {
                 rdesk_proto::api::Ring::All
             },
+            macs: r.get::<_, String>("macs")?.split(',').filter(|a| !a.is_empty()).map(str::to_string).collect(),
         })
     }
 }
@@ -204,12 +214,19 @@ impl Db {
         let addrs: Vec<&str> =
             addrs.iter().map(String::as_str).filter(|a| !a.contains(',') && a.len() < 64).take(16).collect();
         let os: String = os.chars().take(32).collect();
+        // Older hosts send none: keep what is known.
+        let macs: Vec<String> =
+            seen.macs.iter().filter(|m| is_mac(m)).map(|m| m.to_ascii_lowercase()).take(8).collect();
         self.with(|c| {
             c.execute(
                 "UPDATE machines SET addrs = ?2, os = ?3, in_session = ?4, last_seen = ?5, direct_access = ?6, \
                  version = ?7 WHERE id = ?1",
                 params![id, addrs.join(","), os, in_session, now(), direct, version],
-            )
+            )?;
+            if !macs.is_empty() {
+                c.execute("UPDATE machines SET macs = ?2 WHERE id = ?1", params![id, macs.join(",")])?;
+            }
+            Ok(())
         })?;
         Ok(())
     }

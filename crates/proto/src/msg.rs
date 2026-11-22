@@ -302,6 +302,92 @@ pub enum StreamOpen {
     /// than this variant drop the stream without answering, which tells the client they
     /// have none of the extensions; nothing else in the session is affected.
     Extensions,
+    /// Instead of [`StreamOpen::Acks`], to a host that listed [`Feature::Video2`]: start the
+    /// picture with frames in the second format ([`Tile2`]), applied by the client in
+    /// order, and with what this client can decode.
+    Acks2(VideoCaps),
+    /// The computer's sound (bidirectional, to a host that listed [`Feature::Audio`]): the host
+    /// answers with [`AudioHost`] messages until the client closes the stream.
+    Audio,
+    /// A TCP connection made by the host (bidirectional, full control): [`TunnelReq`], then
+    /// [`TunnelResp`], then the connection's bytes as they are, both ways.
+    Tunnel,
+}
+
+/// Where a tunnel goes, from the host: `localhost` is the host itself; any other name or
+/// address is reached from its network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelReq {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelResp {
+    Ok,
+    Err(String),
+}
+
+/// The host's side of an audio stream ([`StreamOpen::Audio`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioHost {
+    /// Opus packets follow, each [`AudioHost::FRAME_MS`] long, at this rate and channel count.
+    Start { sample_rate: u32, channels: u8 },
+    /// One Opus packet.
+    Packet(Vec<u8>),
+    /// No sound (or no more): why.
+    Error(String),
+}
+
+impl AudioHost {
+    pub const FRAME_MS: u32 = 20;
+}
+
+/// What a client can do with the second frame format ([`StreamOpen::Acks2`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoCaps {
+    /// How many tiles the client keeps for [`TileData::Cached`] (0: none).
+    pub cache_slots: u32,
+    /// It decodes [`TileData::H264`].
+    pub h264: bool,
+}
+
+/// A tile of the second frame format. The client applies frames in `frame_id` order (a
+/// [`FrameHeader`] with `full` skips any frame before it); [`TileData::Copy`] reads the
+/// picture as it was before the frame, so a frame's copies are resolved before any of its
+/// tiles is painted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tile2 {
+    /// Top-left corner in pixels.
+    pub x: u32,
+    pub y: u32,
+    pub w: u16,
+    pub h: u16,
+    pub data: TileData,
+    /// Keep the decoded pixels in this cache slot (replacing what was there).
+    pub store: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TileData {
+    /// The whole tile is this color (RGB; alpha is always opaque).
+    Solid([u8; 3]),
+    /// zstd of tightly packed RGBA.
+    Zstd(Vec<u8>),
+    /// A baseline JPEG.
+    Jpeg(Vec<u8>),
+    /// zstd of: color count − 1 (u8), the colors (RGB), then each row's indexes packed
+    /// at 1, 2, 4 or 8 bits (the fewest that fit the count), rows padded to a byte.
+    Palette(Vec<u8>),
+    /// zstd of RGB, each byte minus the same channel of the pixel to its left (the first
+    /// pixel of a row: minus the one above it).
+    Rgb(Vec<u8>),
+    /// The pixels kept in this cache slot.
+    Cached(u32),
+    /// The pixels at (`x`, `y`) of the picture as it was before this frame.
+    Copy { x: u32, y: u32 },
+    /// An H.264 access unit covering the whole picture (this tile is the frame's size).
+    H264(Vec<u8>),
 }
 
 /// The client's side of the extensions stream. New messages are only ever appended, and
@@ -315,6 +401,25 @@ pub enum ExtClient {
     MaxSize { width: u32, height: u32 },
     /// Send the pointer position ([`ExtHost::Cursor`]) while on.
     Cursor { on: bool },
+    /// Let the host choose quality, frames per second and size for the link while on
+    /// (it reports its choice with [`ExtHost::Quality`]); `SetQuality` sets the ceiling.
+    AutoQuality { on: bool },
+    /// Send the pointer's image ([`ExtHost::CursorShape`]) while on: the client shows it as
+    /// its own pointer over the picture.
+    CursorShape { on: bool },
+    /// Send images copied on the host ([`ExtHost::ClipImage`]) while on; the client sends its own.
+    ClipboardImages { on: bool },
+    /// An image copied here, as PNG, for the host's clipboard.
+    ClipImage(Vec<u8>),
+    /// Restart the computer (full control only). The session drops and reconnects once it is
+    /// back.
+    Power(PowerAction),
+    /// Turn the black screen at the computer on or off (full control only; off when the
+    /// session ends).
+    Privacy { on: bool },
+    /// Block the computer's own keyboard and mouse, or not (full control only; unblocked
+    /// when the session ends, and by Ctrl+Alt+Del at the computer).
+    BlockInput { on: bool },
 }
 
 /// The host's side of the extensions stream.
@@ -325,6 +430,32 @@ pub enum ExtHost {
     /// Where the pointer is on the active monitor (normalized 0..=65535 like input), or
     /// `visible: false` when it is elsewhere (another monitor) or cannot be known.
     Cursor { x: u16, y: u16, visible: bool },
+    /// What automatic quality chose: frames per second, JPEG quality, and the picture's
+    /// scale in percent of the monitor.
+    Quality { fps: u8, jpeg_quality: u8, scale_pct: u8 },
+    /// The pointer changed: its image (sent the first time this `id` is used; after that
+    /// only the id), or `None` with id 0 when the pointer is hidden.
+    CursorShape { id: u64, image: Option<CursorShape> },
+    /// An image copied on the host, as PNG, for the client's clipboard.
+    ClipImage(Vec<u8>),
+    /// Something to tell the user (an action that failed or happened).
+    Notice(String),
+}
+
+/// A pointer image: tightly packed RGBA (straight alpha), at most [`CursorShape::MAX`]
+/// pixels on a side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorShape {
+    pub width: u16,
+    pub height: u16,
+    /// The point of the image that sits at the pointer's position.
+    pub hot_x: u16,
+    pub hot_y: u16,
+    pub rgba: Vec<u8>,
+}
+
+impl CursorShape {
+    pub const MAX: u16 = 96;
 }
 
 /// What the extensions stream can carry (see [`ExtHost::Hello`]). Unknown features are
@@ -333,10 +464,39 @@ pub enum ExtHost {
 pub enum Feature {
     MaxSize,
     Cursor,
+    /// The second frame format ([`StreamOpen::Acks2`]).
+    Video2,
+    /// The host adjusts quality and size to the link ([`ExtClient::AutoQuality`]).
+    AutoQuality,
+    /// The pointer's image ([`ExtClient::CursorShape`], [`ExtHost::CursorShape`]).
+    CursorShape,
+    /// The computer's sound ([`StreamOpen::Audio`]).
+    Audio,
+    /// Images copied on either side ([`ExtClient::ClipboardImages`]).
+    ClipboardImage,
+    /// Restarting the computer ([`ExtClient::Power`]).
+    Power,
+    /// A black screen for whoever is at the computer while the session sees it as it is
+    /// ([`ExtClient::Privacy`]).
+    Privacy,
+    /// The computer's own keyboard and mouse can be blocked ([`ExtClient::BlockInput`]).
+    BlockInput,
+    /// Port tunnels ([`StreamOpen::Tunnel`]).
+    Tunnel,
 }
 
-/// Revision of the extensions protocol (1: picture size limit and pointer position).
-pub const EXT_REV: u16 = 1;
+/// What [`ExtClient::Power`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PowerAction {
+    Restart,
+    /// Restart in safe mode with networking (Windows), reachable again from there; the next
+    /// restart is a normal one.
+    RestartSafeMode,
+}
+
+/// Revision of the extensions protocol (1: picture size limit and pointer position;
+/// 2: second frame format, automatic quality, pointer image).
+pub const EXT_REV: u16 = 2;
 
 /// The client's side of a terminal stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

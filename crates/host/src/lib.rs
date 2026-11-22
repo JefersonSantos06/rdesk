@@ -1,8 +1,12 @@
 //! rdesk host: everything that runs on the machine being controlled.
 
 pub mod admin;
+pub mod audio;
+pub mod autoq;
 pub mod capture;
+pub mod consent;
 pub mod control;
+pub mod cursor;
 pub mod elevation;
 pub mod enroll;
 pub mod input;
@@ -15,13 +19,18 @@ pub mod mac_permissions;
 pub mod mac_update;
 pub mod pointer;
 pub mod power;
+pub mod restart;
 pub mod scale;
+pub mod scroll;
 pub mod server;
 pub mod session;
 pub mod sync;
 pub mod terminal;
+pub mod tilecache;
+pub mod tunnel;
 pub mod update;
 pub mod video;
+pub mod wake;
 #[cfg(target_os = "linux")]
 pub mod wayland;
 #[cfg(windows)]

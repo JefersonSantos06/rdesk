@@ -67,6 +67,7 @@ pub fn router(st: Shared) -> Router {
             get(machines::get_managers).put(machines::set_managers),
         )
         .route(&format!("{}/{{id}}/history", paths::PATH_MACHINES), get(machines::history))
+        .route(&format!("{}/{{id}}/wake", paths::PATH_MACHINES), post(machines::wake))
         .route(paths::PATH_ADMIN_MACHINES, get(machines::admin_list))
         .route(paths::PATH_AGENT_SYNC, post(machines::agent_sync))
         .route(paths::PATH_ADMIN_RELEASES, get(updates::list))

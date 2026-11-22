@@ -70,6 +70,8 @@ pub struct State {
     pub codes: Mutex<HashMap<String, PendingCode>>,
     /// Wakes a machine's long poll when something concerns it.
     pub machine_events: Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>,
+    /// Wake-on-LAN packets a machine was asked to send (for computers on its network).
+    pub wakes: Mutex<HashMap<i64, Vec<rdesk_proto::api::WakeRequest>>>,
     /// Wakes a host waiting for its approval (keyed by host ID, hex).
     pub enroll_events: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     /// Looking for new versions on GitHub: the last result, and "check now".
@@ -117,6 +119,7 @@ impl State {
             flows: Mutex::new(HashMap::new()),
             codes: Mutex::new(HashMap::new()),
             machine_events: Mutex::new(HashMap::new()),
+            wakes: Mutex::new(HashMap::new()),
             enroll_events: Mutex::new(HashMap::new()),
             update_check: Mutex::new(Default::default()),
             update_wake: tokio::sync::Notify::new(),

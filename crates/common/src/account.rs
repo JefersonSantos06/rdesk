@@ -353,6 +353,11 @@ impl Api {
         self.send(reqwest::Method::PUT, &format!("{}/{id}/managers", api::PATH_MACHINES), &SetManagers { users }).await
     }
 
+    /// Ask computers on `id`'s network to wake it (Wake-on-LAN).
+    pub async fn wake(&self, id: i64) -> Result<rdesk_proto::api::WakeReply> {
+        self.send(reqwest::Method::POST, &format!("{}/{id}/wake", api::PATH_MACHINES), &serde_json::json!({})).await
+    }
+
     pub async fn history(&self, id: i64) -> Result<Vec<HistoryEntry>> {
         self.get(&format!("{}/{id}/history", api::PATH_MACHINES)).await
     }

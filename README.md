@@ -4,7 +4,8 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 
 - **Host** (máquina controlada): Windows, macOS, Linux (X11).
 - **Cliente** (viewer): macOS, Linux, Windows, e o app do celular para **Android** e **iPhone** ([mobile/README.md](mobile/README.md)).
-- Tela + mouse + teclado, múltiplos monitores, clipboard de texto nos dois sentidos, envio/download de arquivos com retomada, terminal remoto.
+- Tela + mouse + teclado, múltiplos monitores, área de transferência (textos e imagens) nos dois sentidos, envio/download de arquivos com retomada, terminal remoto.
+- Som do computador (Opus), o cursor de verdade dele (I, mãozinha, setas), túnel de portas (`rdesk tunnel -L 13389:localhost:3389`), ligar pela rede (Wake-on-LAN, por outro computador ligado na mesma rede), reiniciar (também em modo de segurança), tela preta e bloqueio do teclado/mouse de lá, e pedido de permissão opcional a quem estiver no computador.
 
 **Primeira vez? Leia o [Guia do rdesk](docs/guia/README.md)**: passo a passo para criar o servidor, instalar o app e montar cada caso (usar e ser acessado, só acessado, sem servidor, rede local, Tailscale…), em português simples.
 
@@ -14,7 +15,11 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 - **QUIC** com keepalive de 1 s e idle timeout de 6 s: um link morto é detectado em segundos, não em minutos.
 - **Reconexão automática** (0 → 250 ms → … → 2 s, para sempre) com **token de retomada**: ao voltar a rede você não precisa aprovar o 1Password de novo (vale 10 min).
 - **Frames com controle por ACK**: no máximo 2 frames em trânsito; em link ruim cai o fps, não cresce a latência. Tiles perdidos são reenviados sozinhos.
-- Tiles 64×64: só o que mudou é enviado; JPEG enquanto se mexe, zstd sem perdas quando para (texto nítido).
+- Tiles 64×64: só o que mudou é enviado; JPEG enquanto se mexe, sem perdas quando para (texto nítido), com paleta para texto e interface e RGB com preditor para o resto (cerca de metade do tamanho de antes).
+- Rolar a tela vira cópia do que o cliente já tem (como o CopyRect do VNC), e o que já passou pela tela volta de um cache de tiles (64 MB no cliente): voltar a uma janela não reenvia a imagem.
+- Com a tela inteira em movimento (vídeo, arrastar janelas), o host passa para H.264 e volta aos tiles, refinados sem perdas, quando ela para.
+- Qualidade *Auto*: o host mede quanto cada quadro demora para ser confirmado e baixa a qualidade (depois o tamanho) quando o link não acompanha; sobe de novo quando ele folga.
+- No Windows a tela vem pela Desktop Duplication (DXGI): só as regiões que mudaram são convertidas (~2 ms por quadro em vez de 20–40 ms do GDI).
 
 ## Baixar
 
@@ -23,7 +28,7 @@ Do seu servidor: **`https://seu-servidor/download`**. Ele lista a versão libera
 - **Linux**: `curl -fsSL https://seu-servidor/install.sh | sudo sh` (instala o `.deb` e liga as atualizações; `… | sudo sh -s -- --host --key rdk_…` para um computador só acessado).
 - **Mac**: o `rdesk.app`.
 
-As versões publicadas ficam nos [Releases](../../releases): app para Windows, Linux (x64 e arm64, também em `.deb`) e Mac com Apple Silicon (`rdesk.app`; na primeira vez, botão direito → *Abrir*), e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
+As versões publicadas ficam nos [Releases](../../releases): app para Windows, Linux (x64 e arm64, também em `.deb`) e Mac com Apple Silicon (`rdesk.app`; sem notarização, o macOS 15 em diante não abre pelo botão direito: depois da primeira tentativa, *Ajustes → Privacidade e Segurança → Abrir mesmo assim*), e o servidor. Cada release traz um `release.json` assinado; como publicar e conferir: [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Compilar
 
@@ -33,7 +38,7 @@ cargo build --release -p rdesk --no-default-features --features client   # só c
 cargo build --release -p rdesk --no-default-features --features host     # só host
 ```
 
-Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev libxkbcommon-dev libgtk-3-dev clang`.
+Linux precisa de: `pkg-config libxcb1-dev libxrandr-dev libxdo-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev libxkbcommon-dev libgtk-3-dev libasound2-dev cmake clang`. Em todo sistema o build compila a libopus e o OpenH264 da fonte (precisa de `cmake` e de um compilador C/C++).
 
 > **Antivírus (Kaspersky etc.)**: o build executa pequenos programas (build scripts) recém-compilados e sem assinatura, e o próprio `rdesk` captura tela/injeta input/escuta na rede — o mesmo comportamento de um trojan de acesso remoto. Heurísticas podem bloquear. Adicione exclusões para a pasta `target/` do projeto e para o `rdesk.exe` instalado.
 
@@ -160,6 +165,12 @@ port = 7420              # UDP, para conexões diretas (LAN / porta redirecionad
 max_fps = 30
 jpeg_quality = 70
 clipboard = true
+# Pedir permissão a quem estiver no computador antes de cada sessão (não pergunta com ele
+# bloqueado ou sem ninguém conectado, nem numa reconexão).
+[consent]
+ask = false
+timeout_s = 30
+allow_on_timeout = true    # ninguém respondeu: deixa entrar
 # inbox_dir = "C:/Users/voce/Downloads/rdesk"
 [transport]
 keep_alive_ms = 1000
@@ -222,15 +233,19 @@ rdesk connect casa --headless --frames 300     # teste de link: imprime RTT/fps/
 - **Tíquetes**: para conectar a um computador cadastrado, o servidor emite um tíquete assinado (Ed25519) dizendo *usuário U pode controlar a máquina M a partir do endpoint E até T* (no máximo 12 h). O host confere sozinho, com a chave do servidor guardada no cadastro: assinatura, máquina, endpoint do outro lado da conexão, validade e revogações. Tirar o acesso de alguém (descompartilhar, mudar a visibilidade, tirar de um grupo, desativar o usuário) revoga na hora: o host recebe pelo sync e derruba a sessão. Com o servidor fora do ar, tíquetes já emitidos valem até expirar.
 - **Cadastro com prova de posse**: o pedido de cadastro é assinado com a chave do host, então ninguém cadastra o ID de outra máquina como seu.
 - Um computador cadastrado só aceita quem traz tíquete (a senha/chave dele viram cadeado extra opcional), a não ser que o acesso direto esteja ligado nele: aí a senha/chave dele também abrem, só da rede local ou do Tailscale. Sem servidor, conexões de fora da rede local e do Tailscale são recusadas antes do login. No máximo 4 handshakes simultâneos, backoff exponencial após falhas (por IP; conexões via relay compartilham um contador), nenhum stream extra antes do login.
-- Uma sessão por vez: uma nova sessão autenticada derruba a anterior. Ao desconectar, o host solta todas as teclas/botões.
+- Uma sessão por vez: uma nova sessão da mesma pessoa derruba a anterior (o link antigo provavelmente morreu); a de outra pessoa é recusada com "em uso por …" até a primeira terminar. Logins sem servidor (senha ou chave do próprio computador) contam como a mesma pessoa. Ao desconectar, o host solta todas as teclas/botões, desliga a tela preta e desbloqueia o teclado/mouse local.
+- Túnel de portas, reiniciar, tela preta e bloqueio do teclado/mouse: só com controle total.
 
 ## Limitações conhecidas
 
 - Com o app rodando como administrador no Windows (*Gerenciar como administrador*), as janelas de sessão abertas por ele também são elevadas e o Windows bloqueia arrastar arquivos do Explorer para elas: use *Enviar arquivos…* no painel de arquivos da sessão.
 - Tela de bloqueio/UAC do Windows e Ctrl+Alt+Del: só com o serviço instalado.
 - Wayland: imagem e input vão pelo portal do desktop; na primeira conexão alguém no computador precisa permitir (depois a permissão fica guardada, no GNOME 46+ e no KDE Plasma 6.1+). Ainda não testado num desktop de verdade: se der problema, `RDESK_WAYLAND=0` volta ao X11.
-- O cursor remoto não é desenhado na imagem; use o cursor local (posição é absoluta e sincronizada).
-- Sem áudio. Captura via `xcap` (GDI/CGWindowList/X11): ~20–40 ms por frame em 1080p; DXGI/ScreenCaptureKit/H.264 são o próximo passo.
+- O formato do cursor e o som vêm só de hosts Windows por enquanto (no Mac e no Linux o cursor local é uma seta e não há som); o app toca o som em qualquer sistema.
+- Tela preta: Windows 10 2004 ou mais novo, com o serviço instalado; bloqueio do teclado/mouse e reiniciar: Windows com o serviço. Ctrl+Alt+Del no computador devolve o teclado e o mouse.
+- Captura: DXGI no Windows (GDI se não der: monitor girado, HDR); no Mac e no Linux X11 ainda `xcap` (~20–40 ms por quadro em 1080p); ScreenCaptureKit é o próximo passo.
+- H.264 por software (OpenH264); codificação por hardware (NVENC, Quick Sync, VideoToolbox) ainda não. O app do celular recebe os outros formatos, não o H.264.
+- Wake-on-LAN precisa estar ligado na placa de rede (BIOS e Windows) e de outro computador cadastrado e ligado na mesma rede (/24).
 
 ## Desenvolvimento
 

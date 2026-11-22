@@ -7,6 +7,8 @@ pub mod clipboard;
 pub mod config;
 pub mod directory;
 pub mod files;
+#[cfg(feature = "h264")]
+pub mod h264;
 pub mod i18n;
 pub mod release;
 pub mod ticket;

@@ -285,6 +285,10 @@ pub struct Machine {
     /// signed in there sees it, and may manage it with [`Here::Manage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub here: Option<Here>,
+    /// Its network cards are known: another computer on its network can wake it
+    /// ([`PATH_MACHINES`]`/{id}/wake`).
+    #[serde(default)]
+    pub can_wake: bool,
 }
 
 /// What a share grants.
@@ -506,6 +510,24 @@ pub struct AgentSync {
     /// at once only when there is a newer one.
     #[serde(default)]
     pub update_seen: String,
+    /// Its network cards on local networks ("aa:bb:cc:dd:ee:ff"), to be woken up later.
+    #[serde(default)]
+    pub macs: Vec<String>,
+}
+
+/// Wake a computer on this one's network: send Wake-on-LAN packets for `macs`, also to the
+/// broadcast address of the networks of `addrs` (the sleeping computer's last addresses).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeRequest {
+    pub macs: Vec<String>,
+    pub addrs: Vec<String>,
+}
+
+/// Answer to `POST /api/machines/{id}/wake`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeReply {
+    /// How many computers on its network were asked to send the packets.
+    pub helpers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -521,6 +543,9 @@ pub struct AgentSyncReply {
     /// The version released for this computer, if any.
     #[serde(default)]
     pub update: Option<UpdateOffer>,
+    /// Computers on this one's network to wake up.
+    #[serde(default)]
+    pub wake: Vec<WakeRequest>,
 }
 
 /// Tickets of `user_id` issued at or before `before` are void on this machine.

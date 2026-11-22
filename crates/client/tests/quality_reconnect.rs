@@ -77,6 +77,7 @@ async fn frame_rate_is_kept_across_a_reconnect() {
         video: true,
         extensions: Extensions::default(),
         device_key: None,
+        audio: None,
     };
     let handle = conn::spawn(opts, move |ev| {
         if let UiEvent::PasswordNeeded { reply, .. } = &ev {

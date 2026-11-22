@@ -7,8 +7,9 @@ publish.workspace = true
 
 [dependencies]
 rdesk-proto.workspace = true
-rdesk-common.workspace = true
+rdesk-common = { workspace = true, features = ["h264"] }
 anyhow.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -22,9 +23,13 @@ hex = "0.4"
 serde_json = "1"
 # Direct access: which addresses share a network with this computer.
 netwatch = "0.20"
+# Network cards (for Wake-on-LAN); the version netwatch already uses.
+netdev = { version = "0.47", default-features = false }
 ipnet = "2"
 # Remote terminal: ConPTY on Windows, a pty elsewhere.
 portable-pty = "0.9"
+# Sound: Opus (libopus built from source).
+opus = "0.4"
 
 # Windows injects input with SendInput directly (scancodes), so enigo is only for macOS/Linux.
 [target.'cfg(not(windows))'.dependencies]
@@ -37,6 +42,13 @@ pipewire = "0.10"
 pollster = "1"
 
 [target.'cfg(windows)'.dependencies]
+# The speakers' sound (WASAPI loopback).
+cpal = "0.18"
+# Screen capture with DXGI Desktop Duplication (the same version xcap already builds).
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_Power", "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation", "Win32_Security", "Win32_System_Threading",
@@ -50,4 +62,5 @@ windows-service = "0.8"
 [dev-dependencies]
 iroh-base = "1.5"
 rdesk-server = { path = "../server" }
+rdesk-core = { workspace = true, features = ["h264"] }
 tempfile = "3"

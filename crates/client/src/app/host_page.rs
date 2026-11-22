@@ -1645,6 +1645,51 @@ impl HostPage {
         });
         ui.add_space(space::M);
 
+        // Asking the person at the computer.
+        ui::card(ui, |ui| {
+            tall_row(
+                ui,
+                |ui| {
+                    title_detail(
+                        ui,
+                        t!("Ask before each session", "Pedir permissão antes de cada sessão"),
+                        Some(t!(
+                            "Whoever is at this computer allows or denies each connection. Not asked when it is                              locked or nobody is signed in, nor for a reconnect.",
+                            "Quem estiver neste computador permite ou recusa cada conexão. Não pergunta com ele                              bloqueado ou sem ninguém conectado, nem numa reconexão."
+                        )),
+                    );
+                },
+                |ui| {
+                    ui::toggle(ui, &mut cfg.consent.ask);
+                },
+            );
+            if cfg.consent.ask {
+                ui.separator();
+                ui.add_space(space::XS);
+                title_detail(ui, t!("Wait for an answer", "Esperar a resposta por"), None);
+                ui.add(egui::Slider::new(&mut cfg.consent.timeout_s, 10..=120).suffix(" s"));
+                ui.add_space(space::XS);
+                ui.separator();
+                tall_row(
+                    ui,
+                    |ui| {
+                        title_detail(
+                            ui,
+                            t!("Without an answer, allow", "Sem resposta, permitir"),
+                            Some(t!(
+                                "Nobody there to answer: let the session in (off: refuse it).",
+                                "Ninguém lá para responder: deixa a sessão entrar (desligado: recusa)."
+                            )),
+                        );
+                    },
+                    |ui| {
+                        ui::toggle(ui, &mut cfg.consent.allow_on_timeout);
+                    },
+                );
+            }
+        });
+        ui.add_space(space::M);
+
         // New identity.
         ui::card(ui, |ui| {
             tall_row(
@@ -1743,7 +1788,10 @@ impl HostPage {
                     title_detail(
                         ui,
                         t!("Clipboard", "Área de transferência"),
-                        Some(t!("Share text in both directions.", "Compartilhar texto nos dois sentidos.")),
+                        Some(t!(
+                            "Share text and images in both directions.",
+                            "Compartilhar textos e imagens nos dois sentidos."
+                        )),
                     );
                 },
                 |ui| {
@@ -3065,6 +3113,7 @@ mod sample {
                 version: "0.5.0".into(),
                 ring: Default::default(),
                 here: Some(Here::View),
+                can_wake: false,
             };
             let shares = Shares {
                 users: vec![

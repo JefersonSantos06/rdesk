@@ -21,7 +21,8 @@ compartilhados com você e os salvos neste aparelho para a rede local.
 - **Clique** seleciona, **dois cliques** (ou **Enter**) conecta, as **setas** mudam a
   seleção e o **botão direito** abre as ações.
 - O **painel da direita** mostra o selecionado: **Conectar**, **Arquivos**, **Terminal**
-  (quando o seu acesso permite), o ID do host, quem tem acesso, as últimas sessões e o
+  (quando o seu acesso permite), **Ligar** num computador desligado (outro computador
+  ligado na mesma rede manda o sinal de Wake-on-LAN), o ID do host, quem tem acesso, as últimas sessões e o
   menu **⋯** (copiar o ID, opções de login). Numa janela pequena, use o **>** da linha para
   ver os detalhes.
 - **F2** renomeia (nos seus) e **Delete** descadastra (só o dono, com confirmação).
@@ -50,8 +51,9 @@ ela voltar):
 |---|---|
 | ● nome · **ms** | quem você está acessando e a latência (passe o mouse para ver se a ligação é direta ou pelo relay) |
 | **Monitor** | escolher qual tela ver, se o outro tiver várias; *Atualizar imagem* se algo ficou estranho |
-| **Qualidade** | *Auto*, *Velocidade* (mais fluido, menos nítido), *Qualidade* (mais nítido); ou ajuste o fps e a qualidade à mão. Muda na hora. |
+| **Qualidade** | *Auto* (se adapta à conexão: baixa a qualidade e o tamanho quando ela não acompanha, sobe quando folga; mostra o que escolheu), *Velocidade* (mais fluido, menos nítido), *Qualidade* (mais nítido); ou ajuste o fps e a qualidade à mão. Muda na hora. |
 | **Teclas** | enviar **Ctrl+Alt+Del** e a **tecla Windows** (em computadores Windows), **Alt+Tab**, e ligar as **teclas de Mac** |
+| **Sessão** | ouvir o som do computador, **tela preta lá**, **bloquear o teclado e o mouse de lá**, **túnel de porta** e **reiniciar** (normal ou em modo de segurança). Aparece o que o outro computador oferece. |
 | **Arquivos** | abre o painel de arquivos |
 | **Terminal** | abre o painel de terminal |
 | ⛶ | tela cheia |
@@ -71,9 +73,31 @@ Quando a janela é estreita, os botões viram só ícones (passe o mouse para ve
 
 ### Copiar e colar
 
-Texto copiado de um lado pode ser colado no outro, nos dois sentidos, automaticamente
-(só texto, e só com **controle total**). Para desligar no computador acessado:
+Texto e imagens (prints, por exemplo) copiados de um lado podem ser colados no outro, nos
+dois sentidos, automaticamente (só com **controle total**; imagens entre computadores com rdesk
+0.7 ou mais novo). Para desligar no computador acessado:
 *Este computador → Desempenho e arquivos → Área de transferência*.
+
+### Som, cursor e o menu Sessão
+
+- **Som**: o que toca no computador acessado (Windows) toca aqui. Desligue em *Sessão →
+  Ouvir o computador*.
+- **Cursor**: sobre a imagem, o seu mouse fica com o formato do cursor de lá (I sobre texto,
+  mãozinha em links, setas nas bordas), sem atraso (hosts Windows).
+- **Tela preta lá**: quem estiver no computador vê uma tela preta; você continua vendo a tela
+  normal. Junto com **bloquear o teclado e o mouse de lá**, ninguém mexe enquanto você
+  trabalha. Tudo volta ao normal quando a sessão termina (e Ctrl+Alt+Del lá devolve o teclado
+  e o mouse). Windows com o serviço instalado.
+- **Túnel de porta**: `13389:localhost:3389` faz a porta 13389 deste computador levar à 3389
+  do outro (a área de trabalho remota dele); `8080:192.168.0.1:80` leva à página do roteador
+  da rede de lá. Só com controle total.
+- **Reiniciar o computador** e **Reiniciar em modo de segurança** (com rede, para remover o que
+  impede o Windows de iniciar): a janela reconecta sozinha quando ele voltar; depois do modo
+  de segurança, o próximo reinício é normal.
+
+Se outra pessoa já estiver conectada, a sua conexão é recusada com "em uso por …" (a sessão
+dela não cai). Se o dono ligou *Pedir permissão antes de cada sessão*, quem estiver lá precisa
+permitir.
 
 ### Arquivos
 

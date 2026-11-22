@@ -31,6 +31,21 @@ fn name(desk: HDESK) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
+/// The name of the desktop with the keyboard now ("Default" for the signed-in person's;
+/// "Winlogon" for the sign-in and lock screens and UAC prompts).
+pub fn input_desktop_name() -> Option<String> {
+    use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_READOBJECTS;
+    unsafe {
+        let input = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+        if input.is_null() {
+            return None;
+        }
+        let n = name(input);
+        CloseDesktop(input);
+        n
+    }
+}
+
 /// Attach the calling thread to the input desktop if it changed. Returns its name when
 /// it switched. The thread must not own windows (capture and input threads do not).
 pub fn follow_input_desktop() -> Option<String> {

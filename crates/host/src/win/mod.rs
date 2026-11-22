@@ -3,9 +3,11 @@
 //! the session notice).
 
 pub mod desktop;
+pub mod dxgi;
 pub mod files;
 pub mod install;
 pub mod notice;
+pub mod privacy;
 pub mod proc;
 pub mod sas;
 pub mod service;

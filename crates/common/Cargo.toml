@@ -42,6 +42,9 @@ serde_json = "1"
 gethostname = "1"
 
 zstd = "0.13"
+png = "0.18"
+# H.264 for whole-screen motion (Cisco's OpenH264, built from source).
+openh264 = { version = "0.9", optional = true }
 jpeg-encoder = "0.7"
 zune-jpeg = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
@@ -51,7 +54,7 @@ url = "2.5.8"
 base64 = "0.23.1"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control", "image-data"] }
 
 # Android: the HTTPS roots built into the app (see `account::http_client`).
 [target.'cfg(target_os = "android")'.dependencies]
@@ -67,3 +70,8 @@ rdesk-server = { path = "../server" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form", "cookies"] }
 totp-rs = "6"
 iroh-base = "1.5"
+
+[features]
+default = []
+# H.264 (desktop host and client; not the phone app).
+h264 = ["dep:openh264"]

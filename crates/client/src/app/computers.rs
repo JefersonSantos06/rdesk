@@ -1550,6 +1550,28 @@ impl Computers {
             {
                 self.open(m, Open::Terminal);
             }
+            // Off: another computer on its network can wake it.
+            if !this
+                && !m.online
+                && m.can_access
+                && m.can_wake
+                && ui::secondary(ui, ui::with_icon(icons::POWER, t!("Turn on", "Ligar")))
+                    .on_hover_text(t!(
+                        "Wake-on-LAN: a computer that is on, on the same network, sends the signal (the network                          card must allow it, in the BIOS and in Windows)",
+                        "Wake-on-LAN: um computador ligado, na mesma rede, manda o sinal (a placa de rede precisa                          permitir, na BIOS e no Windows)"
+                    ))
+                    .clicked()
+            {
+                let (id, name) = (m.id, m.name.clone());
+                self.run_here(&ctx, None, move |api| async move {
+                    let r = api.wake(id).await?;
+                    Ok(tf!(
+                        "Asked {} computer(s) on its network to wake {name}; it shows as online in a minute or two.",
+                        "{} computador(es) da rede dele foram pedidos para ligar {name}; ele aparece online em um                          ou dois minutos.",
+                        r.helpers
+                    ))
+                });
+            }
         });
         if this {
             ui::caption(
@@ -2911,6 +2933,7 @@ mod sample {
             version: "0.4.0".into(),
             ring: Default::default(),
             here: None,
+            can_wake: !online,
         }
     }
 

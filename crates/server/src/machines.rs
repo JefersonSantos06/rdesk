@@ -67,7 +67,67 @@ pub fn view(st: &Shared, m: &MachineRow, viewer: Option<i64>) -> Result<Machine,
         version: m.version.clone(),
         ring: m.ring,
         here: None,
+        can_wake: !m.macs.is_empty(),
     })
+}
+
+/// The /24 (IPv4) of each private address in `addrs`.
+fn lan_nets(addrs: &[String]) -> Vec<[u8; 3]> {
+    addrs
+        .iter()
+        .filter_map(|a| a.parse::<std::net::SocketAddr>().map(|s| s.ip()).or_else(|_| a.parse()).ok())
+        .filter_map(|ip| match ip {
+            std::net::IpAddr::V4(v4) if v4.is_private() => Some([v4.octets()[0], v4.octets()[1], v4.octets()[2]]),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `POST /api/machines/{id}/wake`: ask computers that are on and on the same network as
+/// `id` (it reported an address in the same /24) to send it Wake-on-LAN packets.
+pub async fn wake(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<i64>,
+) -> Result<Json<rdesk_proto::api::WakeReply>, Error> {
+    let m = st.db.machine(id)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such computer"))?;
+    if st.db.access_of(s.user.id, &m)?.is_none() {
+        return Err(err(StatusCode::FORBIDDEN, "you do not have access to this computer"));
+    }
+    if m.macs.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this computer never reported its network cards (it needs rdesk 0.7 or newer)",
+        ));
+    }
+    let nets = lan_nets(&m.addrs);
+    let online = |r: &crate::access::MachineRow| {
+        parse_endpoint(&r.endpoint_id)
+            .ok()
+            .and_then(|b| iroh_base::EndpointId::from_bytes(&b).ok())
+            .is_some_and(|e| st.online.contains(&e))
+    };
+    let helpers: Vec<i64> = st
+        .db
+        .machines()?
+        .into_iter()
+        .filter(|r| r.id != id && online(r) && lan_nets(&r.addrs).iter().any(|n| nets.contains(n)))
+        .map(|r| r.id)
+        .take(3)
+        .collect();
+    if helpers.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "no computer that is on shares its network: one of them must be on to wake it",
+        ));
+    }
+    let req = rdesk_proto::api::WakeRequest { macs: m.macs.clone(), addrs: m.addrs.clone() };
+    for h in &helpers {
+        st.wakes.lock().unwrap().entry(*h).or_default().push(req.clone());
+        st.machine_notify(*h).notify_one();
+    }
+    st.db.audit(Some(s.user.id), "machine.wake", &m.name);
+    Ok(Json(rdesk_proto::api::WakeReply { helpers: helpers.len() as u32 }))
 }
 
 /// A presence proof that came with the request (`x-rdesk-here`), its signature and age
@@ -450,9 +510,10 @@ pub async fn agent_sync(
     wait.as_mut().enable();
     let (cursor, _) = st.db.revocations(m.id)?;
     let current_key = hex::encode(st.key.public().as_bytes());
-    // A version the host has not seen yet: answer at once.
+    // A version the host has not seen yet, or computers to wake: answer at once.
     let new_offer = crate::updates::offer(&st, m.ring)?.is_some_and(|o| o.version != req.update_seen);
-    if cursor <= req.cursor && req.server_key == current_key && !new_offer {
+    let has_wakes = st.wakes.lock().unwrap().get(&m.id).is_some_and(|w| !w.is_empty());
+    if cursor <= req.cursor && req.server_key == current_key && !new_offer && !has_wakes {
         let _ = tokio::time::timeout(Duration::from_secs(25), wait).await;
     }
     // Unregistered meanwhile: the next call gets 401.
@@ -464,6 +525,7 @@ pub async fn agent_sync(
         machine: view(&st, &m, None)?,
         server_keys: st.ticket_keys(),
         update: crate::updates::offer(&st, m.ring)?,
+        wake: st.wakes.lock().unwrap().remove(&m.id).unwrap_or_default(),
     }))
 }
 

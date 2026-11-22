@@ -4,3 +4,5 @@
 pub mod conn;
 pub mod secrets;
 pub mod terminal;
+pub mod tunnel;
+pub mod video2;

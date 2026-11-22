@@ -29,6 +29,10 @@ pub enum InputCmd {
     Event(InputEvent),
     /// Where the pointer is on the current monitor (see [`Pointer`]).
     Pointer(tokio::sync::oneshot::Sender<Pointer>),
+    /// Block the computer's own keyboard and mouse (Windows, with administrator rights), or
+    /// let them through again. Injected input still works; Ctrl+Alt+Del at the computer
+    /// unblocks.
+    BlockLocal(bool, tokio::sync::oneshot::Sender<Result<()>>),
 }
 
 /// The pointer on the current monitor, normalized like input (0..=65535 per axis);
@@ -181,6 +185,10 @@ pub trait Backend {
     fn pointer(&mut self) -> Option<(i32, i32)> {
         None
     }
+    /// Block (or unblock) the local keyboard and mouse.
+    fn block_local(&mut self, _on: bool) -> Result<()> {
+        Err(anyhow::anyhow!("blocking the keyboard and mouse works on Windows computers only"))
+    }
 }
 
 #[derive(Default)]
@@ -195,6 +203,9 @@ impl State {
     fn handle(&mut self, b: &mut dyn Backend, cmd: InputCmd) -> Result<()> {
         match cmd {
             InputCmd::Monitor(r) => self.rect = Some(r),
+            InputCmd::BlockLocal(on, reply) => {
+                let _ = reply.send(b.block_local(on));
+            }
             InputCmd::Pointer(reply) => {
                 let p = match (self.rect, b.pointer()) {
                     (Some(r), Some((x, y))) => unmap_point(r, x, y),
@@ -434,6 +445,17 @@ mod win {
         fn pointer(&mut self) -> Option<(i32, i32)> {
             let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
             (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+        }
+
+        fn block_local(&mut self, on: bool) -> Result<()> {
+            // Only this thread may unblock what it blocked; injected input goes on working.
+            if unsafe { BlockInput(on as i32) } == 0 {
+                anyhow::bail!(
+                    "Windows refused ({}): it needs rdesk installed as a service",
+                    std::io::Error::last_os_error()
+                );
+            }
+            Ok(())
         }
     }
 }

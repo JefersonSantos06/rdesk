@@ -86,19 +86,27 @@ pub async fn run(
         jpeg_quality: shared.cfg.jpeg_quality,
         epoch: 0,
         max_size: (0, 0),
+        auto: false,
     });
     let settings_tx = Arc::new(settings_tx);
     let (ack_tx, ack_rx) = mpsc::unbounded_channel::<u64>();
     // The picture starts when the client opens its acks stream: a client that only wants a
     // terminal (or files) leaves it closed, and the screen is never captured.
     let acks_opened = Arc::new(tokio::sync::Notify::new());
+    // Which frame format the acks stream asked for (`None`: the first).
+    let video_caps = Arc::new(std::sync::Mutex::new(None::<rdesk_proto::VideoCaps>));
+    // What automatic quality chose, for the extensions stream to pass on.
+    let (report_tx, report_rx) = watch::channel((0u8, 0u8, 0u8));
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<HostMsg>();
     let stats = Arc::new(std::sync::Mutex::new(VideoStats { frames: 0, bytes: 0 }));
 
     // The clipboard goes both ways, so it needs full control.
+    // Images copied here, for the extensions stream once the client asks for them.
+    let (img_tx, img_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let clip_images = Arc::new(std::sync::Mutex::new(Some(img_rx)));
     let clipboard = if shared.cfg.clipboard && access.input {
         let (clip_tx, mut clip_rx) = mpsc::unbounded_channel::<String>();
-        let sync = ClipboardSync::spawn(clip_tx);
+        let sync = ClipboardSync::spawn(clip_tx, Some(img_tx)).map(Arc::new);
         let out = out_tx.clone();
         tokio::spawn(async move {
             while let Some(text) = clip_rx.recv().await {
@@ -129,6 +137,7 @@ pub async fn run(
         let monitors = monitors.clone();
         let capturer = shared.capturer.clone();
         let settings_tx = settings_tx.clone();
+        let clipboard = clipboard.clone();
         tasks.spawn(async move {
             loop {
                 let Some(msg) = read_msg::<_, ClientMsg>(&mut ctrl_r, MAX_CONTROL_MSG).await? else {
@@ -214,6 +223,7 @@ pub async fn run(
         let conn = conn.clone();
         let injector = injector.clone();
         let acks_opened = acks_opened.clone();
+        let video_caps = video_caps.clone();
         tasks.spawn(async move {
             loop {
                 let mut s = match conn.accept_uni().await {
@@ -223,6 +233,7 @@ pub async fn run(
                 let injector = injector.clone();
                 let ack_tx = ack_tx.clone();
                 let acks_opened = acks_opened.clone();
+                let video_caps = video_caps.clone();
                 tokio::spawn(async move {
                     let r: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut s, MAX_SMALL_MSG).await? {
@@ -234,13 +245,16 @@ pub async fn run(
                                     }
                                 }
                             }
-                            StreamOpen::Acks => {
+                            open @ (StreamOpen::Acks | StreamOpen::Acks2(_)) => {
+                                if let StreamOpen::Acks2(caps) = open {
+                                    *video_caps.lock().unwrap() = Some(caps);
+                                }
                                 acks_opened.notify_one();
                                 while let Some(a) = read_msg::<_, FrameAck>(&mut s, MAX_SMALL_MSG).await? {
                                     let _ = ack_tx.send(a.frame_id);
                                 }
                             }
-                            StreamOpen::File | StreamOpen::Terminal | StreamOpen::Extensions => {
+                            _ => {
                                 return Err(anyhow!("file, terminal and extension streams must be bidirectional"));
                             }
                         }
@@ -260,6 +274,8 @@ pub async fn run(
         let conn = conn.clone();
         let injector = injector.clone();
         let settings_tx = settings_tx.clone();
+        let (clipboard, clip_images) = (clipboard.clone(), clip_images.clone());
+        let capturer = shared.capturer.clone();
         let inbox = shared.cfg.inbox_dir();
         let chosen_inbox = shared.cfg.inbox_dir.clone();
         // Administrator rights in a terminal: only with every other right too.
@@ -285,6 +301,8 @@ pub async fn run(
                 let (inbox, chosen_inbox) = (inbox.clone(), chosen_inbox.clone());
                 let (reporter, who) = (reporter.clone(), who.clone());
                 let (injector, settings_tx) = (injector.clone(), settings_tx.clone());
+                let (report_rx, capturer) = (report_rx.clone(), capturer.clone());
+                let (clipboard, clip_images) = (clipboard.clone(), clip_images.clone());
                 tokio::spawn(async move {
                     let res: Result<()> = async {
                         match expect_msg::<_, StreamOpen>(&mut r, MAX_SMALL_MSG).await? {
@@ -324,8 +342,30 @@ pub async fn run(
                                 reporter.terminal(-1, admin);
                                 r2
                             }
+                            StreamOpen::Audio => serve_audio(&mut r, &mut w, access.screen).await,
+                            StreamOpen::Tunnel => {
+                                let full = access == rdesk_proto::Access::FULL;
+                                crate::tunnel::serve(&mut r, &mut w, full, |to| {
+                                    reporter.event(
+                                        tf!("{who} opened a tunnel to {to}", "{who} abriu um túnel para {to}"),
+                                        false,
+                                    )
+                                })
+                                .await
+                            }
                             StreamOpen::Extensions => {
-                                serve_extensions(&mut r, &mut w, &settings_tx, injector, access.screen).await
+                                let ext = ExtCtx {
+                                    settings: &settings_tx,
+                                    injector,
+                                    screen: access.screen,
+                                    report: report_rx,
+                                    capturer,
+                                    clipboard,
+                                    clip_images,
+                                    full: access == rdesk_proto::Access::FULL,
+                                    who: who.clone(),
+                                };
+                                serve_extensions(&mut r, &mut w, ext).await
                             }
                             other => Err(anyhow!("unexpected bidirectional stream {other:?}")),
                         }
@@ -349,7 +389,9 @@ pub async fn run(
         let stats = stats.clone();
         tasks.spawn(async move {
             acks_opened.notified().await;
-            video::run(conn, capturer, settings_rx, ack_rx, stats).await?;
+            let caps = *video_caps.lock().unwrap();
+            let opts = video::VideoOpts { caps, report: Some(report_tx) };
+            video::run(conn, capturer, settings_rx, ack_rx, stats, opts).await?;
             Ok("video")
         });
     }
@@ -403,27 +445,106 @@ pub async fn run(
 /// How often the pointer is looked at while the client follows it.
 const POINTER_EVERY: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// The extensions stream ([`StreamOpen::Extensions`]): the picture size limit and the
-/// pointer position, for clients that draw their own pointer (phones).
-async fn serve_extensions(
-    r: &mut transport::RecvStream,
-    w: &mut transport::SendStream,
-    settings: &watch::Sender<VideoSettings>,
+/// The computer's sound ([`StreamOpen::Audio`]), for sessions that see the screen, until the
+/// client closes the stream.
+async fn serve_audio(r: &mut transport::RecvStream, w: &mut transport::SendStream, screen: bool) -> Result<()> {
+    use rdesk_proto::AudioHost;
+    if !screen {
+        let why = t!("this session may not hear the computer", "esta sessão não pode ouvir o computador");
+        write_msg(w, &AudioHost::Error(why.into())).await?;
+        return Ok(());
+    }
+    let mut packets = match crate::audio::start() {
+        Ok(rx) => rx,
+        Err(e) => {
+            write_msg(w, &AudioHost::Error(format!("{e:#}"))).await?;
+            return Ok(());
+        }
+    };
+    let _ = w.set_priority(15);
+    write_msg(w, &AudioHost::Start { sample_rate: crate::audio::RATE, channels: crate::audio::CHANNELS }).await?;
+    let mut buf = [0u8; 64];
+    loop {
+        tokio::select! {
+            p = packets.recv() => match p {
+                Some(p) => write_msg(w, &AudioHost::Packet(p)).await?,
+                None => return Ok(()),
+            },
+            // The client closed its side: no more sound.
+            n = r.read(&mut buf) => if !matches!(n, Ok(Some(_))) { return Ok(()) },
+        }
+    }
+}
+
+/// What the extensions stream works with.
+struct ExtCtx<'a> {
+    settings: &'a watch::Sender<VideoSettings>,
     injector: Injector,
     screen: bool,
-) -> Result<()> {
-    use std::sync::atomic::{AtomicU8, Ordering};
+    report: watch::Receiver<(u8, u8, u8)>,
+    capturer: Capturer,
+    /// The clipboard (full control only), and images copied here waiting for a client that
+    /// takes them.
+    clipboard: Option<Arc<ClipboardSync>>,
+    clip_images: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>>,
+    /// Full control (restart, black screen, blocking the local keyboard).
+    full: bool,
+    /// Who is connected (for the restart's reason).
+    who: String,
+}
+
+/// The extensions stream ([`StreamOpen::Extensions`]): the picture size limit, the pointer
+/// (its position for clients that draw their own, its image for those that show it), the
+/// second frame format and automatic quality.
+async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::SendStream, ctx: ExtCtx<'_>) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    let ExtCtx { settings, injector, screen, mut report, capturer, clipboard, clip_images, full, who } = ctx;
+    let (mut privacy_on, mut blocked) = (false, false);
     let ExtClient::Hello { rev } = expect_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? else {
         return Err(anyhow!("extensions stream must start with Hello"));
     };
-    let features = if screen && rev >= 1 { vec![Feature::MaxSize, Feature::Cursor] } else { Vec::new() };
+    let mut features = Vec::new();
+    if screen && rev >= 1 {
+        features.extend([Feature::MaxSize, Feature::Cursor]);
+    }
+    if screen && rev >= 2 {
+        features.extend([Feature::Video2, Feature::AutoQuality]);
+        if crate::cursor::supported() {
+            features.push(Feature::CursorShape);
+        }
+        if crate::audio::supported() {
+            features.push(Feature::Audio);
+        }
+    }
+    if rev >= 2 && clipboard.is_some() {
+        features.push(Feature::ClipboardImage);
+    }
+    // Restarting, the black screen, blocking the local keyboard, tunnels: full control only.
+    if rev >= 2 && full {
+        features.push(Feature::Tunnel);
+        if crate::restart::supported() {
+            features.push(Feature::Power);
+        }
+        #[cfg(windows)]
+        if crate::elevation::is_elevated() {
+            features.push(Feature::BlockInput);
+            if crate::win::privacy::supported() {
+                features.push(Feature::Privacy);
+            }
+        }
+    }
     write_msg(w, &ExtHost::Hello { rev: rev.min(EXT_REV), features }).await?;
 
     // 0: off; 1: on; 2: on, and send the next position even if it did not move.
     let follow = Arc::new(AtomicU8::new(0));
-    let (tx, mut rx) = mpsc::channel::<crate::input::Pointer>(2);
+    let shapes_on = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = mpsc::channel::<ExtHost>(4);
+    let images_tx = tx.clone();
+    let notices = tx.clone();
+    let injector_local = injector.clone();
+    let mut images_task: Option<tokio::task::JoinHandle<()>> = None;
     let poller = {
-        let follow = follow.clone();
+        let (follow, tx) = (follow.clone(), tx.clone());
         tokio::spawn(async move {
             let mut last = None;
             loop {
@@ -439,15 +560,44 @@ async fn serve_extensions(
                 }
                 if last != Some(p) {
                     last = Some(p);
-                    if tx.send(p).await.is_err() {
+                    if tx.send(ExtHost::Cursor { x: p.x, y: p.y, visible: p.visible }).await.is_err() {
                         return;
                     }
                 }
             }
         })
     };
+    // The pointer's image, looked at as often as its position. Each image goes once; after
+    // that only its id.
+    let shapes = {
+        let (on, tx) = (shapes_on.clone(), tx);
+        tokio::spawn(async move {
+            let mut sent = std::collections::HashSet::new();
+            let mut last: Option<u64> = None;
+            loop {
+                tokio::time::sleep(POINTER_EVERY).await;
+                if !on.load(Ordering::Acquire) {
+                    last = None;
+                    continue;
+                }
+                let Some((id, image)) = capturer.cursor().await else { continue };
+                if last == Some(id) {
+                    continue;
+                }
+                last = Some(id);
+                let image = if id == 0 || sent.contains(&id) { None } else { image };
+                if image.is_some() {
+                    sent.insert(id);
+                }
+                if tx.send(ExtHost::CursorShape { id, image }).await.is_err() {
+                    return;
+                }
+            }
+        })
+    };
     let read = async {
-        while let Some(m) = read_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? {
+        // Images make some messages big.
+        while let Some(m) = read_msg::<_, ExtClient>(r, MAX_CONTROL_MSG).await? {
             match m {
                 ExtClient::MaxSize { width, height } if screen => {
                     let size = if width == 0 || height == 0 { (0, 0) } else { (width.max(64), height.max(64)) };
@@ -458,14 +608,99 @@ async fn serve_extensions(
                     // It draws the pointer itself: the capture leaves it out where it can.
                     crate::pointer::set_client_draws(on);
                 }
+                ExtClient::AutoQuality { on } if screen => {
+                    settings.send_if_modified(|s| std::mem::replace(&mut s.auto, on) != on);
+                }
+                ExtClient::CursorShape { on } if screen => shapes_on.store(on, Ordering::Release),
+                ExtClient::ClipboardImages { on } => {
+                    if let Some(c) = &clipboard {
+                        c.set_images(on);
+                        if on
+                            && images_task.is_none()
+                            && let Some(mut rx) = clip_images.lock().unwrap().take()
+                        {
+                            let tx = images_tx.clone();
+                            images_task = Some(tokio::spawn(async move {
+                                while let Some(png) = rx.recv().await {
+                                    if tx.send(ExtHost::ClipImage(png)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+                ExtClient::ClipImage(png) => {
+                    if let Some(c) = &clipboard {
+                        c.set_image(png);
+                    }
+                }
+                ExtClient::Power(action) if full => {
+                    let safe = action == rdesk_proto::PowerAction::RestartSafeMode;
+                    let who = who.clone();
+                    let r = tokio::task::spawn_blocking(move || crate::restart::restart(safe, &who)).await?;
+                    let text = match r {
+                        Ok(()) if safe => t!(
+                            "Restarting in safe mode with networking; reconnecting once it is back.",
+                            "Reiniciando em modo de segurança com rede; reconectando quando voltar."
+                        )
+                        .to_string(),
+                        Ok(()) => {
+                            t!("Restarting; reconnecting once it is back.", "Reiniciando; reconectando quando voltar.")
+                                .to_string()
+                        }
+                        Err(e) => tf!("Could not restart: {e:#}", "Não foi possível reiniciar: {e:#}"),
+                    };
+                    let _ = notices.send(ExtHost::Notice(text)).await;
+                }
+                ExtClient::Privacy { on } if full => {
+                    #[cfg(windows)]
+                    let r = tokio::task::spawn_blocking(move || crate::win::privacy::set(on)).await?;
+                    #[cfg(not(windows))]
+                    let r: Result<()> = Err(anyhow!("only on Windows computers"));
+                    match r {
+                        Ok(()) => privacy_on = on,
+                        Err(e) => {
+                            let text = tf!("No black screen: {e:#}", "Sem tela preta: {e:#}");
+                            let _ = notices.send(ExtHost::Notice(text)).await;
+                        }
+                    }
+                }
+                ExtClient::BlockInput { on } if full => {
+                    let (rtx, rrx) = tokio::sync::oneshot::channel();
+                    injector_local.send(InputCmd::BlockLocal(on, rtx));
+                    match rrx.await.unwrap_or_else(|_| Err(anyhow!("input thread gone"))) {
+                        Ok(()) => blocked = on,
+                        Err(e) => {
+                            let text = tf!(
+                                "Could not block the keyboard and mouse: {e:#}",
+                                "Não foi possível bloquear o teclado e o mouse: {e:#}"
+                            );
+                            let _ = notices.send(ExtHost::Notice(text)).await;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         Ok::<_, anyhow::Error>(())
     };
     let write = async {
-        while let Some(p) = rx.recv().await {
-            write_msg(w, &ExtHost::Cursor { x: p.x, y: p.y, visible: p.visible }).await?;
+        loop {
+            let m = tokio::select! {
+                m = rx.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                r = report.changed() => {
+                    if r.is_err() {
+                        break;
+                    }
+                    let (fps, jpeg_quality, scale_pct) = *report.borrow_and_update();
+                    ExtHost::Quality { fps, jpeg_quality, scale_pct }
+                }
+            };
+            write_msg(w, &m).await?;
         }
         Ok::<_, anyhow::Error>(())
     };
@@ -474,6 +709,19 @@ async fn serve_extensions(
         r = write => r,
     };
     poller.abort();
+    shapes.abort();
+    if let Some(t) = images_task {
+        t.abort();
+    }
+    // Whoever is at the computer gets it back as soon as the session ends.
+    if privacy_on {
+        #[cfg(windows)]
+        let _ = crate::win::privacy::set(false);
+    }
+    if blocked {
+        let (rtx, _) = tokio::sync::oneshot::channel();
+        injector_local.send(InputCmd::BlockLocal(false, rtx));
+    }
     crate::pointer::set_client_draws(false);
     result
 }

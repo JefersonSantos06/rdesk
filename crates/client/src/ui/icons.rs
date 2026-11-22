@@ -151,3 +151,7 @@ pub const PASSWORD: &str = "\u{E752}";
 pub const SEAL_CHECK: &str = "\u{E606}";
 pub const WRENCH: &str = "\u{E5D4}";
 pub const TOOLBOX: &str = "\u{ECA0}";
+pub const SPEAKER_HIGH: &str = "\u{E44A}";
+pub const SPEAKER_SLASH: &str = "\u{E45A}";
+pub const MOUSE: &str = "\u{E33A}";
+pub const ARROWS_LEFT_RIGHT: &str = "\u{E0A0}";

@@ -22,3 +22,8 @@ rpassword = "7"
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 serde_json = "1"
+
+[features]
+default = []
+# Decode H.264 frames (the desktop app; not the phone app).
+h264 = ["rdesk-common/h264"]

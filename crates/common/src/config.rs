@@ -179,6 +179,26 @@ pub struct HostConfig {
     /// Windows: full-control sessions may open a terminal as administrator (the signed-in
     /// person's elevated rights, if they are an administrator).
     pub admin_terminal: bool,
+    /// Ask the person at the computer before a session starts.
+    pub consent: ConsentConfig,
+}
+
+/// `[consent]` in host.toml: ask the person at the computer before each session (not for a
+/// reconnect, nor when the computer is locked or nobody is signed in).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConsentConfig {
+    pub ask: bool,
+    /// Seconds to wait for an answer.
+    pub timeout_s: u32,
+    /// Without an answer in time (nobody there): let the session in.
+    pub allow_on_timeout: bool,
+}
+
+impl Default for ConsentConfig {
+    fn default() -> Self {
+        Self { ask: false, timeout_s: 30, allow_on_timeout: true }
+    }
 }
 
 /// `[direct]` in host.toml: this computer's own password or SSH key open it without the
@@ -279,6 +299,7 @@ impl Default for HostConfig {
             enroll: EnrollConfig::default(),
             direct: DirectConfig::default(),
             admin_terminal: true,
+            consent: ConsentConfig::default(),
         }
     }
 }
