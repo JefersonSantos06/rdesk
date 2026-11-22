@@ -24,12 +24,14 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Shares the phone's screen with the rdesk host (Android requires a foreground service of
  * type `mediaProjection` for it, with its notification). The whole display is mirrored into
- * an [ImageReader]; new pictures go to Rust through [ScreenBridge], at most [MAX_FPS] a
- * second, and always the newest one. A turned screen gets a new size.
+ * an [ImageReader] (scaled to at most [MAX_SIDE]); new pictures go to Rust through
+ * [ScreenBridge], at most [MAX_FPS] a second, and always the newest one. A turned screen gets a
+ * new size.
  *
  * Android ends the projection when the screen locks or when the person stops it from the
  * system bar; then this service stops, and with it the host.
@@ -43,6 +45,7 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL = "rdesk-sharing"
         private const val NOTIFICATION_ID = 7420
         private const val MAX_FPS = 30
+        private const val MAX_SIDE = 1920
         private const val TAG = "rdesk-screen"
 
         /** Sharing now. */
@@ -161,15 +164,22 @@ class ScreenCaptureService : Service() {
         super.onDestroy()
     }
 
-    /** The display's real size now; `true` if it changed. */
+    /**
+     * The size to share the display at now; `true` if it changed. At most [MAX_SIDE] on the
+     * longer side and a multiple of 16 on both: what hardware H.264 encoders take everywhere
+     * (no row padding to guess). The display is mirrored into it, scaled.
+     */
     @Suppress("DEPRECATION")
     private fun measure(): Boolean {
         val m = DisplayMetrics()
         getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
-        val changed = m.widthPixels != width || m.heightPixels != height
-        width = m.widthPixels
-        height = m.heightPixels
-        dpi = m.densityDpi
+        val scale = minOf(1.0, MAX_SIDE.toDouble() / maxOf(m.widthPixels, m.heightPixels))
+        val w = maxOf(16, (m.widthPixels * scale / 16).roundToInt() * 16)
+        val h = maxOf(16, (m.heightPixels * scale / 16).roundToInt() * 16)
+        val changed = w != width || h != height
+        width = w
+        height = h
+        dpi = (m.densityDpi * scale).roundToInt()
         return changed
     }
 

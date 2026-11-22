@@ -119,6 +119,7 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Recusar a captura: a chave continua desligada e a página diz por quê.
 - [ ] Do computador (`rdesk connect <ID>@<ip>` com a senha do celular, ou pelo servidor depois de *Adicionar ao meu servidor*): a imagem é a tela do celular, em pé; a página mostra quem está conectado.
 - [ ] Girar o celular: a imagem passa a deitada, sem faixas pretas.
+- [ ] Rolar uma lista sem parar (do computador): a imagem acompanha em vídeo (bem menos kbit/s que em blocos) com as cores certas; ao parar, o texto fica nítido em ~0,3 s.
 - [ ] **Parar** na notificação: o ícone some, o host para e a chave volta a desligada.
 - [ ] Bloquear a tela (celular com PIN): o compartilhamento acaba, o host para e a página pede para ligar de novo.
 

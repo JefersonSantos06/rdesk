@@ -37,6 +37,10 @@ xcap = "0.9"
 # Sound: Opus (libopus built from source with CMake). Phones send no sound yet.
 opus = "0.4"
 
+# Android: H.264 by the phone's hardware encoder (MediaCodec, NDK).
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", default-features = false, features = ["media", "api-level-26"] }
+
 # Windows injects input with SendInput directly (scancodes), so enigo is only for macOS/Linux.
 [target.'cfg(not(any(windows, target_os = "android", target_os = "ios")))'.dependencies]
 enigo = "0.6"

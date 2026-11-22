@@ -133,7 +133,8 @@ Nesses casos, volte em *Este celular* e ligue de novo. O Android pede a permiss�
 Limitações desta fase:
 
 - **Só visualização**: os toques do outro lado ainda não chegam ao celular.
-- **Movimento**: a tela vai em blocos de imagem, sem vídeo H.264, então rolar ou abrir apps fica lento (poucos quadros por segundo).
+- **Movimento**: quando a tela inteira se mexe (rolar, abrir apps), o celular manda vídeo H.264 feito pelo chip de vídeo dele. Parada, a tela volta a ir em blocos nítidos. O app do celular ainda recebe só os blocos.
+- **Resolução**: a tela vai com no máximo 1920 pixels no lado maior (o limite dos codificadores de vídeo dos celulares).
 - **Sem som.**
 
 ## Bom saber
