@@ -6752,7 +6752,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6776,7 +6776,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6811,7 +6811,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6864,7 +6864,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "keyring",
@@ -6881,7 +6881,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-host"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -6919,7 +6919,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-mobile"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "flutter_rust_bridge",
@@ -6938,7 +6938,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-proto"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "postcard",
  "proptest",
@@ -6950,7 +6950,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-release"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6965,7 +6965,7 @@ dependencies = [
 
 [[package]]
 name = "rdesk-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
