@@ -5,6 +5,7 @@
 
 import 'api/app.dart';
 import 'api/device_key.dart';
+import 'api/host.dart';
 import 'api/session.dart';
 
 import 'dart:async';
@@ -71,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1976950238;
+  int get rustContentHash => -702530936;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -221,6 +222,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<Update?> crateApiAppCheckUpdate();
 
+  Future<void> crateApiHostClearHostPassword();
+
   Future<List<Computer>> crateApiAppComputers();
 
   Future<String> crateApiDeviceKeyDeviceKeyFingerprint({
@@ -232,6 +235,8 @@ abstract class RustLibApi extends BaseApi {
     required String comment,
   });
 
+  Future<void> crateApiHostDisconnectHostSession();
+
   Future<String> crateApiAppDownloadUpdate({required String dir});
 
   Future<EventKind> crateApiSessionEventKindDefault();
@@ -242,13 +247,21 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiAppForgetPassword({required String name});
 
+  String crateApiHostGenerateHostPassword();
+
   Future<bool> crateApiAppHasPassword({required String name});
+
+  HostView crateApiHostHostStatus();
+
+  Future<HostView> crateApiHostHostViewDefault();
 
   Future<void> crateApiAppInitApp();
 
   Future<String?> crateApiAppLastServer();
 
   Future<bool> crateApiAppLocalOnly();
+
+  Future<String> crateApiHostRegisterThisPhone();
 
   Future<void> crateApiAppRemoveAccount({required String key});
 
@@ -262,6 +275,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<SessionEvent> crateApiSessionSessionEventDefault();
 
+  Future<void> crateApiHostSetHostPassword({required String password});
+
   Future<void> crateApiAppSetLocalOnly({required bool enabled});
 
   Future<void> crateApiAppSignOut();
@@ -272,7 +287,15 @@ abstract class RustLibApi extends BaseApi {
     required bool portuguese,
   });
 
+  Future<void> crateApiHostStartHost();
+
+  Future<void> crateApiHostStopHost();
+
+  Future<void> crateApiHostUnregisterThisPhone();
+
   Future<Account?> crateApiAppUseAccount({required String key});
+
+  Stream<HostView> crateApiHostWatchHost();
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_RdSession;
@@ -1331,7 +1354,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "check_update", argNames: []);
 
   @override
-  Future<List<Computer>> crateApiAppComputers() {
+  Future<void> crateApiHostClearHostPassword() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -1340,6 +1363,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             generalizedFrbRustBinding,
             serializer,
             funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiHostClearHostPasswordConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostClearHostPasswordConstMeta =>
+      const TaskConstMeta(debugName: "clear_host_password", argNames: []);
+
+  @override
+  Future<List<Computer>> crateApiAppComputers() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1369,7 +1419,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1404,7 +1454,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1426,6 +1476,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiHostDisconnectHostSession() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 37,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHostDisconnectHostSessionConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostDisconnectHostSessionConstMeta =>
+      const TaskConstMeta(debugName: "disconnect_host_session", argNames: []);
+
+  @override
   Future<String> crateApiAppDownloadUpdate({required String dir}) {
     return handler.executeNormal(
       NormalTask(
@@ -1435,7 +1512,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1462,7 +1539,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1490,7 +1567,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1520,7 +1597,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1548,7 +1625,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1567,6 +1644,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "forget_password", argNames: ["name"]);
 
   @override
+  String crateApiHostGenerateHostPassword() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 43)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHostGenerateHostPasswordConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostGenerateHostPasswordConstMeta =>
+      const TaskConstMeta(debugName: "generate_host_password", argNames: []);
+
+  @override
   Future<bool> crateApiAppHasPassword({required String name}) {
     return handler.executeNormal(
       NormalTask(
@@ -1576,7 +1675,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1595,6 +1694,55 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "has_password", argNames: ["name"]);
 
   @override
+  HostView crateApiHostHostStatus() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 45)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_host_view,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHostHostStatusConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostHostStatusConstMeta =>
+      const TaskConstMeta(debugName: "host_status", argNames: []);
+
+  @override
+  Future<HostView> crateApiHostHostViewDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 46,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_host_view,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHostHostViewDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostHostViewDefaultConstMeta =>
+      const TaskConstMeta(debugName: "host_view_default", argNames: []);
+
+  @override
   Future<void> crateApiAppInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -1603,7 +1751,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 47,
             port: port_,
           );
         },
@@ -1630,7 +1778,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 48,
             port: port_,
           );
         },
@@ -1657,7 +1805,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 49,
             port: port_,
           );
         },
@@ -1676,6 +1824,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "local_only", argNames: []);
 
   @override
+  Future<String> crateApiHostRegisterThisPhone() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 50,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiHostRegisterThisPhoneConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostRegisterThisPhoneConstMeta =>
+      const TaskConstMeta(debugName: "register_this_phone", argNames: []);
+
+  @override
   Future<void> crateApiAppRemoveAccount({required String key}) {
     return handler.executeNormal(
       NormalTask(
@@ -1685,7 +1860,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 51,
             port: port_,
           );
         },
@@ -1719,7 +1894,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 52,
             port: port_,
           );
         },
@@ -1748,7 +1923,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 47,
+            funcId: 53,
             port: port_,
           );
         },
@@ -1775,7 +1950,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 48,
+            funcId: 54,
             port: port_,
           );
         },
@@ -1794,6 +1969,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "session_event_default", argNames: []);
 
   @override
+  Future<void> crateApiHostSetHostPassword({required String password}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(password, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 55,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiHostSetHostPasswordConstMeta,
+        argValues: [password],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostSetHostPasswordConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_host_password",
+        argNames: ["password"],
+      );
+
+  @override
   Future<void> crateApiAppSetLocalOnly({required bool enabled}) {
     return handler.executeNormal(
       NormalTask(
@@ -1803,7 +2009,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 49,
+            funcId: 56,
             port: port_,
           );
         },
@@ -1830,7 +2036,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 50,
+            funcId: 57,
             port: port_,
           );
         },
@@ -1864,7 +2070,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 51,
+            funcId: 58,
             port: port_,
           );
         },
@@ -1885,6 +2091,87 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiHostStartHost() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 59,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiHostStartHostConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostStartHostConstMeta =>
+      const TaskConstMeta(debugName: "start_host", argNames: []);
+
+  @override
+  Future<void> crateApiHostStopHost() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 60,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHostStopHostConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostStopHostConstMeta =>
+      const TaskConstMeta(debugName: "stop_host", argNames: []);
+
+  @override
+  Future<void> crateApiHostUnregisterThisPhone() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 61,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiHostUnregisterThisPhoneConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHostUnregisterThisPhoneConstMeta =>
+      const TaskConstMeta(debugName: "unregister_this_phone", argNames: []);
+
+  @override
   Future<Account?> crateApiAppUseAccount({required String key}) {
     return handler.executeNormal(
       NormalTask(
@@ -1894,7 +2181,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 52,
+            funcId: 62,
             port: port_,
           );
         },
@@ -1911,6 +2198,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiAppUseAccountConstMeta =>
       const TaskConstMeta(debugName: "use_account", argNames: ["key"]);
+
+  @override
+  Stream<HostView> crateApiHostWatchHost() {
+    final sink = RustStreamSink<HostView>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_StreamSink_host_view_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 63,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_AnyhowException,
+          ),
+          constMeta: kCrateApiHostWatchHostConstMeta,
+          argValues: [sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiHostWatchHostConstMeta =>
+      const TaskConstMeta(debugName: "watch_host", argNames: ["sink"]);
 
   Future<void> Function(int, dynamic)
   encode_DartFn_Inputs_list_prim_u_8_strict_Output_list_prim_u_8_strict_AnyhowException(
@@ -2001,6 +2320,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return RdSessionImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  RustStreamSink<HostView> dco_decode_StreamSink_host_view_Sse(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
   }
 
   @protected
@@ -2175,6 +2500,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       width: dco_decode_u_32(arr[0]),
       height: dco_decode_u_32(arr[1]),
       rgba: dco_decode_list_prim_u_8_strict(arr[2]),
+    );
+  }
+
+  @protected
+  HostView dco_decode_host_view(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return HostView(
+      running: dco_decode_bool(arr[0]),
+      state: dco_decode_String(arr[1]),
+      error: dco_decode_opt_String(arr[2]),
+      hostId: dco_decode_opt_String(arr[3]),
+      registration: dco_decode_opt_String(arr[4]),
+      registrationError: dco_decode_opt_String(arr[5]),
+      sessionClient: dco_decode_opt_String(arr[6]),
+      hasPassword: dco_decode_bool(arr[7]),
+      events: dco_decode_list_String(arr[8]),
     );
   }
 
@@ -2488,6 +2832,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RustStreamSink<HostView> sse_decode_StreamSink_host_view_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   RustStreamSink<SessionEvent> sse_decode_StreamSink_session_event_Sse(
     SseDeserializer deserializer,
   ) {
@@ -2675,6 +3027,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_height = sse_decode_u_32(deserializer);
     var var_rgba = sse_decode_list_prim_u_8_strict(deserializer);
     return Frame(width: var_width, height: var_height, rgba: var_rgba);
+  }
+
+  @protected
+  HostView sse_decode_host_view(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_running = sse_decode_bool(deserializer);
+    var var_state = sse_decode_String(deserializer);
+    var var_error = sse_decode_opt_String(deserializer);
+    var var_hostId = sse_decode_opt_String(deserializer);
+    var var_registration = sse_decode_opt_String(deserializer);
+    var var_registrationError = sse_decode_opt_String(deserializer);
+    var var_sessionClient = sse_decode_opt_String(deserializer);
+    var var_hasPassword = sse_decode_bool(deserializer);
+    var var_events = sse_decode_list_String(deserializer);
+    return HostView(
+      running: var_running,
+      state: var_state,
+      error: var_error,
+      hostId: var_hostId,
+      registration: var_registration,
+      registrationError: var_registrationError,
+      sessionClient: var_sessionClient,
+      hasPassword: var_hasPassword,
+      events: var_events,
+    );
   }
 
   @protected
@@ -3101,6 +3478,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_StreamSink_host_view_Sse(
+    RustStreamSink<HostView> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_host_view,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_StreamSink_session_event_Sse(
     RustStreamSink<SessionEvent> self,
     SseSerializer serializer,
@@ -3263,6 +3657,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.width, serializer);
     sse_encode_u_32(self.height, serializer);
     sse_encode_list_prim_u_8_strict(self.rgba, serializer);
+  }
+
+  @protected
+  void sse_encode_host_view(HostView self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.running, serializer);
+    sse_encode_String(self.state, serializer);
+    sse_encode_opt_String(self.error, serializer);
+    sse_encode_opt_String(self.hostId, serializer);
+    sse_encode_opt_String(self.registration, serializer);
+    sse_encode_opt_String(self.registrationError, serializer);
+    sse_encode_opt_String(self.sessionClient, serializer);
+    sse_encode_bool(self.hasPassword, serializer);
+    sse_encode_list_String(self.events, serializer);
   }
 
   @protected

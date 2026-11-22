@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 
@@ -9,6 +11,7 @@ import 'prefs.dart';
 import 'rust/api/app.dart' as api;
 import 'rust/api/device_key.dart' as dk;
 import 'sign_in_page.dart';
+import 'this_phone_page.dart';
 import 'touch.dart';
 
 /// The account, this phone's key, and about.
@@ -148,6 +151,15 @@ class _SettingsPageState extends State<SettingsPage> {
           title: Text(t('Gestures', 'Gestos')),
           onTap: () => showGestureHelp(context, Prefs.touchMode),
         ),
+        if (Platform.isAndroid) ...[
+          _Section(t('This phone', 'Este celular')),
+          ListTile(
+            leading: const Icon(Icons.phonelink_ring_outlined),
+            title: Text(t('Allow access to this phone', 'Permitir acesso a este celular')),
+            subtitle: Text(t('Test stage', 'Fase de teste')),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ThisPhonePage())),
+          ),
+        ],
         _Section(t('This phone\'s key', 'Chave deste celular')),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),

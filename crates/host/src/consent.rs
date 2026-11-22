@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use rdesk_common::config::ConsentConfig;
-use rdesk_common::{t, tf};
+use rdesk_common::tf;
 
 /// What happened when asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,8 @@ pub async fn ask(cfg: &ConsentConfig, who: &str, what: &str) -> bool {
     }
 }
 
-const TITLE: fn() -> &'static str = || t!("rdesk: allow access?", "rdesk: permitir acesso?");
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+const TITLE: fn() -> &'static str = || rdesk_common::t!("rdesk: allow access?", "rdesk: permitir acesso?");
 
 #[cfg(windows)]
 fn platform_ask(text: &str, timeout: Duration) -> Answer {
@@ -94,8 +95,8 @@ fn platform_ask(text: &str, timeout: Duration) -> Answer {
         "display dialog \"{}\" with title \"{}\" buttons {{\"{}\", \"{}\"}} default button 1 giving up after {}",
         esc(text),
         esc(TITLE()),
-        esc(t!("Deny", "Recusar")),
-        esc(t!("Allow", "Permitir")),
+        esc(rdesk_common::t!("Deny", "Recusar")),
+        esc(rdesk_common::t!("Allow", "Permitir")),
         timeout.as_secs()
     );
     let out = std::process::Command::new("osascript").args(["-e", &script]).output();
@@ -104,7 +105,7 @@ fn platform_ask(text: &str, timeout: Duration) -> Answer {
             let s = String::from_utf8_lossy(&o.stdout);
             if s.contains("gave up:true") {
                 Answer::NoAnswer
-            } else if s.contains(t!("Allow", "Permitir")) {
+            } else if s.contains(rdesk_common::t!("Allow", "Permitir")) {
                 Answer::Allowed
             } else {
                 Answer::Denied

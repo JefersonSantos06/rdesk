@@ -2,13 +2,15 @@
 //! platform handles are not `Send`).
 //!
 //! Backends: `xcap` (Windows / macOS / X11), the desktop portal on Wayland
-//! (`wayland`), and a synthetic animated test pattern (`RDESK_FAKE_CAPTURE=1`) for
+//! (`wayland`), nothing yet on phones (they get the test pattern), and a synthetic animated test pattern (`RDESK_FAKE_CAPTURE=1`) for
 //! tests and machines without a display.
 
 use std::sync::mpsc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use rdesk_common::tiles::Frame;
 use rdesk_proto::MonitorInfo;
 use tokio::sync::oneshot;
@@ -46,19 +48,7 @@ impl Capturer {
         std::thread::Builder::new()
             .name("rdesk-capture".into())
             .spawn(move || {
-                let mut backend: Box<dyn Backend> = if fake {
-                    Box::new(Synthetic::new())
-                } else {
-                    #[cfg(target_os = "linux")]
-                    if crate::wayland::active() {
-                        tracing::info!("Wayland: the screen comes through the desktop portal");
-                        Box::new(WaylandBackend::default())
-                    } else {
-                        Box::new(XcapBackend::default())
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    Box::new(XcapBackend::default())
-                };
+                let mut backend: Box<dyn Backend> = if fake { Box::new(Synthetic::new()) } else { platform_backend() };
                 let mut cursor = crate::cursor::Reader::new();
                 while let Ok(req) = rx.recv() {
                     // Started by the service: the sign-in, lock and UAC screens are another desktop.
@@ -106,6 +96,28 @@ impl Capturer {
 trait Backend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>>;
     fn grab(&mut self, id: u32) -> Result<Frame>;
+}
+
+#[cfg(target_os = "linux")]
+fn platform_backend() -> Box<dyn Backend> {
+    if crate::wayland::active() {
+        tracing::info!("Wayland: the screen comes through the desktop portal");
+        Box::new(WaylandBackend::default())
+    } else {
+        Box::new(XcapBackend::default())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
+fn platform_backend() -> Box<dyn Backend> {
+    Box::new(XcapBackend::default())
+}
+
+/// Phones: no screen backend yet (Android's MediaProjection comes next), the test pattern.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn platform_backend() -> Box<dyn Backend> {
+    tracing::warn!("this phone cannot share its screen yet: sending the test pattern");
+    Box::new(Synthetic::new())
 }
 
 #[cfg(target_os = "linux")]
@@ -161,6 +173,7 @@ pub fn packed_to_rgba(src: &[u8], order: Pixels, width: u32, height: u32, stride
     Some(out)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Default)]
 struct XcapBackend {
     monitors: Vec<xcap::Monitor>,
@@ -223,6 +236,7 @@ impl DxgiState {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl XcapBackend {
     fn refresh(&mut self) -> Result<()> {
         self.monitors = xcap::Monitor::all().context("listing monitors")?;
@@ -237,6 +251,7 @@ impl XcapBackend {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl Backend for XcapBackend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>> {
         self.refresh()?;

@@ -289,7 +289,7 @@ struct Extras {
 struct VideoMode {
     /// The client decodes it.
     allowed: bool,
-    encoder: Option<rdesk_common::h264::H264Encoder>,
+    encoder: Option<crate::h264::H264Encoder>,
     /// Consecutive frames with most of the screen moving, or nearly nothing.
     busy: u32,
     calm: u32,
@@ -309,7 +309,7 @@ impl VideoMode {
 
     /// Look at a planned frame; returns whether it goes as H.264.
     fn decide(&mut self, planned: &[Planned], tiles: usize, frame: &Frame, full: bool, fps: u8, quality: u8) -> bool {
-        if !self.allowed || full || !rdesk_common::h264::usable(frame.width, frame.height) {
+        if !self.allowed || full || !crate::h264::usable(frame.width, frame.height) {
             self.encoder = None;
             self.busy = 0;
             return false;
@@ -330,8 +330,8 @@ impl VideoMode {
         }
         self.busy = if moving >= BUSY_SHARE { self.busy + 1 } else { 0 };
         if self.busy >= BUSY_FRAMES {
-            let bps = rdesk_common::h264::bitrate(frame.width, frame.height, fps, quality);
-            match rdesk_common::h264::H264Encoder::new(frame.width, frame.height, fps, bps) {
+            let bps = crate::h264::bitrate(frame.width, frame.height, fps, quality);
+            match crate::h264::H264Encoder::new(frame.width, frame.height, fps, bps) {
                 Ok(e) => {
                     tracing::debug!("most of the screen is moving: H.264 at {} kbit/s", bps / 1000);
                     self.encoder = Some(e);

@@ -5,6 +5,7 @@
 
 import 'api/app.dart';
 import 'api/device_key.dart';
+import 'api/host.dart';
 import 'api/session.dart';
 
 import 'dart:async';
@@ -56,6 +57,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRdSession(
     dynamic raw,
   );
+
+  @protected
+  RustStreamSink<HostView> dco_decode_StreamSink_host_view_Sse(dynamic raw);
 
   @protected
   RustStreamSink<SessionEvent> dco_decode_StreamSink_session_event_Sse(
@@ -118,6 +122,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Frame dco_decode_frame(dynamic raw);
+
+  @protected
+  HostView dco_decode_host_view(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -237,6 +244,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<HostView> sse_decode_StreamSink_host_view_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<SessionEvent> sse_decode_StreamSink_session_event_Sse(
     SseDeserializer deserializer,
   );
@@ -299,6 +311,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Frame sse_decode_frame(SseDeserializer deserializer);
+
+  @protected
+  HostView sse_decode_host_view(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -435,6 +450,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_host_view_Sse(
+    RustStreamSink<HostView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_session_event_Sse(
     RustStreamSink<SessionEvent> self,
     SseSerializer serializer,
@@ -502,6 +523,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_frame(Frame self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_host_view(HostView self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);

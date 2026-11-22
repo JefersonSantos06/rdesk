@@ -3,4 +3,5 @@
 
 pub mod app;
 pub mod device_key;
+pub mod host;
 pub mod session;

@@ -464,7 +464,13 @@ mod win {
 // macOS / Linux (enigo)
 // ---------------------------------------------------------------------------
 
-#[cfg(not(windows))]
+/// Phones: no input backend yet (Android's accessibility service comes next).
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn platform_backend() -> Result<Box<dyn Backend>> {
+    Err(anyhow::anyhow!("remote control of a phone is not available yet"))
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 fn platform_backend() -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "linux")]
     if crate::wayland::active() {
@@ -475,12 +481,12 @@ fn platform_backend() -> Result<Box<dyn Backend>> {
     Ok(Box::new(EnigoBackend { enigo }))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 struct EnigoBackend {
     enigo: enigo::Enigo,
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 impl Backend for EnigoBackend {
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         use enigo::{Direction, Keyboard};

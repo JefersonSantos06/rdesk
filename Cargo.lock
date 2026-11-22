@@ -6924,6 +6924,7 @@ dependencies = [
  "p256 0.13.2",
  "rdesk-common",
  "rdesk-core",
+ "rdesk-host",
  "rdesk-proto",
  "ssh-key",
  "tokio",

@@ -1,6 +1,6 @@
 # rdesk no celular (Android e iPhone)
 
-O app do celular **acessa** computadores. O celular não pode ser acessado: no iPhone isso não existe, e no Android seria um outro projeto.
+O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (o iOS não permite). No Android, o acesso ao celular está em **fase de teste** (*Configurações → Este celular*): o host do rdesk roda dentro do app, recebe conexões (chave SSH, senha ou servidor) e envia uma imagem de teste; a tela de verdade (MediaProjection) e os toques (serviço de acessibilidade) vêm nas próximas fases.
 
 - **Flutter** desenha a interface (`lib/`).
 - **Rust** faz todo o resto, com o mesmo código do app desktop: conexão iroh/QUIC, login no servidor, autenticação no computador, decodificação da imagem, arquivos e terminal.

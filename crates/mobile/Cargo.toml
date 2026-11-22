@@ -13,6 +13,8 @@ crate-type = ["cdylib", "staticlib", "lib"]
 rdesk-proto.workspace = true
 rdesk-common.workspace = true
 rdesk-core.workspace = true
+# This phone as a host (other devices connect to it).
+rdesk-host.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

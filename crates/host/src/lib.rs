@@ -9,6 +9,7 @@ pub mod control;
 pub mod cursor;
 pub mod elevation;
 pub mod enroll;
+pub mod h264;
 pub mod input;
 pub mod ipc;
 pub mod keymap;
