@@ -1,9 +1,26 @@
 //! The computer's sound for the client ([`rdesk_proto::StreamOpen::Audio`]): what the speakers
 //! play, captured on Windows with WASAPI loopback, encoded as Opus (20 ms packets at 48 kHz,
-//! stereo), like every other remote desktop. Elsewhere the feature is not offered yet.
+//! stereo), like every other remote desktop. A phone app brings its own ([`set_source`]: what
+//! the phone plays, already Opus). Elsewhere the feature is not offered yet.
+
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
+
+/// Sound from the program the host runs in: whether it can send it now, and its packets.
+#[derive(Clone, Copy)]
+pub struct Source {
+    pub available: fn() -> bool,
+    pub start: fn() -> Result<mpsc::Receiver<Vec<u8>>>,
+}
+
+static SOURCE: OnceLock<Source> = OnceLock::new();
+
+/// Take the sound from the program the host runs in (the phone app). Set once.
+pub fn set_source(source: Source) {
+    let _ = SOURCE.set(source);
+}
 
 /// Opus at 48 kHz, stereo.
 pub const RATE: u32 = 48_000;
@@ -15,11 +32,17 @@ const QUEUE: usize = 10;
 
 /// Whether this computer can send its sound.
 pub fn supported() -> bool {
-    cfg!(windows)
+    match SOURCE.get() {
+        Some(s) => (s.available)(),
+        None => cfg!(windows),
+    }
 }
 
 /// Encoded packets of what the computer plays, until the receiver is dropped.
 pub fn start() -> Result<mpsc::Receiver<Vec<u8>>> {
+    if let Some(s) = SOURCE.get() {
+        return (s.start)();
+    }
     let (tx, rx) = mpsc::channel(QUEUE);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
     std::thread::Builder::new().name("rdesk-audio".into()).spawn(move || {

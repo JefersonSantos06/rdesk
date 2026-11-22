@@ -3,6 +3,7 @@
 //! remote desktops' attended mode. Nobody is asked when nobody can answer: the computer is
 //! locked or at the sign-in screen. Without an answer in time, `allow_on_timeout` decides.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rdesk_common::config::ConsentConfig;
@@ -17,6 +18,14 @@ pub enum Answer {
     NoAnswer,
 }
 
+static ASKER: OnceLock<fn(&str, Duration) -> Answer> = OnceLock::new();
+
+/// Ask through the program the host runs in (the phone app) instead of this system's own
+/// dialog. `ask` gets the question and how long to wait, and may block that long.
+pub fn set_asker(ask: fn(&str, Duration) -> Answer) {
+    let _ = ASKER.set(ask);
+}
+
 /// Ask whether `who` may start a session that can do `what`; `true` to go on.
 pub async fn ask(cfg: &ConsentConfig, who: &str, what: &str) -> bool {
     if !cfg.ask {
@@ -27,7 +36,13 @@ pub async fn ask(cfg: &ConsentConfig, who: &str, what: &str) -> bool {
         "{who} quer se conectar a este computador ({what}).\n\nPermitir?"
     );
     let timeout = Duration::from_secs(cfg.timeout_s.clamp(5, 300) as u64);
-    let answer = tokio::task::spawn_blocking(move || platform_ask(&text, timeout)).await.unwrap_or(Answer::NoAnswer);
+    let asker = ASKER.get().copied();
+    let answer = tokio::task::spawn_blocking(move || match asker {
+        Some(ask) => ask(&text, timeout),
+        None => platform_ask(&text, timeout),
+    })
+    .await
+    .unwrap_or(Answer::NoAnswer);
     tracing::info!("asked the person at the computer about {who}: {answer:?}");
     match answer {
         Answer::Allowed => true,

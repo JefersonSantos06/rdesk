@@ -35,6 +35,12 @@ class SessionHub extends ChangeNotifier {
   Stats? stats;
   bool cursorSupported = false;
   bool scalingSupported = false;
+
+  /// The computer is a phone with Back, Home and Recents.
+  bool navSupported = false;
+
+  /// The computer is a phone that takes several fingers (a pinch, two-finger gestures).
+  bool multitouchSupported = false;
   bool closed = false;
 
   /// Connect (call once).
@@ -77,6 +83,8 @@ class SessionHub extends ChangeNotifier {
       case EventKind.extensions:
         cursorSupported = e.cursorSupported;
         scalingSupported = e.scalingSupported;
+        navSupported = e.navSupported;
+        multitouchSupported = e.multitouchSupported;
       case EventKind.closed:
         closed = true;
       default:

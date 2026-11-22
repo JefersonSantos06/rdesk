@@ -4,13 +4,15 @@
 //! from the peer is set locally and remembered so it is not echoed back. Text always; images
 //! (as PNG) once both sides have agreed to send them ([`ClipboardSync::set_images`]), looked
 //! at every second (reading a big image costs more than text).
-//! Phones have none here (their app passes the text through the session).
+//! Phones have none here: as a client, their app passes the text through the session; as a
+//! host, the app sets what comes in ([`set_phone_clipboard`]) and nothing goes out (Android lets
+//! no app read the clipboard in the background).
 
 #![cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, OnceLock};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::time::Duration;
 
@@ -68,14 +70,38 @@ pub fn png_decode(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     Ok((w, h, rgba))
 }
 
+static PHONE_SET: OnceLock<fn(String)> = OnceLock::new();
+
+/// A phone app as a host: `set` puts text from the other side on the phone's clipboard.
+pub fn set_phone_clipboard(set: fn(String)) {
+    let _ = PHONE_SET.set(set);
+}
+
 impl ClipboardSync {
+    /// Whether images go both ways here (not on phones).
+    pub fn supports_images() -> bool {
+        !cfg!(any(target_os = "android", target_os = "ios"))
+    }
+
     /// Start watching. Local changes are sent on `on_change` (text) and `on_image` (PNG,
     /// once [`ClipboardSync::set_images`] turns it on). Returns `None` if the platform
     /// clipboard is unavailable.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn spawn(_on_change: UnboundedSender<String>, _on_image: Option<UnboundedSender<Vec<u8>>>) -> Option<Self> {
-        // No clipboard to watch from here: a phone app passes text in and out itself.
-        None
+        // Nothing to watch from here; text that comes in goes to the app's setter, if any.
+        let set = *PHONE_SET.get()?;
+        let (set_tx, set_rx) = mpsc::channel::<Incoming>();
+        std::thread::Builder::new()
+            .name("rdesk-clipboard".into())
+            .spawn(move || {
+                while let Ok(m) = set_rx.recv() {
+                    if let Incoming::Text(t) = m {
+                        set(t);
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { set_tx, images: Arc::new(AtomicBool::new(false)) })
     }
 
     /// Start watching. Local changes are sent on `on_change` (text) and `on_image` (PNG,

@@ -71,6 +71,10 @@ pub struct SessionEvent {
     pub ok: bool,
     pub cursor_supported: bool,
     pub scaling_supported: bool,
+    /// The host is a phone with system buttons ([`RdSession::nav`]).
+    pub nav_supported: bool,
+    /// The host takes several fingers at once ([`RdSession::touch`]).
+    pub multitouch_supported: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -143,6 +147,23 @@ pub enum Button {
     Left,
     Right,
     Middle,
+}
+
+/// A finger on the screen (for [`RdSession::touch`]): `x` and `y` are 0..1 across the monitor.
+#[derive(Debug, Clone, Copy)]
+pub struct Finger {
+    pub id: u8,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A phone host's system buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavButton {
+    Back,
+    Home,
+    Recents,
+    Notifications,
 }
 
 /// An open session (see [`RdSession::start`]).
@@ -350,6 +371,26 @@ impl RdSession {
 
     /// Put text on the computer's clipboard.
     #[frb(sync)]
+    /// The fingers on the screen now, for a phone host (when
+    /// [`SessionEvent::multitouch_supported`]): send on every change; empty lifts them all.
+    #[frb(sync)]
+    pub fn touch(&self, fingers: Vec<Finger>) {
+        let points = fingers.iter().map(|f| rdesk_proto::TouchPoint { id: f.id, x: norm(f.x), y: norm(f.y) }).collect();
+        self.send(Cmd::Ext(rdesk_proto::ExtClient::Touch(points)));
+    }
+
+    /// Press a phone host's system button (when [`SessionEvent::nav_supported`]).
+    pub fn nav(&self, button: NavButton) {
+        use rdesk_proto::NavAction;
+        let action = match button {
+            NavButton::Back => NavAction::Back,
+            NavButton::Home => NavAction::Home,
+            NavButton::Recents => NavAction::Recents,
+            NavButton::Notifications => NavAction::Notifications,
+        };
+        self.send(Cmd::Ext(rdesk_proto::ExtClient::Nav(action)));
+    }
+
     pub fn send_clipboard(&self, text: String) {
         self.send(Cmd::Clipboard(text));
     }
@@ -529,6 +570,8 @@ fn forward(shared: &Arc<Shared>, sink: &Arc<StreamSink<SessionEvent>>, e: UiEven
             kind: EventKind::Extensions,
             cursor_supported: f.contains(&rdesk_proto::Feature::Cursor),
             scaling_supported: f.contains(&rdesk_proto::Feature::MaxSize),
+            nav_supported: f.contains(&rdesk_proto::Feature::Nav),
+            multitouch_supported: f.contains(&rdesk_proto::Feature::MultiTouch),
             ..Default::default()
         },
         UiEvent::Cursor { x, y, visible } => {

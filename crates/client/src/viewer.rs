@@ -21,7 +21,7 @@ use egui_wgpu::winit::Painter;
 use egui_winit::winit;
 use rdesk_common::i18n::access_label;
 use rdesk_common::{t, tf};
-use rdesk_proto::{DirEntry, Feature, HostInfo, InputEvent, MonitorInfo, MouseButton};
+use rdesk_proto::{DirEntry, Feature, HostInfo, InputEvent, Key, MonitorInfo, MouseButton, NavAction};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -305,6 +305,8 @@ struct App {
     cursors: HashMap<u64, winit::window::CustomCursor>,
     /// What the host's extensions stream offers.
     features: Vec<Feature>,
+    /// Modifier keys held here (a phone gets typed characters as text, shortcuts as keys).
+    mods: winit::keyboard::ModifiersState,
     /// The computer's sound is wanted, and where it plays.
     sound: bool,
     /// The black screen and the blocked keyboard over there (the host undoes both when the
@@ -392,6 +394,7 @@ impl App {
             auto_choice: None,
             cursors: HashMap::new(),
             features: Vec::new(),
+            mods: Default::default(),
             sound: true,
             privacy: false,
             block_input: false,
@@ -898,8 +901,10 @@ impl App {
         let chip_compact = kb.map_or(0.0, |_| icon_w);
         // Bold text is a little wider.
         let disc_full = w(&ui::with_icon(icons::SIGN_OUT, disconnect), size::BODY) * 1.06 + gap;
-        let right_full = chip_full + icon_w + disc_full;
-        let right_compact = chip_compact + icon_w + icon_w;
+        let nav = self.features.contains(&Feature::Nav);
+        let nav_w = if nav { 3.0 * icon_w } else { 0.0 };
+        let right_full = chip_full + icon_w + disc_full + nav_w;
+        let right_compact = chip_compact + icon_w + icon_w + nav_w;
         let left_fixed = 10.0 + gap + text_width(ui, &badge, size::SMALL) + 16.0 + gap + space::S;
         let avail = ui.available_width();
         // From roomiest to tightest: (menus as icons, toggles as icons, right side as icons).
@@ -946,6 +951,18 @@ impl App {
                 };
                 if ui::icon_button(ui, icon, hover).clicked() {
                     self.toggle_fullscreen();
+                }
+                if nav {
+                    // Right to left: Back, Home, Recents read left to right.
+                    for (icon, hover, action) in [
+                        (icons::SQUARES_FOUR, t!("Recent apps", "Apps recentes"), NavAction::Recents),
+                        (icons::HOUSE, t!("Home", "Início"), NavAction::Home),
+                        (icons::CARET_LEFT, t!("Back", "Voltar"), NavAction::Back),
+                    ] {
+                        if ui::icon_button(ui, icon, hover).clicked() {
+                            self.send(Cmd::Ext(rdesk_proto::ExtClient::Nav(action)));
+                        }
+                    }
                 }
                 if let Some(to_terminal) = kb {
                     let label = keyboard_label(to_terminal);
@@ -1158,6 +1175,20 @@ impl App {
     fn session_actions(&mut self, ui: &mut egui::Ui) {
         let features = self.features.clone();
         let has = |f: Feature| features.contains(&f);
+        if has(Feature::Nav) {
+            ui.separator();
+            for (icon, label, action) in [
+                (icons::BELL, t!("Notifications", "Notificações"), NavAction::Notifications),
+                (icons::LIST, t!("Quick settings", "Ajustes rápidos"), NavAction::QuickSettings),
+                (icons::IMAGE, t!("Screenshot on the phone", "Captura de tela no celular"), NavAction::Screenshot),
+                (icons::LOCK, t!("Lock the phone", "Bloquear o celular"), NavAction::LockScreen),
+            ] {
+                if ui.button(ui::with_icon(icon, label)).clicked() {
+                    self.send(Cmd::Ext(rdesk_proto::ExtClient::Nav(action)));
+                    ui.close();
+                }
+            }
+        }
         if !(has(Feature::Privacy) || has(Feature::BlockInput) || has(Feature::Power)) {
             return;
         }
@@ -2042,9 +2073,96 @@ impl App {
         if self.swap_cmd_ctrl {
             key = keys::swap_cmd_ctrl(key);
         }
+        // A phone has no keyboard layout: send what the key typed here (accents, dead keys,
+        // AltGr), not where it is. Shortcuts (Ctrl, Cmd/Win) still go as keys.
+        let shortcut = (self.mods.control_key() && !self.mods.alt_key()) || self.mods.super_key();
+        if self.features.contains(&Feature::TextKeys) && types_text(key) && !shortcut {
+            if event.state == ElementState::Pressed
+                && let Some(text) = event.text.as_ref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+            {
+                self.input(InputEvent::Text { text: text.to_string() });
+            }
+            return true;
+        }
         self.input(InputEvent::Key { key, down: event.state == ElementState::Pressed });
         true
     }
+}
+
+/// Keys that type a character (for hosts that want text, [`Feature::TextKeys`]).
+fn types_text(key: Key) -> bool {
+    use Key::*;
+    matches!(
+        key,
+        Backquote
+            | Backslash
+            | BracketLeft
+            | BracketRight
+            | Comma
+            | Equal
+            | IntlBackslash
+            | IntlRo
+            | IntlYen
+            | Minus
+            | Period
+            | Quote
+            | Semicolon
+            | Slash
+            | Space
+            | Digit0
+            | Digit1
+            | Digit2
+            | Digit3
+            | Digit4
+            | Digit5
+            | Digit6
+            | Digit7
+            | Digit8
+            | Digit9
+            | KeyA
+            | KeyB
+            | KeyC
+            | KeyD
+            | KeyE
+            | KeyF
+            | KeyG
+            | KeyH
+            | KeyI
+            | KeyJ
+            | KeyK
+            | KeyL
+            | KeyM
+            | KeyN
+            | KeyO
+            | KeyP
+            | KeyQ
+            | KeyR
+            | KeyS
+            | KeyT
+            | KeyU
+            | KeyV
+            | KeyW
+            | KeyX
+            | KeyY
+            | KeyZ
+            | Numpad0
+            | Numpad1
+            | Numpad2
+            | Numpad3
+            | Numpad4
+            | Numpad5
+            | Numpad6
+            | Numpad7
+            | Numpad8
+            | Numpad9
+            | NumpadAdd
+            | NumpadComma
+            | NumpadDecimal
+            | NumpadDivide
+            | NumpadEqual
+            | NumpadMultiply
+            | NumpadSubtract
+    )
 }
 
 impl ApplicationHandler<UiEvent> for App {
@@ -2117,6 +2235,7 @@ impl ApplicationHandler<UiEvent> for App {
                     self.open_panel(Tab::Files);
                 }
             }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event: kev, is_synthetic, .. } => {
                 // Synthetic events are winit replaying held keys on focus changes. A
                 // focused terminal or field, or a dialog, keeps the keys.

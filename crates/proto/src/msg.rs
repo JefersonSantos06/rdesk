@@ -420,6 +420,38 @@ pub enum ExtClient {
     /// Block the computer's own keyboard and mouse, or not (full control only; unblocked
     /// when the session ends, and by Ctrl+Alt+Del at the computer).
     BlockInput { on: bool },
+    /// A phone's system button or action (full control only).
+    Nav(NavAction),
+    /// The fingers on the screen now (full control only), each where it is (normalized like
+    /// [`InputEvent::MouseMove`]); a finger missing from the next one was lifted, and an empty
+    /// one lifts them all. Sent on every change, for pinches and other gestures of several
+    /// fingers on a phone.
+    Touch(Vec<TouchPoint>),
+}
+
+/// One finger in [`ExtClient::Touch`]: the same `id` from when it touches until it lifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchPoint {
+    pub id: u8,
+    pub x: u16,
+    pub y: u16,
+}
+
+impl TouchPoint {
+    /// Fingers a phone takes at once.
+    pub const MAX: usize = 10;
+}
+
+/// What [`ExtClient::Nav`] does on a phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NavAction {
+    Back,
+    Home,
+    Recents,
+    Notifications,
+    QuickSettings,
+    LockScreen,
+    Screenshot,
 }
 
 /// The host's side of the extensions stream.
@@ -483,6 +515,14 @@ pub enum Feature {
     BlockInput,
     /// Port tunnels ([`StreamOpen::Tunnel`]).
     Tunnel,
+    /// A phone's system buttons ([`ExtClient::Nav`]).
+    Nav,
+    /// Typed characters go as [`InputEvent::Text`], not as the keys that make them: the host
+    /// has no keyboard layout of its own (a phone), so a key's position would type the wrong
+    /// letter. Keys that type nothing (Backspace, arrows, shortcuts) still go as keys.
+    TextKeys,
+    /// Fingers on a phone's screen ([`ExtClient::Touch`]).
+    MultiTouch,
 }
 
 /// What [`ExtClient::Power`] asks for.
@@ -495,8 +535,9 @@ pub enum PowerAction {
 }
 
 /// Revision of the extensions protocol (1: picture size limit and pointer position;
-/// 2: second frame format, automatic quality, pointer image).
-pub const EXT_REV: u16 = 2;
+/// 2: second frame format, automatic quality, pointer image; 3: phones' system buttons and
+/// typing as text).
+pub const EXT_REV: u16 = 3;
 
 /// The client's side of a terminal stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -219,8 +219,22 @@ where
     Ok(())
 }
 
+static PHONE_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// A phone app as a host: where `~` is (the phone's shared storage), and the inbox's parent.
+pub fn set_phone_home(dir: PathBuf) {
+    let _ = PHONE_HOME.set(dir);
+}
+
+/// The phone's shared storage, when a phone app set it ([`set_phone_home`]).
+pub fn phone_home() -> Option<&'static Path> {
+    PHONE_HOME.get().map(PathBuf::as_path)
+}
+
 pub fn expand_home(path: &str) -> PathBuf {
-    let home = || directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let home = || {
+        phone_home().map(Path::to_path_buf).or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))
+    };
     if path.is_empty() || path == "~" {
         return home().unwrap_or_else(|| PathBuf::from("."));
     }

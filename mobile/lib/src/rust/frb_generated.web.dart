@@ -123,6 +123,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_64(dynamic raw);
 
   @protected
+  Finger dco_decode_finger(dynamic raw);
+
+  @protected
   Frame dco_decode_frame(dynamic raw);
 
   @protected
@@ -147,6 +150,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DirItem> dco_decode_list_dir_item(dynamic raw);
 
   @protected
+  List<Finger> dco_decode_list_finger(dynamic raw);
+
+  @protected
   List<Monitor> dco_decode_list_monitor(dynamic raw);
 
   @protected
@@ -163,6 +169,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Monitor dco_decode_monitor(dynamic raw);
+
+  @protected
+  NavButton dco_decode_nav_button(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -312,6 +321,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
+  Finger sse_decode_finger(SseDeserializer deserializer);
+
+  @protected
   Frame sse_decode_frame(SseDeserializer deserializer);
 
   @protected
@@ -336,6 +348,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DirItem> sse_decode_list_dir_item(SseDeserializer deserializer);
 
   @protected
+  List<Finger> sse_decode_list_finger(SseDeserializer deserializer);
+
+  @protected
   List<Monitor> sse_decode_list_monitor(SseDeserializer deserializer);
 
   @protected
@@ -356,6 +371,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Monitor sse_decode_monitor(SseDeserializer deserializer);
+
+  @protected
+  NavButton sse_decode_nav_button(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -524,6 +542,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_finger(Finger self, SseSerializer serializer);
+
+  @protected
   void sse_encode_frame(Frame self, SseSerializer serializer);
 
   @protected
@@ -546,6 +567,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_dir_item(List<DirItem> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_finger(List<Finger> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_monitor(List<Monitor> self, SseSerializer serializer);
@@ -573,6 +597,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_monitor(Monitor self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_nav_button(NavButton self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

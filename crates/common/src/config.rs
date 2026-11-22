@@ -309,6 +309,10 @@ impl HostConfig {
         if let Some(d) = &self.inbox_dir {
             return d.clone();
         }
+        // A phone: its shared Download folder, where any app may put files.
+        if let Some(home) = crate::files::phone_home() {
+            return home.join("Download").join("rdesk");
+        }
         directories::UserDirs::new()
             .and_then(|u| u.download_dir().map(Path::to_path_buf))
             .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().join("Downloads")))

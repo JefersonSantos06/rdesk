@@ -1,6 +1,6 @@
 # rdesk no celular (Android e iPhone)
 
-O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (o iOS não permite). No Android, o celular também pode ser acessado, em **fase de teste** (*Configurações → Este celular*): o host do rdesk roda dentro do app e envia a tela, capturada pela MediaProjection num serviço em primeiro plano (`ScreenCaptureService.kt` → JNI → `crates/mobile/src/screen.rs`). O movimento vai em H.264 feito pelo codificador de hardware do celular (MediaCodec, `crates/host/src/h264.rs`). Os toques e a digitação de quem está do outro lado passam por um serviço de acessibilidade que a pessoa liga (`RemoteControlService.kt`, com os comandos vindos de `crates/mobile/src/touch.rs`).
+O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (o iOS não permite). No Android, o celular também pode ser acessado, em **fase de teste** (*Configurações → Este celular*): o host do rdesk roda dentro do app e envia a tela, capturada pela MediaProjection num serviço em primeiro plano (`ScreenCaptureService.kt` → JNI → `crates/mobile/src/screen.rs`). O movimento vai em H.264 feito pelo codificador de hardware do celular (MediaCodec, `crates/host/src/h264.rs`). Os toques e a digitação de quem está do outro lado passam por um serviço de acessibilidade que a pessoa liga (`RemoteControlService.kt`, com os comandos vindos de `crates/mobile/src/touch.rs`). O resto do que o host pede ao app (área de transferência, perguntar antes de cada conexão) vai por `HostBridge` (`crates/mobile/src/bridge.rs`); o som, capturado e codificado em Opus no Kotlin, por `AudioBridge` (`sound.rs`); *Ligar sozinho* é `AutoStart.kt` + `CaptureActivity.kt` + `BootReceiver.kt`. Como cliente, o app decodifica H.264 com o MediaCodec (`crates/common/src/h264_android.rs`).
 
 - **Flutter** desenha a interface (`lib/`).
 - **Rust** faz todo o resto, com o mesmo código do app desktop: conexão iroh/QUIC, login no servidor, autenticação no computador, decodificação da imagem, arquivos e terminal.
@@ -49,7 +49,7 @@ O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (
 ## Limitações
 
 - **Segundo plano**: o celular corta a rede de apps em segundo plano. A sessão cai quando você sai do app e volta sozinha quando você entra de novo (em até 10 minutos, sem pedir a senha). Um download longo não continua com o app fechado.
-- **Codec**: a imagem usa os tiles JPEG/zstd do rdesk, não vídeo H.264. Em dados móveis, use *Qualidade → Velocidade* para conteúdo que se mexe muito (vídeo, jogos).
+- **Codec**: quando a tela inteira do outro lado se mexe, a imagem vem em vídeo H.264, decodificado pelo chip do celular (MediaCodec); parada, em tiles JPEG/zstd nítidos. Num celular sem decodificador H.264, só tiles. Em dados móveis, use *Qualidade → Velocidade* para conteúdo que se mexe muito (vídeo, jogos).
 - **Rede local sem servidor**:
   - **Android**: funciona, inclusive achar o computador pelo mDNS.
   - **iPhone**: o mDNS precisa de uma permissão especial da Apple (multicast) que um app instalado por fora da loja não tem, então salve o computador com o IP ou o nome do Tailscale.

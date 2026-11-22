@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use rdesk_proto::{InputEvent, Key, MouseButton};
+use rdesk_proto::{ExtClient, InputEvent, Key, MouseButton, NavAction, TouchPoint};
 
 use crate::conn::{self, Cmd, ConnectOpts, UiEvent};
 
@@ -25,10 +25,12 @@ pub struct HeadlessOpts {
 /// picture):
 /// `move X Y`, `down`, `up`, `click X Y`, `drag X1 Y1 X2 Y2`, `right`, `scroll DY`,
 /// `key NAME` (a `Key` name: `Escape`, `KeyA`…; `+` joins held keys: `ControlLeft+KeyV`),
-/// `text WORDS`, `wait MS`.
+/// `text WORDS`, `wait MS`; for phones: `nav back|home|recents|notifications|quick|lock|screenshot`,
+/// `touch X Y [X Y…]` (the fingers on the screen now, in order) and `lift`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
     Event(InputEvent),
+    Ext(ExtClient),
     Wait(Duration),
 }
 
@@ -81,11 +83,38 @@ pub fn parse_input(script: &str) -> Result<Vec<Step>> {
                 out.extend(keys.iter().rev().map(|&key| ev(InputEvent::Key { key, down: false })));
             }
             "text" => out.push(ev(InputEvent::Text { text: rest.to_string() })),
+            "nav" => {
+                let action = match arg(0)? {
+                    "back" => NavAction::Back,
+                    "home" => NavAction::Home,
+                    "recents" => NavAction::Recents,
+                    "notifications" => NavAction::Notifications,
+                    "quick" => NavAction::QuickSettings,
+                    "lock" => NavAction::LockScreen,
+                    "screenshot" => NavAction::Screenshot,
+                    other => bail!("{other}: not a phone button"),
+                };
+                out.push(Step::Ext(ExtClient::Nav(action)));
+            }
+            "touch" => {
+                let points = args
+                    .chunks(2)
+                    .enumerate()
+                    .map(|(i, xy)| {
+                        let [x, y] = xy else { bail!("{part}: X and Y for each finger") };
+                        Ok(TouchPoint { id: i as u8, x: pos(x)?, y: pos(y)? })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                out.push(Step::Ext(ExtClient::Touch(points)));
+            }
+            "lift" => out.push(Step::Ext(ExtClient::Touch(Vec::new()))),
             "wait" => {
                 let ms: u64 = arg(0)?.parse().with_context(|| format!("{part}: expected milliseconds"))?;
                 out.push(Step::Wait(Duration::from_millis(ms)));
             }
-            _ => bail!("{part}: unknown step (move, down, up, click, drag, right, scroll, key, text, wait)"),
+            _ => bail!(
+                "{part}: unknown step (move, down, up, click, drag, right, scroll, key, text, nav, touch, lift, wait)"
+            ),
         }
     }
     Ok(out)
@@ -129,6 +158,9 @@ pub fn run(connect: ConnectOpts, opts: HeadlessOpts) -> Result<()> {
                             match step {
                                 Step::Event(ev) => {
                                     let _ = cmd.send(Cmd::Input(ev));
+                                }
+                                Step::Ext(m) => {
+                                    let _ = cmd.send(Cmd::Ext(m));
                                 }
                                 Step::Wait(d) => std::thread::sleep(d),
                             }
@@ -201,6 +233,18 @@ mod tests {
                 Step::Event(InputEvent::Scroll { dx: 0.0, dy: -2.0 }),
             ]
         );
+        assert_eq!(
+            parse_input("nav home; touch 0 1 1 0; lift").unwrap(),
+            [
+                Step::Ext(ExtClient::Nav(NavAction::Home)),
+                Step::Ext(ExtClient::Touch(vec![
+                    TouchPoint { id: 0, x: 0, y: 65535 },
+                    TouchPoint { id: 1, x: 65535, y: 0 }
+                ])),
+                Step::Ext(ExtClient::Touch(Vec::new())),
+            ]
+        );
+        assert!(parse_input("touch 0.5").is_err());
         assert!(parse_input("key Nope").is_err());
         assert!(parse_input("fly 1 2").is_err());
     }

@@ -9,6 +9,8 @@ pub mod directory;
 pub mod files;
 #[cfg(feature = "h264")]
 pub mod h264;
+#[cfg(target_os = "android")]
+pub mod h264_android;
 pub mod i18n;
 pub mod release;
 pub mod ticket;

@@ -8,8 +8,11 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use rdesk_proto::api::WakeRequest;
 
 /// This computer's network cards that have an address on a local network
-/// ("aa:bb:cc:dd:ee:ff").
+/// ("aa:bb:cc:dd:ee:ff"). None on a phone: it cannot be woken this way (it still wakes others).
 pub fn local_macs() -> Vec<String> {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return Vec::new();
+    }
     let mut out: Vec<String> = netdev::get_interfaces()
         .into_iter()
         .filter(|i| i.is_up() && !i.is_loopback() && i.ipv4.iter().any(|n| n.addr().is_private()))

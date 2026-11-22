@@ -10,6 +10,7 @@ import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -24,11 +25,15 @@ import io.flutter.plugin.common.MethodChannel
  *   accessibility settings; `openTouchSettings` opens them (at rdesk's entry where the system
  *   allows), `openAppInfo` opens the app's page (where Android 13+ hides "Allow restricted
  *   settings" for apps installed outside a store).
+ * - `allFiles` tells whether the other side may browse all of the phone's files;
+ *   `openAllFiles` asks for it (Android 11+: the system's "All files access" page; before:
+ *   the storage permission).
  */
 class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHandler {
     companion object {
         const val REQUEST_CAPTURE = 0x5244
         const val REQUEST_NOTIFICATIONS = 0x5245
+        const val REQUEST_STORAGE = 0x5246
     }
 
     private var waiting: MethodChannel.Result? = null
@@ -53,6 +58,16 @@ class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHand
                 openTouchSettings()
                 result.success(null)
             }
+            "allFiles" -> result.success(allFiles())
+            "autoStart" -> result.success(AutoStart.enabled(activity))
+            "setAutoStart" -> {
+                AutoStart.set(activity, call.arguments as? Boolean ?: false)
+                result.success(null)
+            }
+            "openAllFiles" -> {
+                openAllFiles()
+                result.success(null)
+            }
             "openAppInfo" -> {
                 activity.startActivity(
                     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null)),
@@ -60,6 +75,29 @@ class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHand
                 result.success(null)
             }
             else -> result.notImplemented()
+        }
+    }
+
+    private fun allFiles(): Boolean = if (Build.VERSION.SDK_INT >= 30) {
+        Environment.isExternalStorageManager()
+    } else {
+        activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun openAllFiles() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                activity.startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.fromParts("package", activity.packageName, null)),
+                )
+            } catch (e: ActivityNotFoundException) {
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+        } else {
+            activity.requestPermissions(
+                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                REQUEST_STORAGE,
+            )
         }
     }
 
@@ -89,11 +127,16 @@ class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHand
         activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
+    /** Notifications (the sharing notice, the access questions) and the microphone (for the
+     *  phone's sound: Android counts capturing what apps play as recording), then the screen.
+     *  Both are optional: sharing works without them. */
     private fun askNotifications() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        val missing = buildList {
+            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT >= 29) add(Manifest.permission.RECORD_AUDIO)
+        }.filter { activity.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            activity.requestPermissions(missing.toTypedArray(), REQUEST_NOTIFICATIONS)
         } else {
             askCapture()
         }

@@ -6827,6 +6827,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "iroh-relay",
  "jpeg-encoder",
+ "ndk",
  "noq-proto",
  "opaque-ke",
  "openh264",

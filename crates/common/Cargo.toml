@@ -56,9 +56,11 @@ base64 = "0.23.1"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = { version = "3", default-features = false, features = ["wayland-data-control", "image-data"] }
 
-# Android: the HTTPS roots built into the app (see `account::http_client`).
+# Android: the HTTPS roots built into the app (see `account::http_client`), and H.264
+# decoding by the phone's own decoder (`h264_android`).
 [target.'cfg(target_os = "android")'.dependencies]
 webpki-roots = "1"
+ndk = { version = "0.9", default-features = false, features = ["media", "nativewindow", "api-level-26"] }
 
 [dev-dependencies]
 tempfile = "3"

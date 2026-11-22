@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rdesk_common::tf;
-use rdesk_proto::{InputEvent, Key, MouseButton};
+use rdesk_proto::{InputEvent, Key, MouseButton, NavAction, TouchPoint};
 use tokio::sync::broadcast;
 
 use crate::capture::InputRect;
@@ -35,6 +35,10 @@ pub enum InputCmd {
     /// let them through again. Injected input still works; Ctrl+Alt+Del at the computer
     /// unblocks.
     BlockLocal(bool, tokio::sync::oneshot::Sender<Result<()>>),
+    /// A phone's system button ([`Backend::nav`]).
+    Nav(NavAction),
+    /// The fingers on a phone's screen now ([`Backend::touch`]).
+    Touch(Vec<TouchPoint>),
 }
 
 /// The pointer on the current monitor, normalized like input (0..=65535 per axis);
@@ -158,19 +162,38 @@ impl Reporter {
     }
 }
 
-static BACKEND: OnceLock<fn() -> Box<dyn Backend>> = OnceLock::new();
+/// Makes the input backend (on the input thread).
+type MakeBackend = fn() -> Box<dyn Backend>;
+
+static BACKEND: OnceLock<(MakeBackend, Caps)> = OnceLock::new();
+
+/// What a backend brought by [`set_input_backend`] can do beyond a computer's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Caps {
+    /// A phone's system buttons ([`Backend::nav`]).
+    pub nav: bool,
+    /// It wants typed characters as text ([`rdesk_proto::Feature::TextKeys`]).
+    pub text_keys: bool,
+    /// Several fingers at once ([`Backend::touch`]).
+    pub multitouch: bool,
+}
 
 /// Inject input through the program the host runs in (the phone app) instead of this system's
 /// own way. Set once, before the host starts; `make` runs on the input thread.
-pub fn set_input_backend(make: fn() -> Box<dyn Backend>) {
-    let _ = BACKEND.set(make);
+pub fn set_input_backend(make: MakeBackend, caps: Caps) {
+    let _ = BACKEND.set((make, caps));
+}
+
+/// What the input in use can do beyond a computer's.
+pub fn caps() -> Caps {
+    BACKEND.get().map(|b| b.1).unwrap_or_default()
 }
 
 fn make_backend(fake: bool) -> Box<dyn Backend> {
     if fake {
         return Box::new(LogBackend);
     }
-    if let Some(make) = BACKEND.get() {
+    if let Some((make, _)) = BACKEND.get() {
         return make();
     }
     match platform_backend() {
@@ -202,6 +225,15 @@ pub trait Backend {
     fn block_local(&mut self, _on: bool) -> Result<()> {
         Err(anyhow::anyhow!("blocking the keyboard and mouse works on Windows computers only"))
     }
+    /// A phone's system button or action.
+    fn nav(&mut self, _action: NavAction) -> Result<()> {
+        Err(anyhow::anyhow!("only phones have system buttons"))
+    }
+    /// The fingers on the screen now, by id, in the same coordinates as [`Backend::mouse_abs`]
+    /// (empty: all lifted).
+    fn touch(&mut self, _fingers: &[(u8, i32, i32)]) -> Result<()> {
+        Err(anyhow::anyhow!("only phones take several fingers"))
+    }
 }
 
 #[derive(Default)]
@@ -218,6 +250,20 @@ impl State {
             InputCmd::Monitor(r) => self.rect = Some(r),
             InputCmd::BlockLocal(on, reply) => {
                 let _ = reply.send(b.block_local(on));
+            }
+            InputCmd::Nav(a) => b.nav(a)?,
+            InputCmd::Touch(points) => {
+                if let Some(r) = self.rect {
+                    let fingers: Vec<(u8, i32, i32)> = points
+                        .iter()
+                        .take(TouchPoint::MAX)
+                        .map(|p| {
+                            let (x, y) = map_point(r, p.x, p.y);
+                            (p.id, x, y)
+                        })
+                        .collect();
+                    b.touch(&fingers)?;
+                }
             }
             InputCmd::Pointer(reply) => {
                 let p = match (self.rect, b.pointer()) {

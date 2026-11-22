@@ -19,6 +19,17 @@ class ScreenShare {
   /// Open the system's accessibility settings (rdesk's entry where Android allows).
   static Future<void> openTouchSettings() => _channel.invokeMethod('openTouchSettings');
 
+  /// Whoever is connected may browse all of the phone's files (not only Download/rdesk).
+  static Future<bool> allFiles() async => await _channel.invokeMethod<bool>('allFiles') ?? false;
+
+  /// Ask Android for it ("All files access", or the storage permission before Android 11).
+  static Future<void> openAllFiles() => _channel.invokeMethod('openAllFiles');
+
+  /// "Start on its own": share the screen and start the host when the phone starts or unlocks.
+  static Future<bool> autoStart() async => await _channel.invokeMethod<bool>('autoStart') ?? false;
+
+  static Future<void> setAutoStart(bool on) => _channel.invokeMethod('setAutoStart', on);
+
   /// Open rdesk's app info (Android 13+ keeps "Allow restricted settings" in its menu).
   static Future<void> openAppInfo() => _channel.invokeMethod('openAppInfo');
 }

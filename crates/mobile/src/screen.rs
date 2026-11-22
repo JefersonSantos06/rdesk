@@ -30,6 +30,10 @@ struct State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State { size: None, fresh: None, last: None });
+
+/// Tests that share the screen take turns (the state is global).
+#[cfg(test)]
+pub(crate) static TEST_TURN: Mutex<()> = Mutex::new(());
 static NEW: Condvar = Condvar::new();
 
 /// Sharing started, or the screen turned (a new size).
@@ -170,6 +174,7 @@ mod tests {
     // One test: the state is global.
     #[test]
     fn pictures_go_out_newest_first_and_the_last_one_again() {
+        let _turn = TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let mut src = PhoneScreen;
         assert!(src.list().is_err(), "not sharing yet");
         started(2, 2);

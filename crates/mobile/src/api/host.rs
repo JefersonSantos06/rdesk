@@ -34,6 +34,8 @@ pub struct HostView {
     pub sharing_screen: bool,
     /// The accessibility service is on: the other side can touch and type.
     pub touch_control: bool,
+    /// The person at the phone is asked before each connection (a notification).
+    pub ask_first: bool,
     pub has_password: bool,
     /// Newest last.
     pub events: Vec<String>,
@@ -84,6 +86,7 @@ fn view(h: &Host) -> HostView {
         session_client: st.session.map(|s| s.client),
         sharing_screen: crate::screen::sharing(),
         touch_control: crate::touch::connected(),
+        ask_first: admin::load_config().map(|c| c.consent.ask).unwrap_or(false),
         has_password: admin::has_password(),
         events: st.events.into_iter().map(|e| e.text).collect(),
     }
@@ -111,10 +114,24 @@ pub fn start_host() -> Result<()> {
     if h.handle.lock().unwrap().as_ref().is_some_and(|x| !x.is_finished()) {
         return Ok(());
     }
+    phone_defaults();
+    // Files: the phone's shared storage (what its own file manager shows).
+    if cfg!(target_os = "android") {
+        rdesk_common::files::set_phone_home("/storage/emulated/0".into());
+    }
     let screen = crate::screen::sharing();
     if screen {
+        rdesk_host::consent::set_asker(crate::bridge::ask);
+        rdesk_common::clipboard::set_phone_clipboard(crate::bridge::set_clipboard);
+        rdesk_host::audio::set_source(rdesk_host::audio::Source {
+            available: crate::sound::available,
+            start: crate::sound::start,
+        });
         rdesk_host::capture::set_screen_source(|| Box::new(crate::screen::PhoneScreen));
-        rdesk_host::input::set_input_backend(|| Box::<crate::touch::PhoneInput>::default());
+        rdesk_host::input::set_input_backend(
+            || Box::<crate::touch::PhoneInput>::default(),
+            rdesk_host::input::Caps { nav: true, text_keys: true, multitouch: true },
+        );
     }
     // Input lands on the shared picture, so without it there is nothing to touch.
     let opts = RunOpts { fake_capture: !screen, fake_input: !screen, ..Default::default() };
@@ -133,6 +150,31 @@ pub fn start_host() -> Result<()> {
         false,
     );
     Ok(())
+}
+
+/// A phone is with its owner, unlike a computer left on: the first time, ask before each
+/// connection, and turn it away when nobody answers.
+fn phone_defaults() {
+    let Ok(path) = rdesk_common::config::config_path(rdesk_common::config::HOST_CONFIG) else { return };
+    if path.exists() {
+        return;
+    }
+    let mut cfg = admin::load_config().unwrap_or_default();
+    cfg.consent.ask = true;
+    cfg.consent.allow_on_timeout = false;
+    if let Err(e) = admin::save_config(&cfg) {
+        tracing::warn!("host.toml: {e:#}");
+    }
+}
+
+/// Ask the person at the phone before each connection (a notification with Allow and Deny;
+/// without an answer the connection is turned away). The host must be restarted to use it.
+pub fn set_ask_first(enabled: bool) -> Result<()> {
+    phone_defaults();
+    let mut cfg = admin::load_config()?;
+    cfg.consent.ask = enabled;
+    cfg.consent.allow_on_timeout = false;
+    admin::save_config(&cfg)
 }
 
 /// The screen stopped being shared (from the app's Kotlin): the host stops with it, since

@@ -123,6 +123,14 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Do computador, com o controle ligado (`rdesk connect … --headless --input "…"` serve): clicar abre o que está sob o ponteiro; arrastar de baixo para cima abre a gaveta de apps; segurar sobre um ícone mostra o menu dele; a roda rola a lista sem arremessar; botão direito / Esc voltam; tecla Windows vai ao início.
 - [ ] Digitar num campo (Shift, Backspace no meio): o texto sai exatamente como digitado; Ctrl+V cola; Enter envia uma busca.
 - [ ] Sem o controle ligado: a imagem continua, e o lado de lá vê o aviso de que o controle por toque está desligado.
+- [ ] App do computador num celular: a barra mostra Voltar / Início / Recentes e funcionam; o menu da sessão tem Notificações, Ajustes rápidos, Captura e Bloquear.
+- [ ] Digitar do computador com teclado ABNT2: "ação, pé, Ç" sai igual no celular; Ctrl+C / Ctrl+V continuam atalhos.
+- [ ] *Perguntar antes de cada conexão* (padrão): uma conexão nova mostra a notificação com Permitir / Recusar; Recusar ou 30 s sem resposta recusam; uma reconexão não pergunta.
+- [ ] Copiar um texto no computador conectado: ele chega à área de transferência do celular.
+- [ ] Arquivos: enviar do computador cai em Download/rdesk; com *Acesso a todos os arquivos*, a navegação mostra o armazenamento todo.
+- [ ] Som (Android 10+, permissão de áudio): tocar um vídeo no celular; o computador ouve.
+- [ ] De um celular para outro: a imagem anda em H.264 quando rola (o app do celular decodifica); *Toques vão para o celular*: pinça amplia um mapa ou foto no celular acessado.
+- [ ] *Ligar sozinho* com o controle por toque: reiniciar o celular; ao desbloquear, o pedido do Android abre sozinho e o host liga. Sem o controle: aparece a notificação para tocar.
 - [ ] Rolar uma lista sem parar (do computador): a imagem acompanha em vídeo (bem menos kbit/s que em blocos) com as cores certas; ao parar, o texto fica nítido em ~0,3 s.
 - [ ] **Parar** na notificação: o ícone some, o host para e a chave volta a desligada.
 - [ ] Bloquear a tela (celular com PIN): o compartilhamento acaba, o host para e a página pede para ligar de novo.

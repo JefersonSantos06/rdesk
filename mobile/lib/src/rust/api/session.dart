@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `ev`, `forward`, `key_named`, `monitor`, `norm`, `send`, `terminal`, `text`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Shared`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RdSession>>
@@ -33,6 +33,9 @@ abstract class RdSession implements RustOpaqueInterface {
   void key({required String code, required bool down});
 
   void listDir({required String path});
+
+  /// Press a phone host's system button (when [`SessionEvent::nav_supported`]).
+  Future<void> nav({required NavButton button});
 
   factory RdSession({
     required Target target,
@@ -63,8 +66,7 @@ abstract class RdSession implements RustOpaqueInterface {
 
   void selectMonitor({required int id});
 
-  /// Put text on the computer's clipboard.
-  void sendClipboard({required String text});
+  Future<void> sendClipboard({required String text});
 
   /// Fit the picture to this size (0×0: full size), e.g. after a rotation or zoom.
   void setMaxSize({required int width, required int height});
@@ -89,6 +91,11 @@ abstract class RdSession implements RustOpaqueInterface {
 
   /// Type text as it is (the phone keyboard's characters, accents included).
   void text({required String text});
+
+  /// Put text on the computer's clipboard.
+  /// The fingers on the screen now, for a phone host (when
+  /// [`SessionEvent::multitouch_supported`]): send on every change; empty lifts them all.
+  void touch({required List<Finger> fingers});
 
   /// Send a file to the computer (into its received-files folder).
   void upload({required String path});
@@ -178,6 +185,27 @@ enum EventKind {
       RustLib.instance.api.crateApiSessionEventKindDefault();
 }
 
+/// A finger on the screen (for [`RdSession::touch`]): `x` and `y` are 0..1 across the monitor.
+class Finger {
+  final int id;
+  final double x;
+  final double y;
+
+  const Finger({required this.id, required this.x, required this.y});
+
+  @override
+  int get hashCode => id.hashCode ^ x.hashCode ^ y.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Finger &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          x == other.x &&
+          y == other.y;
+}
+
 /// The picture as RGBA (tightly packed).
 class Frame {
   final int width;
@@ -234,6 +262,9 @@ class Monitor {
           primary == other.primary;
 }
 
+/// A phone host's system buttons.
+enum NavButton { back, home, recents, notifications }
+
 /// What happened in the session, for the app to show. One flat struct (the fields used
 /// depend on `kind`) so the Dart side needs no generated classes.
 class SessionEvent {
@@ -271,6 +302,12 @@ class SessionEvent {
   final bool cursorSupported;
   final bool scalingSupported;
 
+  /// The host is a phone with system buttons ([`RdSession::nav`]).
+  final bool navSupported;
+
+  /// The host takes several fingers at once ([`RdSession::touch`]).
+  final bool multitouchSupported;
+
   const SessionEvent({
     required this.kind,
     required this.text,
@@ -289,6 +326,8 @@ class SessionEvent {
     required this.ok,
     required this.cursorSupported,
     required this.scalingSupported,
+    required this.navSupported,
+    required this.multitouchSupported,
   });
 
   static Future<SessionEvent> default_() =>
@@ -312,7 +351,9 @@ class SessionEvent {
       entries.hashCode ^
       ok.hashCode ^
       cursorSupported.hashCode ^
-      scalingSupported.hashCode;
+      scalingSupported.hashCode ^
+      navSupported.hashCode ^
+      multitouchSupported.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -335,7 +376,9 @@ class SessionEvent {
           entries == other.entries &&
           ok == other.ok &&
           cursorSupported == other.cursorSupported &&
-          scalingSupported == other.scalingSupported;
+          scalingSupported == other.scalingSupported &&
+          navSupported == other.navSupported &&
+          multitouchSupported == other.multitouchSupported;
 }
 
 class SessionOptions {

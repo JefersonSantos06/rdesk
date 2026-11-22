@@ -4,8 +4,11 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
 import android.content.ClipData
+import android.content.BroadcastReceiver
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Path
 import android.hardware.display.DisplayManager
 import android.media.AudioManager
@@ -31,6 +34,9 @@ import kotlin.concurrent.thread
  * piece, with [StrokeDescription.continueStroke] until `up`, so long presses and drags happen
  * as they are made. Commands run one at a time, in order, on the main thread: the next waits
  * for the gesture before it (a new gesture would cancel one in progress).
+ *
+ * Fingers from another phone (`fingers`) work the same way, one stroke per finger in each
+ * gesture: a pinch is two strokes going on together.
  */
 class RemoteControlService : AccessibilityService() {
     companion object {
@@ -46,6 +52,7 @@ class RemoteControlService : AccessibilityService() {
     private data class Up(val holdMs: Long) : Cmd
     private data class Scroll(val x: Float, val y: Float, val dx: Int, val dy: Int) : Cmd
     private data class Action(val line: String) : Cmd
+    private data class Fingers(val points: Map<Int, Pair<Float, Float>>) : Cmd
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -62,8 +69,21 @@ class RemoteControlService : AccessibilityService() {
     private var lastY = 0f
     private var lastAt = 0L
 
+    /** The fingers now down (from another phone): each one's stroke and where it is. */
+    private var touching: Map<Int, Pair<StrokeDescription, Pair<Float, Float>>> = emptyMap()
+
+    /** Unlocked: with "start on its own", share the screen again (locking ended it). */
+    private val unlocked = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (AutoStart.enabled(context)) AutoStart.begin(context)
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
+        registerReceiver(unlocked, IntentFilter(Intent.ACTION_USER_PRESENT))
+        // Bound by the system at boot: Android lets this service open the screen request.
+        if (AutoStart.enabled(this)) AutoStart.begin(this)
         InputBridge.connected(true)
         reading = true
         thread(name = "rdesk-touch", isDaemon = true) {
@@ -90,6 +110,11 @@ class RemoteControlService : AccessibilityService() {
 
     private fun stopReading() {
         if (!reading) return
+        try {
+            unregisterReceiver(unlocked)
+        } catch (e: IllegalArgumentException) {
+            // Not registered.
+        }
         reading = false
         InputBridge.connected(false)
     }
@@ -115,6 +140,15 @@ class RemoteControlService : AccessibilityService() {
             "move" -> Move(num(1) * sx, num(2) * sy)
             "up" -> Up(1)
             "scroll" -> Scroll(num(1) * sx, num(2) * sy, num(3).toInt(), num(4).toInt())
+            "fingers" -> Fingers(
+                parts.drop(1).mapNotNull { f ->
+                    val v = f.split(':')
+                    val id = v.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
+                    val x = v.getOrNull(1)?.toFloatOrNull() ?: return@mapNotNull null
+                    val y = v.getOrNull(2)?.toFloatOrNull() ?: return@mapNotNull null
+                    id to (x * sx to y * sy)
+                }.toMap(),
+            )
             else -> Action(line)
         }
         queue.addLast(cmd)
@@ -160,6 +194,17 @@ class RemoteControlService : AccessibilityService() {
                     swipe(c.x, c.y, dx, dy)
                 }
                 is Action -> act(c.line)
+                is Fingers -> {
+                    if (stroke != null) continue
+                    var to: Fingers = c
+                    while (true) {
+                        val n = queue.firstOrNull() as? Fingers ?: break
+                        // Only frames of the same fingers fold: a lift must not be skipped.
+                        if (n.points.keys != to.points.keys) break
+                        to = queue.removeFirst() as Fingers
+                    }
+                    fingers(to)
+                }
             }
         }
     }
@@ -184,6 +229,58 @@ class RemoteControlService : AccessibilityService() {
         lastY = toY
         queue.addFirst(Up(60))
         dispatch(StrokeDescription(path, 0, 200, true), keep = true)
+    }
+
+    /** One gesture with a stroke per finger: new ones start, the others go on or lift. */
+    private fun fingers(c: Fingers) {
+        val ids = (touching.keys + c.points.keys).sorted().take(10)
+        if (ids.isEmpty()) return
+        val ms = (SystemClock.uptimeMillis() - lastAt).coerceIn(8, 100)
+        val builder = GestureDescription.Builder()
+        val next = mutableMapOf<Int, Pair<StrokeDescription, Pair<Float, Float>>>()
+        for (id in ids) {
+            val prev = touching[id]
+            val to = c.points[id]
+            val s = when {
+                prev == null && to != null -> StrokeDescription(pointAt(to.first, to.second), 0, 1, true)
+                prev != null && to != null -> {
+                    val (px, py) = prev.second
+                    val path = if (px == to.first && py == to.second) {
+                        pointAt(px, py)
+                    } else {
+                        Path().apply {
+                            moveTo(px, py)
+                            lineTo(to.first, to.second)
+                        }
+                    }
+                    prev.first.continueStroke(path, 0, ms, true)
+                }
+                prev != null -> prev.first.continueStroke(pointAt(prev.second.first, prev.second.second), 0, 1, false)
+                else -> null
+            } ?: continue
+            builder.addStroke(s)
+            if (to != null) next[id] = s to to
+        }
+        busy = true
+        lastAt = SystemClock.uptimeMillis()
+        val sent = dispatchGesture(builder.build(), object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                touching = next
+                busy = false
+                pump()
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                touching = emptyMap()
+                busy = false
+                while (queue.firstOrNull() is Fingers) queue.removeFirst()
+                pump()
+            }
+        }, main)
+        if (!sent) {
+            touching = emptyMap()
+            busy = false
+        }
     }
 
     private fun pointAt(x: Float, y: Float) = Path().apply { moveTo(x, y) }
@@ -224,6 +321,9 @@ class RemoteControlService : AccessibilityService() {
                 "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
                 "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
                 "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+                "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                "quick_settings" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+                "lock" -> if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
                 "screenshot" -> if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
                 "volume" -> volume(rest)
                 "text" -> type(rest)

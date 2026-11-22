@@ -3,7 +3,9 @@
 //! `rdesk-core` and `rdesk-common`, the same code as the desktop app.
 
 pub mod api;
+mod bridge;
 mod frb_generated;
 mod runtime;
 mod screen;
+mod sound;
 mod touch;

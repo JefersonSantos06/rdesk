@@ -43,8 +43,24 @@ pub struct V2 {
     pending: BTreeMap<u64, Decoded>,
     blocked_since: Option<Instant>,
     cache: Vec<Option<(u32, u32, Vec<u8>)>>,
+    #[cfg(any(feature = "h264", target_os = "android"))]
+    h264: Option<H264Decoder>,
+}
+
+/// OpenH264 on computers, the phone's own decoder on Android.
+#[cfg(feature = "h264")]
+use rdesk_common::h264::H264Decoder;
+#[cfg(all(not(feature = "h264"), target_os = "android"))]
+use rdesk_common::h264_android::H264Decoder;
+
+/// Whether this app decodes H.264 (what it tells the host).
+pub fn decodes_h264() -> bool {
     #[cfg(feature = "h264")]
-    h264: Option<rdesk_common::h264::H264Decoder>,
+    return true;
+    #[cfg(all(not(feature = "h264"), target_os = "android"))]
+    return rdesk_common::h264_android::available();
+    #[cfg(not(any(feature = "h264", target_os = "android")))]
+    return false;
 }
 
 impl V2 {
@@ -54,7 +70,7 @@ impl V2 {
             pending: BTreeMap::new(),
             blocked_since: None,
             cache: vec![None; cache_slots as usize],
-            #[cfg(feature = "h264")]
+            #[cfg(any(feature = "h264", target_os = "android"))]
             h264: None,
         }
     }
@@ -175,10 +191,10 @@ impl V2 {
 }
 
 impl V2 {
-    #[cfg(feature = "h264")]
+    #[cfg(any(feature = "h264", target_os = "android"))]
     fn h264_into(&mut self, au: &[u8], frame: &mut Frame) -> Result<()> {
         if self.h264.is_none() {
-            self.h264 = Some(rdesk_common::h264::H264Decoder::new()?);
+            self.h264 = Some(H264Decoder::new()?);
         }
         let r = self.h264.as_mut().expect("just made").decode_into(au, frame);
         if r.is_err() {
@@ -188,7 +204,7 @@ impl V2 {
         r
     }
 
-    #[cfg(not(feature = "h264"))]
+    #[cfg(not(any(feature = "h264", target_os = "android")))]
     fn h264_into(&mut self, _: &[u8], _: &mut Frame) -> Result<()> {
         Err(anyhow!("this app does not decode H.264"))
     }

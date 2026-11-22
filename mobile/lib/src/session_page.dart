@@ -278,26 +278,52 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver i
     if (mounted) setState(() {});
   }
 
+  /// Fingers go straight to a phone (the other side is a phone, and the person chose it):
+  /// pinches and every other gesture happen there, as on that phone. Pointer → finger id.
+  bool _fingersOn = true;
+  final Map<int, (int, Offset)> _fingers = {};
+
+  bool get _fingersMode => _fingersOn && _canInput && _hub.multitouchSupported;
+
+  /// A finger touched, moved (`at`) or lifted (`at` null): tell the phone where they all are.
+  void _finger(int pointer, Offset? at) {
+    if (at == null) {
+      _fingers.remove(pointer);
+    } else {
+      final id = _fingers[pointer]?.$1 ??
+          List.generate(10, (i) => i).firstWhere((i) => !_fingers.values.any((f) => f.$1 == i), orElse: () => -1);
+      if (id < 0) return;
+      _fingers[pointer] = (id, _touch.toRemote(at));
+    }
+    _hub.session.touch(
+      fingers: [for (final f in _fingers.values) Finger(id: f.$1, x: f.$2.dx, y: f.$2.dy)],
+    );
+  }
+
   void _onDown(PointerDownEvent e) {
     if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    if (_fingersMode) return _finger(e.pointer, e.localPosition);
     _touch.down(e.pointer, e.localPosition, _now);
     _afterTouch();
   }
 
   void _onMove(PointerMoveEvent e) {
     if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    if (_fingersMode) return _finger(e.pointer, e.localPosition);
     _touch.move(e.pointer, e.localPosition, _now, stamp: e.timeStamp);
     _afterTouch();
   }
 
   void _onUp(PointerUpEvent e) {
     if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    if (_fingersMode) return _finger(e.pointer, null);
     _touch.up(e.pointer, e.localPosition, _now);
     _afterTouch();
   }
 
   void _onCancel(PointerCancelEvent e) {
     if (e.kind == PointerDeviceKind.mouse) return _mouse(e);
+    if (_fingersMode) return _finger(e.pointer, null);
     _touch.cancel(e.pointer, _now);
     _afterTouch();
   }
@@ -509,7 +535,14 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver i
     final access = _hub.access;
     final s = _hub.stats;
     final theme = Theme.of(context);
+    final phone = _canInput && _hub.navSupported;
     final tiles = <(String, IconData, String, bool)>[
+      if (phone) ('nav_back', Icons.arrow_back, t('Back', 'Voltar'), false),
+      if (phone) ('nav_home', Icons.circle_outlined, t('Home', 'Início'), false),
+      if (phone) ('nav_recents', Icons.crop_square, t('Recent apps', 'Recentes'), false),
+      if (phone) ('nav_notifications', Icons.notifications_outlined, t('Notifications', 'Notificações'), false),
+      if (_canInput && _hub.multitouchSupported)
+        ('fingers', Icons.pan_tool_outlined, t('Touches go to the phone', 'Toques vão para o celular'), _fingersOn),
       if (_canInput) ('keyboard', Icons.keyboard, t('Keyboard', 'Teclado'), _kbFocus.hasFocus && _keyboardOpen),
       if (_canInput) ('keys', Icons.keyboard_command_key, t('Keys', 'Teclas'), _keysBar),
       (
@@ -572,6 +605,22 @@ class _SessionPageState extends State<SessionPage> with WidgetsBindingObserver i
     );
     if (!mounted || action == null) return;
     switch (action) {
+      case 'fingers':
+        setState(() {
+          _fingersOn = !_fingersOn;
+          _fingers.clear();
+        });
+        _snack(_fingersOn
+            ? t('Your fingers touch the phone directly (pinch too)', 'Seus dedos tocam o celular direto (pinça também)')
+            : t('Gestures as on a computer: pinch zooms here', 'Gestos como num computador: a pinça amplia aqui'));
+      case 'nav_back':
+        _hub.session.nav(button: NavButton.back);
+      case 'nav_home':
+        _hub.session.nav(button: NavButton.home);
+      case 'nav_recents':
+        _hub.session.nav(button: NavButton.recents);
+      case 'nav_notifications':
+        _hub.session.nav(button: NavButton.notifications);
       case 'keyboard':
         _toggleKeyboard();
       case 'keys':

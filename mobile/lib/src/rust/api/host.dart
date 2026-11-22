@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `host`, `screen_stopped`, `view`
+// These functions are ignored because they are not marked as `pub`: `host`, `phone_defaults`, `screen_stopped`, `view`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Host`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
@@ -20,6 +20,11 @@ Stream<HostView> watchHost() => RustLib.instance.api.crateApiHostWatchHost();
 /// Start accepting connections (nothing happens if it is running already). On Android, share
 /// the screen first (the app's `ScreenShare.start`): the host sends what it shows.
 Future<void> startHost() => RustLib.instance.api.crateApiHostStartHost();
+
+/// Ask the person at the phone before each connection (a notification with Allow and Deny;
+/// without an answer the connection is turned away). The host must be restarted to use it.
+Future<void> setAskFirst({required bool enabled}) =>
+    RustLib.instance.api.crateApiHostSetAskFirst(enabled: enabled);
 
 /// Stop accepting connections and end the current session.
 Future<void> stopHost() => RustLib.instance.api.crateApiHostStopHost();
@@ -76,6 +81,9 @@ class HostView {
 
   /// The accessibility service is on: the other side can touch and type.
   final bool touchControl;
+
+  /// The person at the phone is asked before each connection (a notification).
+  final bool askFirst;
   final bool hasPassword;
 
   /// Newest last.
@@ -91,6 +99,7 @@ class HostView {
     this.sessionClient,
     required this.sharingScreen,
     required this.touchControl,
+    required this.askFirst,
     required this.hasPassword,
     required this.events,
   });
@@ -109,6 +118,7 @@ class HostView {
       sessionClient.hashCode ^
       sharingScreen.hashCode ^
       touchControl.hashCode ^
+      askFirst.hashCode ^
       hasPassword.hashCode ^
       events.hashCode;
 
@@ -126,6 +136,7 @@ class HostView {
           sessionClient == other.sessionClient &&
           sharingScreen == other.sharingScreen &&
           touchControl == other.touchControl &&
+          askFirst == other.askFirst &&
           hasPassword == other.hasPassword &&
           events == other.events;
 }

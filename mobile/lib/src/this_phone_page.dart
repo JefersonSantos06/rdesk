@@ -23,6 +23,8 @@ class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserv
   bool _signedIn = false;
   bool _busy = false;
   bool _touch = false;
+  bool _allFiles = false;
+  bool _autoStart = false;
   String? _error;
 
   @override
@@ -54,7 +56,15 @@ class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserv
 
   Future<void> _checkTouch() async {
     final on = await ScreenShare.touchEnabled();
-    if (mounted) setState(() => _touch = on);
+    final files = await ScreenShare.allFiles();
+    final auto = await ScreenShare.autoStart();
+    if (mounted) {
+      setState(() {
+        _touch = on;
+        _allFiles = files;
+        _autoStart = auto;
+      });
+    }
   }
 
   /// Say plainly what touch control allows, then open Android's settings to turn it on.
@@ -192,6 +202,21 @@ class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserv
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Text(v!.error!, style: TextStyle(color: theme.colorScheme.error)),
           ),
+        SwitchListTile(
+          secondary: const Icon(Icons.how_to_reg_outlined),
+          title: Text(t('Ask before each connection', 'Perguntar antes de cada conexão')),
+          subtitle: Text(t(
+            'A notification with Allow and Deny; without an answer in 30 s, the connection is turned away',
+            'Uma notificação com Permitir e Recusar; sem resposta em 30 s, a conexão é recusada',
+          )),
+          value: v?.askFirst ?? true,
+          onChanged: _busy
+              ? null
+              : (on) => _do(() async {
+                    await api.setAskFirst(enabled: on);
+                    await _restartIfRunning();
+                  }),
+        ),
         if (v?.sessionClient != null)
           ListTile(
             leading: const Icon(Icons.cast_connected),
@@ -212,6 +237,20 @@ class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserv
               },
             ),
           ),
+        SwitchListTile(
+          secondary: const Icon(Icons.restart_alt),
+          title: Text(t('Start on its own', 'Ligar sozinho')),
+          subtitle: Text(t(
+            'When the phone starts or is unlocked, share the screen and wait for connections. Android asks "Start recording or casting?" each time unless you allow rdesk once over USB (see the guide); with touch control on, the question opens by itself, otherwise a notification offers it.',
+            'Quando o celular liga ou é desbloqueado, compartilhar a tela e esperar conexões. O Android pergunta "Gravar ou transmitir?" a cada vez, a não ser que você libere o rdesk uma vez pelo USB (veja o guia); com o controle por toque ligado, a pergunta abre sozinha, senão uma notificação a oferece.',
+          )),
+          isThreeLine: true,
+          value: _autoStart,
+          onChanged: (on) async {
+            await ScreenShare.setAutoStart(on);
+            setState(() => _autoStart = on);
+          },
+        ),
         _Section(t('Touch control', 'Controle por toque')),
         ListTile(
           leading: Icon(_touch ? Icons.touch_app : Icons.do_not_touch_outlined),
@@ -236,6 +275,21 @@ class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserv
               ),
             ),
           ),
+        _Section(t('Files', 'Arquivos')),
+        ListTile(
+          leading: Icon(_allFiles ? Icons.folder_open_outlined : Icons.folder_outlined),
+          title: Text(_allFiles
+              ? t('All files can be browsed', 'Todos os arquivos podem ser vistos')
+              : t('Only Download/rdesk', 'Só Download/rdesk')),
+          subtitle: Text(t(
+            'Files sent from the other side go to Download/rdesk. To let them browse and download the rest of this phone\'s files, allow access to all files.',
+            'O que o outro lado envia vai para Download/rdesk. Para ele ver e baixar o resto dos arquivos deste celular, permita o acesso a todos os arquivos.',
+          )),
+          isThreeLine: true,
+          trailing: _allFiles
+              ? null
+              : FilledButton.tonal(onPressed: ScreenShare.openAllFiles, child: Text(t('Allow', 'Permitir'))),
+        ),
         _Section(t('Server', 'Servidor')),
         if (v?.registration != null) ...[
           ListTile(leading: const Icon(Icons.cloud_done_outlined), title: Text(v!.registration!)),

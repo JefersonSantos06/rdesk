@@ -1082,7 +1082,7 @@ async fn run_session(
             }
         }
         let open = if second {
-            StreamOpen::Acks2(VideoCaps { cache_slots: ack_ext.cache_slots, h264: cfg!(feature = "h264") })
+            StreamOpen::Acks2(VideoCaps { cache_slots: ack_ext.cache_slots, h264: crate::video2::decodes_h264() })
         } else {
             StreamOpen::Acks
         };
@@ -1451,6 +1451,8 @@ async fn extensions(
                     ExtClient::Power(_) => can(Feature::Power),
                     ExtClient::Privacy { .. } => can(Feature::Privacy),
                     ExtClient::BlockInput { .. } => can(Feature::BlockInput),
+                    ExtClient::Nav(_) => can(Feature::Nav),
+                    ExtClient::Touch(_) => can(Feature::MultiTouch),
                     ExtClient::Hello { .. } => false,
                 };
                 if allowed {

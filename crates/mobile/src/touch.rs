@@ -7,7 +7,10 @@
 //! - `down x y`, `move x y`, `up`: a finger touching, sliding, lifting (a held button is a
 //!   held finger, so a long press and a drag happen live);
 //! - `scroll x y dx dy`: wheel notches at a point (a swipe; positive = up / right);
-//! - `back`, `home`, `recents`, `screenshot`: system actions;
+//! - `fingers id:x:y id:x:y…`: the fingers on the screen now, from another phone (a finger
+//!   missing from the next one lifted; `fingers` alone lifts them all);
+//! - `back`, `home`, `recents`, `notifications`, `quick_settings`, `lock`, `screenshot`:
+//!   system actions (also from the clients' buttons, [`rdesk_proto::ExtClient::Nav`]);
 //! - `volume up|down|mute`;
 //! - `text …`: typed into the focused field;
 //! - `key backspace|delete|enter|left|right|home|end|select_all|copy|cut|paste`.
@@ -25,7 +28,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rdesk_host::input::Backend;
-use rdesk_proto::{Key, MouseButton};
+use rdesk_proto::{Key, MouseButton, NavAction};
 
 /// Commands waiting for the service; the oldest go first when it falls behind.
 const QUEUE_MAX: usize = 512;
@@ -68,6 +71,12 @@ fn push(cmd: String) {
         return;
     }
     if let Some(last) = q.items.back_mut() {
+        let fingers = |c: &str| c == "fingers" || c.starts_with("fingers ");
+        // Only while the same fingers stay down: a lift must not be folded away.
+        if fingers(&cmd) && fingers(last) && finger_ids(&cmd) == finger_ids(last) {
+            *last = cmd;
+            return;
+        }
         if cmd.starts_with("move ") && last.starts_with("move ") {
             *last = cmd;
             return;
@@ -84,6 +93,11 @@ fn push(cmd: String) {
     }
     q.items.push_back(cmd);
     READY.notify_all();
+}
+
+/// The ids in a `fingers` command, in order.
+fn finger_ids(cmd: &str) -> Vec<&str> {
+    cmd.split(' ').skip(1).filter_map(|f| f.split(':').next()).collect()
 }
 
 fn scroll_of(cmd: &str) -> Option<(i32, i32, i32, i32)> {
@@ -207,6 +221,26 @@ impl Backend for PhoneInput {
 
     fn pointer(&mut self) -> Option<(i32, i32)> {
         Some(self.pointer)
+    }
+
+    fn touch(&mut self, fingers: &[(u8, i32, i32)]) -> Result<()> {
+        let mut cmd = String::from("fingers");
+        for (id, x, y) in fingers {
+            cmd.push_str(&format!(" {id}:{x}:{y}"));
+        }
+        self.send(cmd)
+    }
+
+    fn nav(&mut self, action: NavAction) -> Result<()> {
+        self.send(match action {
+            NavAction::Back => "back",
+            NavAction::Home => "home",
+            NavAction::Recents => "recents",
+            NavAction::Notifications => "notifications",
+            NavAction::QuickSettings => "quick_settings",
+            NavAction::LockScreen => "lock",
+            NavAction::Screenshot => "screenshot",
+        })
     }
 }
 
@@ -339,7 +373,8 @@ mod tests {
         p.button(MouseButton::Right, true).unwrap();
         p.button(MouseButton::Right, false).unwrap();
         p.button(MouseButton::Middle, true).unwrap();
-        assert_eq!(drain(), ["scroll 30 40 0 3", "back", "home"]);
+        p.nav(NavAction::Notifications).unwrap();
+        assert_eq!(drain(), ["scroll 30 40 0 3", "back", "home", "notifications"]);
 
         // Typing: Shift and Caps Lock, Ctrl shortcuts, editing keys, Esc.
         for (k, down) in [
@@ -361,6 +396,15 @@ mod tests {
         }
         p.text("olá").unwrap();
         assert_eq!(drain(), ["text H", "text i", "text 1", "text X", "key paste", "key backspace", "back", "text olá"]);
+
+        // Two fingers pinching, the service behind: frames of the same fingers fold into the newest
+        // (they start where they are by then); a lift is never folded away.
+        p.touch(&[(0, 10, 10), (1, 50, 50)]).unwrap();
+        p.touch(&[(0, 12, 12), (1, 48, 48)]).unwrap();
+        p.touch(&[(0, 14, 14), (1, 46, 46)]).unwrap();
+        p.touch(&[(1, 46, 46)]).unwrap();
+        p.touch(&[]).unwrap();
+        assert_eq!(drain(), ["fingers 0:14:14 1:46:46", "fingers 1:46:46", "fingers"]);
 
         set_connected(false);
         assert!(p.scroll(0, 1).is_err());

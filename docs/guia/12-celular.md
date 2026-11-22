@@ -116,7 +116,7 @@ Se o computador pede a própria senha ou chave além do servidor, o app oferece 
 O celular Android também pode ser o acessado: quem se conectar a ele vê a tela dele e, com o **controle por toque** ligado, também toca, rola e digita nele.
 
 1. No app, em *Configurações → Este celular*, ligue **Permitir acesso a este celular**.
-2. O Android pergunta se pode mostrar notificações (é o aviso de que a tela está sendo compartilhada) e depois se o rdesk pode **gravar ou transmitir a tela inteira**. Toque em **Iniciar**.
+2. O Android pergunta se o rdesk pode mostrar notificações (o aviso de que a tela está sendo compartilhada, e os pedidos de acesso) e gravar áudio (para mandar o som do celular). As duas são opcionais. Depois pergunta se o rdesk pode **gravar ou transmitir a tela inteira**: toque em **Iniciar**.
 3. Para entrar no celular, use uma destas formas:
    - **Pelo servidor**: toque em **Adicionar ao meu servidor**. O celular aparece na sua lista de computadores, como qualquer outro.
    - **Na rede local ou no Tailscale**: toque em **Definir uma senha** e conecte com o **ID do host** que a página mostra e o endereço do celular.
@@ -128,7 +128,25 @@ O compartilhamento também acaba sozinho:
 - quando a tela bloqueia, porque o Android encerra a gravação;
 - quando você para a transmissão pelo próprio sistema.
 
-Nesses casos, volte em *Este celular* e ligue de novo. O Android pede a permissão a cada vez.
+Nesses casos, volte em *Este celular* e ligue de novo, ou deixe **Ligar sozinho** ligado (abaixo). O Android pede a permissão a cada vez.
+
+### Quem entra
+
+Com **Perguntar antes de cada conexão** ligado (o padrão no celular), cada conexão nova mostra uma notificação *rdesk: permitir acesso?* com **Permitir** e **Recusar**. Sem resposta em 30 segundos, ou com a notificação descartada, a conexão é recusada. Uma reconexão da mesma sessão não pergunta de novo.
+
+### Ligar sozinho
+
+Com **Ligar sozinho**, o rdesk compartilha a tela e espera conexões quando o celular liga e quando é desbloqueado. Bloquear a tela encerra o compartilhamento.
+
+- **Com o controle por toque ligado**, o pedido do Android abre sozinho. Sem ele, o Android não deixa um app abrir telas em segundo plano, e uma notificação oferece o pedido com um toque.
+- O Android pergunta **"Gravar ou transmitir?" a cada vez**. Para não perguntar mais, libere o rdesk **uma vez** pelo USB, num computador com o [adb](https://developer.android.com/tools/adb):
+
+  ```
+  adb shell appops set dev.rdesk.rdesk PROJECT_MEDIA allow
+  ```
+
+  Isso funciona até o Android 13. No 14 e mais novos, o Android pode perguntar mesmo assim (não testado). Para desfazer: `adb shell appops set dev.rdesk.rdesk PROJECT_MEDIA default`.
+- O rdesk **não** destrava o celular: com bloqueio por PIN, senha ou digital, alguém precisa desbloqueá-lo.
 
 ### Controle por toque
 
@@ -155,13 +173,25 @@ Do computador:
 | Teclado | Digita no campo em foco; Backspace, Delete, Enter, setas, Home e End editam; Ctrl+A/C/X/V selecionam, copiam, recortam e colam |
 | Print Screen | Captura de tela; as teclas de volume mudam o volume |
 
-O teclado é lido como **americano** (o protocolo manda a posição da tecla, não a letra): acentos e o Ç do ABNT2 não saem. Para colar um texto com acentos, use *Enviar copiado* e Ctrl+V.
+No app do computador, a barra de cima ganha **Voltar**, **Início** e **Recentes** quando o outro lado é um celular, e o menu da sessão tem **Notificações**, **Ajustes rápidos**, **Captura de tela** e **Bloquear o celular**. O que você digita vai como texto, então acentos, Ç e o teclado ABNT2 saem certos (com o app do computador desta versão ou mais novo; com um mais antigo, as letras saem como num teclado americano).
 
-Limitações desta fase:
+### De um celular para outro
 
-- **Movimento**: quando a tela inteira se mexe (rolar, abrir apps), o celular manda vídeo H.264 feito pelo chip de vídeo dele. Parada, a tela volta a ir em blocos nítidos. O app do celular ainda recebe só os blocos.
+No app do celular que acessa, quando o outro lado é um celular, a folha de ferramentas tem **Voltar**, **Início**, **Recentes** e **Notificações**, e a opção **Toques vão para o celular** (ligada): os seus dedos tocam o outro celular como estão, com pinça e gestos de dois dedos. Desligada, os gestos voltam a ser os de sempre, e a pinça amplia a imagem aqui.
+
+### Arquivos, área de transferência e som
+
+- **Arquivos**: o que o outro lado envia vai para *Download/rdesk*. Para ele ver e baixar o resto dos arquivos do celular, toque em **Permitir** em *Este celular → Arquivos* (o Android chama de *Acesso a todos os arquivos*).
+- **Área de transferência**: o que o outro lado copia chega à área de transferência do celular. O contrário não existe, porque o Android não deixa nenhum app ler o que foi copiado em segundo plano. Para mandar um texto do celular, abra o app do rdesk no celular e use *Enviar copiado* numa sessão.
+- **Som**: com a permissão de áudio, quem se conectar ouve o que o celular toca (Android 10 ou mais novo). Alguns apps não deixam o som deles ser gravado e ficam mudos.
+
+### Bom saber
+
+- **Movimento**: quando a tela inteira se mexe (rolar, abrir apps), o celular manda vídeo H.264 feito pelo chip de vídeo dele. Parada, a tela volta a ir em blocos nítidos.
 - **Resolução**: a tela vai com no máximo 1920 pixels no lado maior (o limite dos codificadores de vídeo dos celulares).
-- **Sem som.**
+- **Telas protegidas**: apps de banco e campos de senha aparecem pretos (o Android esconde do compartilhamento). No Android 15, as notificações com códigos também.
+- **Wake-on-LAN**: o celular não pode ser ligado pela rede, mas pode ligar outros computadores da rede dele quando o servidor pede.
+- **Terminal**: abre o shell do Android, com as permissões do app (poucas).
 
 ## Bom saber
 

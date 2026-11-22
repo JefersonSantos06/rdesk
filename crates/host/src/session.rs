@@ -524,7 +524,7 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
             features.push(Feature::Audio);
         }
     }
-    if rev >= 2 && clipboard.is_some() {
+    if rev >= 2 && clipboard.is_some() && ClipboardSync::supports_images() {
         features.push(Feature::ClipboardImage);
     }
     // Restarting, the black screen, blocking the local keyboard, tunnels: full control only.
@@ -539,6 +539,19 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
             if crate::win::privacy::supported() {
                 features.push(Feature::Privacy);
             }
+        }
+    }
+    // A phone's system buttons, and typing as text where the host has no keyboard layout.
+    if rev >= 3 && full && screen {
+        let caps = crate::input::caps();
+        if caps.nav {
+            features.push(Feature::Nav);
+        }
+        if caps.text_keys {
+            features.push(Feature::TextKeys);
+        }
+        if caps.multitouch {
+            features.push(Feature::MultiTouch);
         }
     }
     write_msg(w, &ExtHost::Hello { rev: rev.min(EXT_REV), features }).await?;
@@ -674,6 +687,8 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
                         }
                     }
                 }
+                ExtClient::Nav(action) if full => injector_local.send(InputCmd::Nav(action)),
+                ExtClient::Touch(points) if full => injector_local.send(InputCmd::Touch(points)),
                 ExtClient::BlockInput { on } if full => {
                     let (rtx, rrx) = tokio::sync::oneshot::channel();
                     injector_local.send(InputCmd::BlockLocal(on, rtx));
