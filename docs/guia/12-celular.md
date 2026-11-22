@@ -113,7 +113,7 @@ Se o computador pede a própria senha ou chave além do servidor, o app oferece 
 
 ## Acessar este celular (Android, em teste)
 
-O celular Android também pode ser o acessado: quem se conectar a ele vê a tela dele. Por enquanto é **só visualização**: os toques de quem está do outro lado ainda não chegam ao celular.
+O celular Android também pode ser o acessado: quem se conectar a ele vê a tela dele e, com o **controle por toque** ligado, também toca, rola e digita nele.
 
 1. No app, em *Configurações → Este celular*, ligue **Permitir acesso a este celular**.
 2. O Android pergunta se pode mostrar notificações (é o aviso de que a tela está sendo compartilhada) e depois se o rdesk pode **gravar ou transmitir a tela inteira**. Toque em **Iniciar**.
@@ -130,9 +130,35 @@ O compartilhamento também acaba sozinho:
 
 Nesses casos, volte em *Este celular* e ligue de novo. O Android pede a permissão a cada vez.
 
+### Controle por toque
+
+O Android só deixa outro app tocar na tela por um **serviço de acessibilidade**, que você liga uma vez:
+
+1. Em *Este celular → Controle por toque*, toque em **Ligar** e depois em **Abrir ajustes**.
+2. Nos ajustes de acessibilidade do Android, toque em **rdesk: controle por toque**, ligue a chave e confirme.
+3. Se o Android disser que a configuração é **restrita** (acontece com apps instalados fora de uma loja, no Android 13 ou mais novo):
+   1. volte ao rdesk e toque em **Configuração restrita? Informações do app**;
+   2. toque em **⋮** e depois em **Permitir configurações restritas**;
+   3. repita os passos 1 e 2.
+
+O serviço só age enquanto o acesso estiver ligado e alguém estiver conectado. Ele não lê a tela, só o campo em que se digita. Forçar a parada do rdesk (em *Informações do app*) desliga o serviço, e aí é preciso ligar de novo.
+
+Do computador:
+
+| Do lado de lá | No celular |
+|---|---|
+| Botão esquerdo | Toca. Segurado, é o dedo encostado: arrasta, e parado vira toque longo |
+| Botão direito, Esc, botão Voltar do mouse | Voltar |
+| Botão do meio, tecla Windows | Início |
+| Tecla Menu, botão Avançar do mouse | Apps recentes |
+| Roda do mouse | Rola a lista sob o ponteiro |
+| Teclado | Digita no campo em foco; Backspace, Delete, Enter, setas, Home e End editam; Ctrl+A/C/X/V selecionam, copiam, recortam e colam |
+| Print Screen | Captura de tela; as teclas de volume mudam o volume |
+
+O teclado é lido como **americano** (o protocolo manda a posição da tecla, não a letra): acentos e o Ç do ABNT2 não saem. Para colar um texto com acentos, use *Enviar copiado* e Ctrl+V.
+
 Limitações desta fase:
 
-- **Só visualização**: os toques do outro lado ainda não chegam ao celular.
 - **Movimento**: quando a tela inteira se mexe (rolar, abrir apps), o celular manda vídeo H.264 feito pelo chip de vídeo dele. Parada, a tela volta a ir em blocos nítidos. O app do celular ainda recebe só os blocos.
 - **Resolução**: a tela vai com no máximo 1920 pixels no lado maior (o limite dos codificadores de vídeo dos celulares).
 - **Sem som.**

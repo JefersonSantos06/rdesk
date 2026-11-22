@@ -2,11 +2,15 @@ package dev.rdesk.rdesk
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
@@ -16,6 +20,10 @@ import io.flutter.plugin.common.MethodChannel
  *   screen capture consent (the whole screen, Android 14+), and starts [ScreenCaptureService];
  *   answers `true` once pictures can flow, `false` if the person said no.
  * - `stop` ends sharing; `isSharing` tells whether it is on.
+ * - `touchEnabled` tells whether touch control ([RemoteControlService]) is on in the system's
+ *   accessibility settings; `openTouchSettings` opens them (at rdesk's entry where the system
+ *   allows), `openAppInfo` opens the app's page (where Android 13+ hides "Allow restricted
+ *   settings" for apps installed outside a store).
  */
 class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHandler {
     companion object {
@@ -40,8 +48,45 @@ class ScreenShare(private val activity: Activity) : MethodChannel.MethodCallHand
                 result.success(null)
             }
             "isSharing" -> result.success(ScreenCaptureService.running)
+            "touchEnabled" -> result.success(touchEnabled())
+            "openTouchSettings" -> {
+                openTouchSettings()
+                result.success(null)
+            }
+            "openAppInfo" -> {
+                activity.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null)),
+                )
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
+    }
+
+    private fun touchService() = ComponentName(activity, RemoteControlService::class.java)
+
+    private fun touchEnabled(): Boolean {
+        val on = Settings.Secure.getString(activity.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+        val me = touchService()
+        return on.split(':').any { ComponentName.unflattenFromString(it) == me }
+    }
+
+    private fun openTouchSettings() {
+        // Android 11+ can open rdesk's own entry; elsewhere, the accessibility list.
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                activity.startActivity(
+                    Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
+                        .putExtra(Intent.EXTRA_COMPONENT_NAME, touchService().flattenToString()),
+                )
+                return
+            } catch (e: ActivityNotFoundException) {
+                // Not on this phone: the list below.
+            } catch (e: SecurityException) {
+                // Not allowed here: the list below.
+            }
+        }
+        activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
     private fun askNotifications() {

@@ -3,13 +3,15 @@
 //! * Windows: `SendInput` with scan codes (layout-independent) and absolute
 //!   coordinates over the whole virtual desktop.
 //! * macOS / Linux X11: `enigo` with raw key codes from [`crate::keymap`].
+//! * One the program around the host brings ([`set_input_backend`]: the phone app's
+//!   accessibility service on Android).
 //! * `RDESK_FAKE_INPUT=1`: log only (tests, headless machines).
 //!
 //! The thread remembers which keys and buttons are held so they can all be
 //! released when a session ends: a lost key-up must never leave Ctrl stuck.
 
 use std::collections::BTreeSet;
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -156,9 +158,20 @@ impl Reporter {
     }
 }
 
+static BACKEND: OnceLock<fn() -> Box<dyn Backend>> = OnceLock::new();
+
+/// Inject input through the program the host runs in (the phone app) instead of this system's
+/// own way. Set once, before the host starts; `make` runs on the input thread.
+pub fn set_input_backend(make: fn() -> Box<dyn Backend>) {
+    let _ = BACKEND.set(make);
+}
+
 fn make_backend(fake: bool) -> Box<dyn Backend> {
     if fake {
         return Box::new(LogBackend);
+    }
+    if let Some(make) = BACKEND.get() {
+        return make();
     }
     match platform_backend() {
         Ok(b) => b,

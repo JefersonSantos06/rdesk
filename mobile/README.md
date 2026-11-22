@@ -1,6 +1,6 @@
 # rdesk no celular (Android e iPhone)
 
-O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (o iOS não permite). No Android, o celular também pode ser acessado, em **fase de teste** (*Configurações → Este celular*): o host do rdesk roda dentro do app e envia a tela, capturada pela MediaProjection num serviço em primeiro plano (`ScreenCaptureService.kt` → JNI → `crates/mobile/src/screen.rs`). O movimento vai em H.264 feito pelo codificador de hardware do celular (MediaCodec, `crates/host/src/h264.rs`). Por enquanto é só visualização; os toques (serviço de acessibilidade) vêm na próxima fase.
+O app do celular **acessa** computadores. No iPhone ele não pode ser acessado (o iOS não permite). No Android, o celular também pode ser acessado, em **fase de teste** (*Configurações → Este celular*): o host do rdesk roda dentro do app e envia a tela, capturada pela MediaProjection num serviço em primeiro plano (`ScreenCaptureService.kt` → JNI → `crates/mobile/src/screen.rs`). O movimento vai em H.264 feito pelo codificador de hardware do celular (MediaCodec, `crates/host/src/h264.rs`). Os toques e a digitação de quem está do outro lado passam por um serviço de acessibilidade que a pessoa liga (`RemoteControlService.kt`, com os comandos vindos de `crates/mobile/src/touch.rs`).
 
 - **Flutter** desenha a interface (`lib/`).
 - **Rust** faz todo o resto, com o mesmo código do app desktop: conexão iroh/QUIC, login no servidor, autenticação no computador, decodificação da imagem, arquivos e terminal.

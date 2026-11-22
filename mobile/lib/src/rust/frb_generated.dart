@@ -2507,8 +2507,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   HostView dco_decode_host_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return HostView(
       running: dco_decode_bool(arr[0]),
       state: dco_decode_String(arr[1]),
@@ -2518,8 +2518,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       registrationError: dco_decode_opt_String(arr[5]),
       sessionClient: dco_decode_opt_String(arr[6]),
       sharingScreen: dco_decode_bool(arr[7]),
-      hasPassword: dco_decode_bool(arr[8]),
-      events: dco_decode_list_String(arr[9]),
+      touchControl: dco_decode_bool(arr[8]),
+      hasPassword: dco_decode_bool(arr[9]),
+      events: dco_decode_list_String(arr[10]),
     );
   }
 
@@ -3041,6 +3042,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_registrationError = sse_decode_opt_String(deserializer);
     var var_sessionClient = sse_decode_opt_String(deserializer);
     var var_sharingScreen = sse_decode_bool(deserializer);
+    var var_touchControl = sse_decode_bool(deserializer);
     var var_hasPassword = sse_decode_bool(deserializer);
     var var_events = sse_decode_list_String(deserializer);
     return HostView(
@@ -3052,6 +3054,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       registrationError: var_registrationError,
       sessionClient: var_sessionClient,
       sharingScreen: var_sharingScreen,
+      touchControl: var_touchControl,
       hasPassword: var_hasPassword,
       events: var_events,
     );
@@ -3673,6 +3676,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.registrationError, serializer);
     sse_encode_opt_String(self.sessionClient, serializer);
     sse_encode_bool(self.sharingScreen, serializer);
+    sse_encode_bool(self.touchControl, serializer);
     sse_encode_bool(self.hasPassword, serializer);
     sse_encode_list_String(self.events, serializer);
   }

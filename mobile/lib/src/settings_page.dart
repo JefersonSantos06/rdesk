@@ -156,7 +156,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ListTile(
             leading: const Icon(Icons.phonelink_ring_outlined),
             title: Text(t('Allow access to this phone', 'Permitir acesso a este celular')),
-            subtitle: Text(t('Share its screen (view only)', 'Compartilhar a tela (só visualização)')),
+            subtitle: Text(t('Share its screen and take touches', 'Compartilhar a tela e receber toques')),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ThisPhonePage())),
           ),
         ],

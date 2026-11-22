@@ -2449,6 +2449,7 @@ impl SseDecode for crate::api::host::HostView {
         let mut var_registrationError = <Option<String>>::sse_decode(deserializer);
         let mut var_sessionClient = <Option<String>>::sse_decode(deserializer);
         let mut var_sharingScreen = <bool>::sse_decode(deserializer);
+        let mut var_touchControl = <bool>::sse_decode(deserializer);
         let mut var_hasPassword = <bool>::sse_decode(deserializer);
         let mut var_events = <Vec<String>>::sse_decode(deserializer);
         return crate::api::host::HostView {
@@ -2460,6 +2461,7 @@ impl SseDecode for crate::api::host::HostView {
             registration_error: var_registrationError,
             session_client: var_sessionClient,
             sharing_screen: var_sharingScreen,
+            touch_control: var_touchControl,
             has_password: var_hasPassword,
             events: var_events,
         };
@@ -3081,6 +3083,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::host::HostView {
             self.registration_error.into_into_dart().into_dart(),
             self.session_client.into_into_dart().into_dart(),
             self.sharing_screen.into_into_dart().into_dart(),
+            self.touch_control.into_into_dart().into_dart(),
             self.has_password.into_into_dart().into_dart(),
             self.events.into_into_dart().into_dart(),
         ]
@@ -3443,6 +3446,7 @@ impl SseEncode for crate::api::host::HostView {
         <Option<String>>::sse_encode(self.registration_error, serializer);
         <Option<String>>::sse_encode(self.session_client, serializer);
         <bool>::sse_encode(self.sharing_screen, serializer);
+        <bool>::sse_encode(self.touch_control, serializer);
         <bool>::sse_encode(self.has_password, serializer);
         <Vec<String>>::sse_encode(self.events, serializer);
     }

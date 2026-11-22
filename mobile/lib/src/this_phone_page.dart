@@ -8,8 +8,8 @@ import 'rust/api/app.dart' as app;
 import 'rust/api/host.dart' as api;
 import 'screen_share.dart';
 
-/// This phone as a host: other devices connect to it and see its screen. Touches from the
-/// other side are only logged for now (view only).
+/// This phone as a host: other devices connect to it and see its screen; with touch control on
+/// (an accessibility service the person turns on in Android's settings) they also touch and type.
 class ThisPhonePage extends StatefulWidget {
   const ThisPhonePage({super.key});
 
@@ -17,16 +17,18 @@ class ThisPhonePage extends StatefulWidget {
   State<ThisPhonePage> createState() => _ThisPhonePageState();
 }
 
-class _ThisPhonePageState extends State<ThisPhonePage> {
+class _ThisPhonePageState extends State<ThisPhonePage> with WidgetsBindingObserver {
   api.HostView? _view;
   StreamSubscription<api.HostView>? _sub;
   bool _signedIn = false;
   bool _busy = false;
+  bool _touch = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _view = api.hostStatus();
     _sub = api.watchHost().listen((v) {
       if (mounted) setState(() => _view = v);
@@ -34,12 +36,54 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
     app.account().then((a) {
       if (mounted) setState(() => _signedIn = a != null);
     });
+    _checkTouch();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
     super.dispose();
+  }
+
+  /// Back from Android's settings: touch control may have changed.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkTouch();
+  }
+
+  Future<void> _checkTouch() async {
+    final on = await ScreenShare.touchEnabled();
+    if (mounted) setState(() => _touch = on);
+  }
+
+  /// Say plainly what touch control allows, then open Android's settings to turn it on.
+  Future<void> _turnOnTouch() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(t('Turn on touch control?', 'Ligar o controle por toque?')),
+        content: Text(t(
+          'While access is on, whoever is connected with rdesk can then touch, scroll and type on this phone, '
+              'and use Back, Home and Recents. Android allows this only through an accessibility service, which you '
+              'turn on in its settings: find "rdesk: touch control" and turn it on.\n\n'
+              'rdesk uses it for nothing else: it reads no screen content except the field being typed into.\n\n'
+              'If Android says the setting is restricted (rdesk did not come from a store), open App info, '
+              'tap ⋮ and "Allow restricted settings", then try again.',
+          'Enquanto o acesso estiver ligado, quem se conectar pelo rdesk poderá tocar, rolar e digitar neste celular, '
+              'e usar Voltar, Início e Recentes. O Android só permite isso por um serviço de acessibilidade, que você '
+              'liga nos ajustes dele: procure "rdesk: controle por toque" e ligue.\n\n'
+              'O rdesk não usa isso para mais nada: não lê o conteúdo da tela além do campo em que se digita.\n\n'
+              'Se o Android disser que a configuração é restrita (o rdesk não veio de uma loja), abra Informações do app, '
+              'toque em ⋮ e "Permitir configurações restritas", e tente de novo.',
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t('Not now', 'Agora não'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t('Open settings', 'Abrir ajustes'))),
+        ],
+      ),
+    );
+    if (go == true) await ScreenShare.openTouchSettings();
   }
 
   /// Run `f`, show its error, and refresh the status.
@@ -130,8 +174,8 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Text(
             t(
-              'Whoever connects sees this phone\'s screen while access is on. View only for now: their touches do not reach the phone yet. Android stops sharing when the screen locks.',
-              'Quem se conectar vê a tela deste celular enquanto o acesso estiver ligado. Por enquanto só visualização: os toques de lá ainda não chegam ao celular. O Android para o compartilhamento quando a tela bloqueia.',
+              'Whoever connects sees this phone\'s screen while access is on, and with touch control on they also touch and type. Android stops sharing when the screen locks.',
+              'Quem se conectar vê a tela deste celular enquanto o acesso estiver ligado, e com o controle por toque ligado também toca e digita. O Android para o compartilhamento quando a tela bloqueia.',
             ),
             style: theme.textTheme.bodySmall,
           ),
@@ -166,6 +210,30 @@ class _ThisPhonePageState extends State<ThisPhonePage> {
                 Clipboard.setData(ClipboardData(text: v.hostId!));
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t('ID copied.', 'ID copiado.'))));
               },
+            ),
+          ),
+        _Section(t('Touch control', 'Controle por toque')),
+        ListTile(
+          leading: Icon(_touch ? Icons.touch_app : Icons.do_not_touch_outlined),
+          title: Text(_touch ? t('On', 'Ligado') : t('Off: view only', 'Desligado: só visualização')),
+          subtitle: Text(_touch
+              ? t('Mouse: left button touches (hold to drag), right goes back, middle goes home. Keyboard: types into the focused field; Esc goes back, the Windows key goes home.',
+                  'Mouse: o botão esquerdo toca (segure para arrastar), o direito volta, o do meio vai ao início. Teclado: digita no campo em foco; Esc volta, a tecla Windows vai ao início.')
+              : t('Turn it on in Android\'s accessibility settings', 'Ligue nos ajustes de acessibilidade do Android')),
+          isThreeLine: _touch,
+          trailing: _touch
+              ? TextButton(onPressed: ScreenShare.openTouchSettings, child: Text(t('Settings', 'Ajustes')))
+              : FilledButton.tonal(onPressed: _turnOnTouch, child: Text(t('Turn on', 'Ligar'))),
+        ),
+        if (!_touch)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: TextButton(
+                onPressed: ScreenShare.openAppInfo,
+                child: Text(t('Restricted setting? App info', 'Configuração restrita? Informações do app')),
+              ),
             ),
           ),
         _Section(t('Server', 'Servidor')),

@@ -73,6 +73,9 @@ class HostView {
 
   /// The phone's screen is being shared (Android); otherwise the test picture goes out.
   final bool sharingScreen;
+
+  /// The accessibility service is on: the other side can touch and type.
+  final bool touchControl;
   final bool hasPassword;
 
   /// Newest last.
@@ -87,6 +90,7 @@ class HostView {
     this.registrationError,
     this.sessionClient,
     required this.sharingScreen,
+    required this.touchControl,
     required this.hasPassword,
     required this.events,
   });
@@ -104,6 +108,7 @@ class HostView {
       registrationError.hashCode ^
       sessionClient.hashCode ^
       sharingScreen.hashCode ^
+      touchControl.hashCode ^
       hasPassword.hashCode ^
       events.hashCode;
 
@@ -120,6 +125,7 @@ class HostView {
           registrationError == other.registrationError &&
           sessionClient == other.sessionClient &&
           sharingScreen == other.sharingScreen &&
+          touchControl == other.touchControl &&
           hasPassword == other.hasPassword &&
           events == other.events;
 }

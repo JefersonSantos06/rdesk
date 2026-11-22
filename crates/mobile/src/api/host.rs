@@ -1,6 +1,7 @@
 //! This phone as a host: other devices connect to it. On Android it shares the screen (the
-//! app's MediaProjection, see [`crate::screen`]); touches from the other side are only
-//! logged for now. Elsewhere (and without a shared screen) it sends a test picture.
+//! app's MediaProjection, see [`crate::screen`]) and, with the app's accessibility service on,
+//! takes touches and typing from the other side ([`crate::touch`]). Elsewhere (and without a
+//! shared screen) it sends a test picture and only logs the input.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -31,6 +32,8 @@ pub struct HostView {
     pub session_client: Option<String>,
     /// The phone's screen is being shared (Android); otherwise the test picture goes out.
     pub sharing_screen: bool,
+    /// The accessibility service is on: the other side can touch and type.
+    pub touch_control: bool,
     pub has_password: bool,
     /// Newest last.
     pub events: Vec<String>,
@@ -80,6 +83,7 @@ fn view(h: &Host) -> HostView {
         registration_error,
         session_client: st.session.map(|s| s.client),
         sharing_screen: crate::screen::sharing(),
+        touch_control: crate::touch::connected(),
         has_password: admin::has_password(),
         events: st.events.into_iter().map(|e| e.text).collect(),
     }
@@ -110,17 +114,18 @@ pub fn start_host() -> Result<()> {
     let screen = crate::screen::sharing();
     if screen {
         rdesk_host::capture::set_screen_source(|| Box::new(crate::screen::PhoneScreen));
+        rdesk_host::input::set_input_backend(|| Box::<crate::touch::PhoneInput>::default());
     }
-    // Touches are not injected yet: they are only logged.
-    let opts = RunOpts { fake_capture: !screen, fake_input: true, ..Default::default() };
+    // Input lands on the shared picture, so without it there is nothing to touch.
+    let opts = RunOpts { fake_capture: !screen, fake_input: !screen, ..Default::default() };
     // Started outside the lock: the reporter's first update reads the status (and the lock).
     let started = HostHandle::start(opts, rt().handle(), h.reporter.clone());
     *h.handle.lock().unwrap() = Some(started);
     h.reporter.event(
         if screen {
             rdesk_common::t!(
-                "Sharing this phone's screen (view only: touches are not passed on yet)",
-                "Compartilhando a tela deste celular (só visualização: os toques ainda não são repassados)"
+                "Sharing this phone's screen (touches from the other side need touch control on)",
+                "Compartilhando a tela deste celular (os toques de lá precisam do controle por toque ligado)"
             )
         } else {
             rdesk_common::t!("Test picture: the screen is not shared", "Imagem de teste: a tela não está compartilhada")

@@ -548,6 +548,10 @@ struct ConnectArgs {
     /// With --headless: write the last picture to this .ppm file.
     #[arg(long)]
     dump: Option<PathBuf>,
+    /// With --headless: mouse and keyboard steps to play once the picture arrives, separated
+    /// by `;` (e.g. "click 0.5 0.5; text hello; key Enter"; see `rdesk_client::headless::Step`).
+    #[arg(long)]
+    input: Option<String>,
     /// Open with the file-transfer panel showing.
     #[arg(long)]
     files: bool,
@@ -1742,6 +1746,7 @@ fn connect(a: ConnectArgs) -> Result<()> {
                 frames: a.frames,
                 timeout: Duration::from_secs(a.timeout),
                 dump: a.dump,
+                input: a.input.as_deref().map(rdesk_client::headless::parse_input).transpose()?.unwrap_or_default(),
             },
         );
     }

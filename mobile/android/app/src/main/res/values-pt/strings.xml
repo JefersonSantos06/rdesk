@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="touch_control_label">rdesk: controle por toque</string>
+    <string name="touch_control_summary">Deixa quem estiver conectado pelo rdesk tocar e digitar neste celular</string>
+    <string name="touch_control_description">Enquanto o acesso a este celular estiver ligado no rdesk, quem se conectar vê a tela; com isto ligado, o mouse e o teclado dessa pessoa também tocam, rolam e digitam aqui (e usam Voltar, Início e Recentes). O rdesk não usa isto para mais nada: não lê o conteúdo da tela além do campo em que se digita, e não guarda nada. Desligue o acesso no rdesk, ou isto aqui, para parar.</string>
+</resources>

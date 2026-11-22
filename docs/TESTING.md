@@ -119,6 +119,10 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Recusar a captura: a chave continua desligada e a página diz por quê.
 - [ ] Do computador (`rdesk connect <ID>@<ip>` com a senha do celular, ou pelo servidor depois de *Adicionar ao meu servidor*): a imagem é a tela do celular, em pé; a página mostra quem está conectado.
 - [ ] Girar o celular: a imagem passa a deitada, sem faixas pretas.
+- [ ] *Controle por toque → Ligar → Abrir ajustes*: a lista de acessibilidade abre com *rdesk: controle por toque*; ligado ali, a página mostra *Ligado* ao voltar. Instalado pelo APK no Android 13+: a chave vem restrita até *Informações do app → ⋮ → Permitir configurações restritas*.
+- [ ] Do computador, com o controle ligado (`rdesk connect … --headless --input "…"` serve): clicar abre o que está sob o ponteiro; arrastar de baixo para cima abre a gaveta de apps; segurar sobre um ícone mostra o menu dele; a roda rola a lista sem arremessar; botão direito / Esc voltam; tecla Windows vai ao início.
+- [ ] Digitar num campo (Shift, Backspace no meio): o texto sai exatamente como digitado; Ctrl+V cola; Enter envia uma busca.
+- [ ] Sem o controle ligado: a imagem continua, e o lado de lá vê o aviso de que o controle por toque está desligado.
 - [ ] Rolar uma lista sem parar (do computador): a imagem acompanha em vídeo (bem menos kbit/s que em blocos) com as cores certas; ao parar, o texto fica nítido em ~0,3 s.
 - [ ] **Parar** na notificação: o ícone some, o host para e a chave volta a desligada.
 - [ ] Bloquear a tela (celular com PIN): o compartilhamento acaba, o host para e a página pede para ligar de novo.

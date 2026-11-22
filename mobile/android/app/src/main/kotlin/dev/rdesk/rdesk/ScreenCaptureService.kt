@@ -53,6 +53,15 @@ class ScreenCaptureService : Service() {
         var running = false
             private set
 
+        /** The shared picture's size: touches from the other side come in its pixels. */
+        @Volatile
+        var sharedWidth = 0
+            private set
+
+        @Volatile
+        var sharedHeight = 0
+            private set
+
         /** Told (on the main thread) whether sharing started: `true` once pictures can flow. */
         var onStarted: ((Boolean) -> Unit)? = null
     }
@@ -133,6 +142,8 @@ class ScreenCaptureService : Service() {
         )
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, h)
         running = true
+        sharedWidth = width
+        sharedHeight = height
         ScreenBridge.started(width, height)
         answer(true)
     }
@@ -230,6 +241,8 @@ class ScreenCaptureService : Service() {
         display?.resize(width, height, dpi)
         display?.surface = r.surface
         old?.close()
+        sharedWidth = width
+        sharedHeight = height
         ScreenBridge.started(width, height)
     }
 

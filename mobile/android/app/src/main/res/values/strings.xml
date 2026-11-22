@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="touch_control_label">rdesk: touch control</string>
+    <string name="touch_control_summary">Lets whoever is connected with rdesk touch and type on this phone</string>
+    <string name="touch_control_description">While access to this phone is on in rdesk, whoever is connected sees the screen; with this on, their mouse and keyboard also touch, scroll and type here (the system actions Back, Home and Recents too). rdesk uses it for nothing else: it reads no screen content except the field being typed into, and keeps nothing. Turn access off in rdesk, or this off here, to stop it.</string>
+</resources>
