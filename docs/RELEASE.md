@@ -9,14 +9,14 @@ Cada versão é um GitHub Release com os binários e um `release.json` assinado.
 | `rdesk-<versão>-windows-x86_64.zip` | O app (cliente + host) para Windows |
 | `rdesk-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O app para Linux (PC e Raspberry/Orange Pi) |
 | `rdesk_<versão>_amd64.deb`, `…_arm64.deb` | O app como pacote Debian/Ubuntu/Raspberry Pi OS |
-| `rdesk-<versão>-macos-aarch64.tar.gz` | O `rdesk.app` para Mac com Apple Silicon (assinado com o certificado próprio do rdesk, não o da Apple: na primeira vez, botão direito → *Abrir*) |
+| `rdesk-<versão>-macos-aarch64.tar.gz` | O `rdesk.app` para Mac com Apple Silicon (assinado com o certificado próprio do rdesk, não o da Apple: na primeira vez, o macOS 15 em diante só abre por *Ajustes → Privacidade e Segurança → Abrir mesmo assim*) |
 | `rdesk-<versão>-android.apk` | O app do celular para Android (assinado com a chave de release do Android) |
 | `rdesk-<versão>-ios.ipa` | O app para iPhone, **sem assinatura**: o Sideloadly ou o AltStore assinam com o seu Apple ID ao instalar ([mobile/README.md](../mobile/README.md)) |
 | `rdesk-server-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O servidor, com a unit do systemd |
 | `release.json` | Versão, versão do protocolo, SHA-256 e tamanho de cada arquivo |
 | `release.json.sig` | Assinatura Ed25519 do `release.json` (hex) |
 
-O app para Linux é compilado no Ubuntu 24.04 (precisa do PipeWire 1.x, para a captura no Wayland) e roda no Ubuntu 24.04 ou mais novo, no Debian 13 e no Raspberry Pi OS atual (trixie); no Debian 12 e no Ubuntu 22.04, compile a partir do código. O servidor é compilado no Ubuntu 22.04 e também roda em VPS com Debian 12. O app para Mac (Apple Silicon, macOS 11+) não tem assinatura da Apple: na primeira vez, botão direito → *Abrir* (ou `xattr -dr com.apple.quarantine rdesk.app`); como host, o macOS pede Gravação de Tela e Acessibilidade. O instalador do Windows (Inno Setup) entra na fase 9.
+O app para Linux é compilado no Ubuntu 24.04 (precisa do PipeWire 1.x, para a captura no Wayland) e roda no Ubuntu 24.04 ou mais novo, no Debian 13 e no Raspberry Pi OS atual (trixie); no Debian 12 e no Ubuntu 22.04, compile a partir do código. O servidor é compilado no Ubuntu 22.04 e também roda em VPS com Debian 12. O app para Mac (Apple Silicon, macOS 11+) não tem assinatura da Apple: na primeira vez, botão direito → *Abrir* até o macOS 14, e *Ajustes → Privacidade e Segurança → Abrir mesmo assim* do 15 em diante (ou `xattr -dr com.apple.quarantine rdesk.app`); como host, o macOS pede Gravação de Tela e Acessibilidade. O instalador do Windows (Inno Setup) entra na fase 9.
 
 ## Configuração (uma vez)
 
