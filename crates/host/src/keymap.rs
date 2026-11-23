@@ -86,7 +86,8 @@ pub fn windows(key: Key) -> Option<WinKey> {
         F8 => s(0x42),
         F9 => s(0x43),
         F10 => s(0x44),
-        NumLock => e(0x45),
+        // Not extended: with the E0 prefix Windows takes it for no key at all (Pause is E1 1D 45).
+        NumLock => s(0x45),
         ScrollLock => s(0x46),
         Numpad7 => s(0x47),
         Numpad8 => s(0x48),
@@ -470,6 +471,12 @@ mod tests {
         for &k in Key::ALL {
             assert_eq!(macos(k).is_none(), MAC_UNMAPPED.contains(&k), "{k:?}");
         }
+    }
+
+    /// Real keyboards send Num Lock as a plain 0x45; an extended one toggles nothing.
+    #[test]
+    fn num_lock_is_not_extended() {
+        assert_eq!(windows(Key::NumLock), Some(WinKey::Scan { code: 0x45, ext: false }));
     }
 
     #[test]

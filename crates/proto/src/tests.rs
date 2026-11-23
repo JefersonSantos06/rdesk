@@ -145,7 +145,8 @@ fn extensions_roundtrip() {
         ExtClient::Hello { rev: EXT_REV },
         ExtClient::MaxSize { width: 1280, height: 720 },
         ExtClient::Cursor { on: true },
-        ExtClient::Locks { caps: true },
+        ExtClient::Locks { caps: true, num: Some(false) },
+        ExtClient::Locks { caps: false, num: None },
     ] {
         assert_eq!(roundtrip(&m), m);
     }

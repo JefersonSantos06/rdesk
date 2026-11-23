@@ -557,7 +557,7 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
             features.push(Feature::MultiTouch);
         }
     }
-    // Caps Lock as the client's keyboard has it.
+    // Caps Lock and Num Lock as the client's keyboard has them.
     if rev >= 4 && input && crate::input::locks_supported() {
         features.push(Feature::LockKeys);
     }
@@ -696,7 +696,7 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
                 }
                 ExtClient::Nav(action) if full => injector_local.send(InputCmd::Nav(action)),
                 ExtClient::Touch(points) if full => injector_local.send(InputCmd::Touch(points)),
-                ExtClient::Locks { caps } if input => injector_local.send(InputCmd::Locks { caps }),
+                ExtClient::Locks { caps, num } if input => injector_local.send(InputCmd::Locks { caps, num }),
                 ExtClient::BlockInput { on } if full => {
                     let (rtx, rrx) = tokio::sync::oneshot::channel();
                     injector_local.send(InputCmd::BlockLocal(on, rtx));

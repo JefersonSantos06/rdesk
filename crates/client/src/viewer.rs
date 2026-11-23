@@ -37,8 +37,8 @@ use crate::ui::{self, Tone, icons, size, space};
 const OFFLINE_GRACE: Duration = Duration::from_millis(1500);
 /// After this long, say the computer may be off.
 const OFFLINE_LONG: Duration = Duration::from_secs(20);
-/// How often Caps Lock here is looked at while the window has the keyboard.
-const CAPS_LOCK_EVERY: Duration = Duration::from_millis(150);
+/// How often the lock keys here are looked at while the window has the keyboard.
+const LOCKS_EVERY: Duration = Duration::from_millis(150);
 /// The side panel's width: what it starts with and how narrow it can be dragged. It can be
 /// dragged wide until the picture next to it is [`PICTURE_MIN`] wide (a terminal wants room).
 const PANEL_DEFAULT: f32 = 380.0;
@@ -342,9 +342,9 @@ struct App {
     connected: bool,
     /// The window has the keyboard.
     window_focused: bool,
-    /// Caps Lock here when last looked at ([`keys::caps_lock`]), and when that was.
-    caps_here: Option<bool>,
-    caps_checked: Instant,
+    /// The lock keys here when last looked at ([`keys::locks`]), and when that was.
+    locks_here: Option<keys::Locks>,
+    locks_checked: Instant,
     offline: Option<Offline>,
     confirm: Option<Confirm>,
     /// Close the window on the next turn of the event loop.
@@ -425,8 +425,8 @@ impl App {
             terminal_on_connect: false,
             connected: false,
             window_focused: true,
-            caps_here: None,
-            caps_checked: Instant::now(),
+            locks_here: None,
+            locks_checked: Instant::now(),
             offline: None,
             confirm: None,
             exit_requested: false,
@@ -460,30 +460,36 @@ impl App {
         }
     }
 
-    /// Caps Lock there follows Caps Lock here. A host that knows its own gets the state
-    /// ([`ExtClient::Locks`]): at the start (`force`), when the window gets the keyboard back
-    /// (`force`) and when it changes. An older one gets a press when it changes here, from a
-    /// Mac (whose Caps Lock never reaches the window as a key; elsewhere the key goes as is).
-    fn sync_caps_lock(&mut self, force: bool) {
-        self.caps_checked = Instant::now();
-        let Some(now) = keys::caps_lock() else { return };
-        let changed = self.caps_here.is_some_and(|c| c != now);
-        self.caps_here = Some(now);
+    /// Caps Lock and Num Lock there follow the ones here. A host that knows its own gets the
+    /// state ([`ExtClient::Locks`]): at the start (`force`), when the window gets the keyboard
+    /// back (`force`) and when it changes. An older one gets a Caps Lock press when it changes
+    /// here, from a Mac (whose Caps Lock never reaches the window as a key; elsewhere the keys
+    /// go as they are).
+    fn sync_locks(&mut self, force: bool) {
+        self.locks_checked = Instant::now();
+        let Some(now) = keys::locks() else { return };
+        let before = self.locks_here.replace(now);
         if !self.access.input || !self.connected || !self.screen() {
             return;
         }
         if self.features.contains(&Feature::LockKeys) {
-            if force || changed {
-                self.send(Cmd::Ext(rdesk_proto::ExtClient::Locks { caps: now }));
+            if force || before.is_some_and(|b| b != now) {
+                self.send(Cmd::Ext(rdesk_proto::ExtClient::Locks { caps: now.caps, num: now.num }));
             }
-        } else if cfg!(target_os = "macos") && changed && !force {
+        } else if cfg!(target_os = "macos") && !force && before.is_some_and(|b| b.caps != now.caps) {
             self.combo(&[rdesk_proto::Key::CapsLock]);
         }
     }
 
-    /// Caps Lock goes as its state ([`Self::sync_caps_lock`]), not as a key.
-    fn caps_lock_by_state(&self) -> bool {
-        self.features.contains(&Feature::LockKeys) && keys::caps_lock().is_some()
+    /// This lock key goes as its state ([`Self::sync_locks`]), not as a key.
+    fn lock_by_state(&self, key: Key) -> bool {
+        let Some(here) = keys::locks() else { return false };
+        self.features.contains(&Feature::LockKeys)
+            && match key {
+                Key::CapsLock => true,
+                Key::NumLock => here.num.is_some(),
+                _ => false,
+            }
     }
 
     fn host_name(&self) -> String {
@@ -1365,6 +1371,17 @@ impl App {
             self.combo(&[CapsLock]);
             ui.close();
         }
+        // A Mac laptop has no Num Lock (on a Mac keypad, Clear is it).
+        if item(ui, "Num Lock")
+            .on_hover_text(t!(
+                "Turns Num Lock on or off on that computer (on: the keypad types digits)",
+                "Liga ou desliga o Num Lock nesse computador (ligado: o teclado numérico digita números)"
+            ))
+            .clicked()
+        {
+            self.combo(&[NumLock]);
+            ui.close();
+        }
         ui.separator();
         ui::row(
             ui,
@@ -2117,7 +2134,7 @@ impl App {
     fn handle_key(&self, event: &winit::event::KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else { return false };
         let Some(mut key) = keys::map(code) else { return false };
-        if key == Key::CapsLock && self.caps_lock_by_state() {
+        if self.lock_by_state(key) {
             // Looked at again in a moment (`about_to_wait`), with the toggle already applied.
             return true;
         }
@@ -2282,7 +2299,7 @@ impl ApplicationHandler<UiEvent> for App {
             // picture is current in memory: just draw it.
             WindowEvent::Focused(true) => {
                 self.window_focused = true;
-                self.sync_caps_lock(true);
+                self.sync_locks(true);
                 self.request_redraw();
             }
             WindowEvent::Occluded(false) => self.request_redraw(),
@@ -2361,7 +2378,7 @@ impl ApplicationHandler<UiEvent> for App {
         match event {
             UiEvent::Extensions(f) => {
                 self.features = f;
-                self.sync_caps_lock(true);
+                self.sync_locks(true);
             }
             UiEvent::FrameUpdated | UiEvent::Wake | UiEvent::Cursor { .. } | UiEvent::Clipboard(_) => {}
             UiEvent::Quality { fps, jpeg_quality, scale_pct } => {
@@ -2544,19 +2561,19 @@ impl ApplicationHandler<UiEvent> for App {
             self.input(InputEvent::MouseMove { x: p.0, y: p.1 });
         }
         // No event says Caps Lock changed on a Mac: look while the window has the keyboard.
-        let caps_watch = self.window_focused && self.connected && self.screen() && keys::caps_lock().is_some();
-        if caps_watch && self.caps_checked.elapsed() >= CAPS_LOCK_EVERY {
-            self.sync_caps_lock(false);
+        let locks_watch = self.window_focused && self.connected && self.screen() && keys::locks().is_some();
+        if locks_watch && self.locks_checked.elapsed() >= LOCKS_EVERY {
+            self.sync_locks(false);
         }
-        let caps_next = caps_watch.then(|| self.caps_checked + CAPS_LOCK_EVERY);
+        let locks_next = locks_watch.then(|| self.locks_checked + LOCKS_EVERY);
         match self.next_repaint {
             Some(t) if t <= Instant::now() => {
                 self.next_repaint = None;
                 self.request_redraw();
-                el.set_control_flow(caps_next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+                el.set_control_flow(locks_next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
             }
-            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(caps_next.map_or(t, |c| c.min(t)))),
-            None => el.set_control_flow(caps_next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)),
+            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(locks_next.map_or(t, |c| c.min(t)))),
+            None => el.set_control_flow(locks_next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)),
         }
     }
 }

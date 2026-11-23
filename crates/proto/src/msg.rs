@@ -428,10 +428,12 @@ pub enum ExtClient {
     /// fingers on a phone.
     Touch(Vec<TouchPoint>),
     /// The lock keys as they are on the client's keyboard (input only, [`Feature::LockKeys`]):
-    /// the host presses Caps Lock where its own differs. Sent when the session starts, when
-    /// the window gets the keyboard back and whenever they change here, instead of the
-    /// Caps Lock key itself (a Mac's never reaches the window as a key).
-    Locks { caps: bool },
+    /// the host presses Caps Lock or Num Lock where its own differs. Sent when the session
+    /// starts, when the window gets the keyboard back and whenever they change here, instead
+    /// of those keys themselves (a Mac's Caps Lock never reaches the window as a key).
+    /// `num: None`: this keyboard has no Num Lock state (a Mac's keypad always types digits),
+    /// so the host's stays as it is.
+    Locks { caps: bool, num: Option<bool> },
 }
 
 /// One finger in [`ExtClient::Touch`]: the same `id` from when it touches until it lifts.
@@ -528,7 +530,7 @@ pub enum Feature {
     TextKeys,
     /// Fingers on a phone's screen ([`ExtClient::Touch`]).
     MultiTouch,
-    /// The host knows its Caps Lock and matches the client's ([`ExtClient::Locks`]).
+    /// The host knows its Caps Lock and Num Lock and matches the client's ([`ExtClient::Locks`]).
     LockKeys,
 }
 

@@ -39,10 +39,11 @@ pub enum InputCmd {
     Nav(NavAction),
     /// The fingers on a phone's screen now ([`Backend::touch`]).
     Touch(Vec<TouchPoint>),
-    /// Caps Lock as it is on the client's keyboard: pressed here if this computer's differs
-    /// ([`rdesk_proto::ExtClient::Locks`]).
+    /// Caps Lock and Num Lock as they are on the client's keyboard: each pressed here if this
+    /// computer's differs (`num: None`: left alone) ([`rdesk_proto::ExtClient::Locks`]).
     Locks {
         caps: bool,
+        num: Option<bool>,
     },
 }
 
@@ -243,9 +244,13 @@ pub trait Backend {
     fn caps_lock(&mut self) -> Option<bool> {
         None
     }
+    /// Whether Num Lock is on here, if this backend can tell.
+    fn num_lock(&mut self) -> Option<bool> {
+        None
+    }
 }
 
-/// Whether this computer's input can tell (and so match) its Caps Lock
+/// Whether this computer's input can tell (and so match) its Caps Lock and Num Lock
 /// ([`rdesk_proto::Feature::LockKeys`]): Windows and X11. Not a phone's, Wayland's (the portal
 /// does not say) or a Mac's (a pressed Caps Lock does not turn the light on there).
 pub fn locks_supported() -> bool {
@@ -278,15 +283,11 @@ impl State {
                 let _ = reply.send(b.block_local(on));
             }
             InputCmd::Nav(a) => b.nav(a)?,
-            // Not while the client holds Caps Lock down itself (the menu's key, an older client).
-            InputCmd::Locks { caps } => {
-                if !self.keys.contains(&Key::CapsLock)
-                    && let Some(now) = b.caps_lock()
-                    && now != caps
-                {
-                    b.key(Key::CapsLock, true)?;
-                    b.key(Key::CapsLock, false)?;
-                }
+            InputCmd::Locks { caps, num } => {
+                let now = b.caps_lock();
+                self.match_lock(b, Key::CapsLock, Some(caps), now)?;
+                let now = b.num_lock();
+                self.match_lock(b, Key::NumLock, num, now)?;
             }
             InputCmd::Touch(points) => {
                 if let Some(r) = self.rect {
@@ -350,6 +351,19 @@ impl State {
                 InputEvent::Text { text } => b.text(&text)?,
                 InputEvent::ReleaseAll => self.release_all(b),
             },
+        }
+        Ok(())
+    }
+
+    /// Press `key` once if the client wants it `want` and it is `now` here; not while the
+    /// client holds it down itself (the keys menu, an older client).
+    fn match_lock(&mut self, b: &mut dyn Backend, key: Key, want: Option<bool>, now: Option<bool>) -> Result<()> {
+        if let (Some(want), Some(now)) = (want, now)
+            && want != now
+            && !self.keys.contains(&key)
+        {
+            b.key(key, true)?;
+            b.key(key, false)?;
         }
         Ok(())
     }
@@ -491,6 +505,10 @@ mod win {
             Some(unsafe { GetKeyState(VK_CAPITAL as i32) } & 1 != 0)
         }
 
+        fn num_lock(&mut self) -> Option<bool> {
+            Some(unsafe { GetKeyState(VK_NUMLOCK as i32) } & 1 != 0)
+        }
+
         fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
             let (vx, vy, vw, vh) = unsafe {
                 (
@@ -593,7 +611,8 @@ struct EnigoBackend {
     x11: Option<x11_locks::Locks>,
 }
 
-/// Caps Lock on X11: the Lock modifier the server reports with the pointer.
+/// Caps Lock and Num Lock on X11: the modifiers the server reports with the pointer (Lock,
+/// and Mod2, where every common keymap puts Num Lock).
 #[cfg(target_os = "linux")]
 mod x11_locks {
     use x11rb::connection::Connection as _;
@@ -613,9 +632,16 @@ mod x11_locks {
             Some(Self { conn, root })
         }
 
+        fn mask(&self) -> Option<KeyButMask> {
+            Some(self.conn.query_pointer(self.root).ok()?.reply().ok()?.mask)
+        }
+
         pub fn caps(&self) -> Option<bool> {
-            let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
-            Some(reply.mask.contains(KeyButMask::LOCK))
+            Some(self.mask()?.contains(KeyButMask::LOCK))
+        }
+
+        pub fn num(&self) -> Option<bool> {
+            Some(self.mask()?.contains(KeyButMask::MOD2))
         }
     }
 }
@@ -676,6 +702,11 @@ impl Backend for EnigoBackend {
     #[cfg(target_os = "linux")]
     fn caps_lock(&mut self) -> Option<bool> {
         self.x11.as_ref()?.caps()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn num_lock(&mut self) -> Option<bool> {
+        self.x11.as_ref()?.num()
     }
 }
 
@@ -866,16 +897,19 @@ mod tests {
         assert_eq!(rec.0.lock().unwrap().clone(), vec!["scroll 0 1".to_string()]);
     }
 
-    /// A keyboard whose Caps Lock a press toggles, like a computer's.
+    /// A keyboard whose Caps Lock and Num Lock a press toggles, like a computer's.
     struct Lockable {
         rec: Rec,
         caps: Option<bool>,
+        num: Option<bool>,
     }
 
     impl Backend for Lockable {
         fn key(&mut self, key: Key, down: bool) -> Result<()> {
-            if key == Key::CapsLock && down {
-                self.caps = self.caps.map(|c| !c);
+            match key {
+                Key::CapsLock if down => self.caps = self.caps.map(|c| !c),
+                Key::NumLock if down => self.num = self.num.map(|c| !c),
+                _ => {}
             }
             self.rec.key(key, down)
         }
@@ -894,30 +928,47 @@ mod tests {
         fn caps_lock(&mut self) -> Option<bool> {
             self.caps
         }
+        fn num_lock(&mut self) -> Option<bool> {
+            self.num
+        }
     }
 
     #[test]
     fn caps_lock_follows_the_client() {
         let rec = Rec::default();
-        let mut b = Lockable { rec: rec.clone(), caps: Some(true) };
+        let mut b = Lockable { rec: rec.clone(), caps: Some(true), num: None };
         let mut s = State::default();
         // Stuck on here, off at the client: one press turns it off; the same again does nothing.
-        s.handle(&mut b, InputCmd::Locks { caps: false }).unwrap();
-        s.handle(&mut b, InputCmd::Locks { caps: false }).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: false, num: None }).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: false, num: None }).unwrap();
         assert_eq!(b.caps, Some(false));
         assert_eq!(rec.0.lock().unwrap().clone(), ["key CapsLock true", "key CapsLock false"]);
-        s.handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: true, num: Some(true) }).unwrap();
         assert_eq!(b.caps, Some(true));
 
         // Held by the client (the keys menu): left alone.
         s.handle(&mut b, InputCmd::Event(InputEvent::Key { key: Key::CapsLock, down: true })).unwrap();
-        s.handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: true, num: Some(true) }).unwrap();
         assert_eq!(rec.0.lock().unwrap().len(), 5);
 
         // A backend that cannot tell: nothing pressed.
         let rec = Rec::default();
-        let mut b = Lockable { rec: rec.clone(), caps: None };
-        State::default().handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        let mut b = Lockable { rec: rec.clone(), caps: None, num: None };
+        State::default().handle(&mut b, InputCmd::Locks { caps: true, num: Some(true) }).unwrap();
         assert!(rec.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn num_lock_follows_the_client_that_has_one() {
+        let rec = Rec::default();
+        let mut b = Lockable { rec: rec.clone(), caps: Some(false), num: Some(false) };
+        let mut s = State::default();
+        s.handle(&mut b, InputCmd::Locks { caps: false, num: Some(true) }).unwrap();
+        assert_eq!(b.num, Some(true));
+        assert_eq!(rec.0.lock().unwrap().clone(), ["key NumLock true", "key NumLock false"]);
+        // A Mac has none: Num Lock here stays as it is.
+        s.handle(&mut b, InputCmd::Locks { caps: false, num: None }).unwrap();
+        assert_eq!(b.num, Some(true));
+        assert_eq!(rec.0.lock().unwrap().len(), 2);
     }
 }
