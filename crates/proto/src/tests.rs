@@ -145,11 +145,12 @@ fn extensions_roundtrip() {
         ExtClient::Hello { rev: EXT_REV },
         ExtClient::MaxSize { width: 1280, height: 720 },
         ExtClient::Cursor { on: true },
+        ExtClient::Locks { caps: true },
     ] {
         assert_eq!(roundtrip(&m), m);
     }
     for m in [
-        ExtHost::Hello { rev: EXT_REV, features: vec![Feature::MaxSize, Feature::Cursor] },
+        ExtHost::Hello { rev: EXT_REV, features: vec![Feature::MaxSize, Feature::Cursor, Feature::LockKeys] },
         ExtHost::Cursor { x: 65535, y: 0, visible: true },
     ] {
         assert_eq!(roundtrip(&m), m);

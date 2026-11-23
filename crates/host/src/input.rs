@@ -39,6 +39,11 @@ pub enum InputCmd {
     Nav(NavAction),
     /// The fingers on a phone's screen now ([`Backend::touch`]).
     Touch(Vec<TouchPoint>),
+    /// Caps Lock as it is on the client's keyboard: pressed here if this computer's differs
+    /// ([`rdesk_proto::ExtClient::Locks`]).
+    Locks {
+        caps: bool,
+    },
 }
 
 /// The pointer on the current monitor, normalized like input (0..=65535 per axis);
@@ -234,6 +239,27 @@ pub trait Backend {
     fn touch(&mut self, _fingers: &[(u8, i32, i32)]) -> Result<()> {
         Err(anyhow::anyhow!("only phones take several fingers"))
     }
+    /// Whether Caps Lock is on here, if this backend can tell.
+    fn caps_lock(&mut self) -> Option<bool> {
+        None
+    }
+}
+
+/// Whether this computer's input can tell (and so match) its Caps Lock
+/// ([`rdesk_proto::Feature::LockKeys`]): Windows and X11. Not a phone's, Wayland's (the portal
+/// does not say) or a Mac's (a pressed Caps Lock does not turn the light on there).
+pub fn locks_supported() -> bool {
+    if BACKEND.get().is_some() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        !crate::wayland::active()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cfg!(windows)
+    }
 }
 
 #[derive(Default)]
@@ -252,6 +278,16 @@ impl State {
                 let _ = reply.send(b.block_local(on));
             }
             InputCmd::Nav(a) => b.nav(a)?,
+            // Not while the client holds Caps Lock down itself (the menu's key, an older client).
+            InputCmd::Locks { caps } => {
+                if !self.keys.contains(&Key::CapsLock)
+                    && let Some(now) = b.caps_lock()
+                    && now != caps
+                {
+                    b.key(Key::CapsLock, true)?;
+                    b.key(Key::CapsLock, false)?;
+                }
+            }
             InputCmd::Touch(points) => {
                 if let Some(r) = self.rect {
                     let fingers: Vec<(u8, i32, i32)> = points
@@ -450,6 +486,11 @@ mod win {
             Ok(true)
         }
 
+        fn caps_lock(&mut self) -> Option<bool> {
+            // The toggle bit; this thread has no window, so it is the keyboard's own state.
+            Some(unsafe { GetKeyState(VK_CAPITAL as i32) } & 1 != 0)
+        }
+
         fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
             let (vx, vy, vw, vh) = unsafe {
                 (
@@ -537,12 +578,46 @@ fn platform_backend() -> Result<Box<dyn Backend>> {
     }
     let enigo = enigo::Enigo::new(&enigo::Settings::default())
         .map_err(|e| anyhow::anyhow!("{e:?} (macOS: grant Accessibility; Linux: needs an X11 session)"))?;
-    Ok(Box::new(EnigoBackend { enigo }))
+    Ok(Box::new(EnigoBackend {
+        enigo,
+        #[cfg(target_os = "linux")]
+        x11: x11_locks::Locks::open(),
+    }))
 }
 
 #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 struct EnigoBackend {
     enigo: enigo::Enigo,
+    /// The X server, to ask it for Caps Lock.
+    #[cfg(target_os = "linux")]
+    x11: Option<x11_locks::Locks>,
+}
+
+/// Caps Lock on X11: the Lock modifier the server reports with the pointer.
+#[cfg(target_os = "linux")]
+mod x11_locks {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask, Window};
+    use x11rb::rust_connection::RustConnection;
+
+    pub struct Locks {
+        conn: RustConnection,
+        root: Window,
+    }
+
+    impl Locks {
+        pub fn open() -> Option<Self> {
+            let (conn, screen) =
+                x11rb::connect(None).inspect_err(|e| tracing::debug!("no X server for Caps Lock: {e}")).ok()?;
+            let root = conn.setup().roots.get(screen)?.root;
+            Some(Self { conn, root })
+        }
+
+        pub fn caps(&self) -> Option<bool> {
+            let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+            Some(reply.mask.contains(KeyButMask::LOCK))
+        }
+    }
 }
 
 #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
@@ -596,6 +671,11 @@ impl Backend for EnigoBackend {
     fn pointer(&mut self) -> Option<(i32, i32)> {
         use enigo::Mouse;
         self.enigo.location().ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn caps_lock(&mut self) -> Option<bool> {
+        self.x11.as_ref()?.caps()
     }
 }
 
@@ -784,5 +864,60 @@ mod tests {
             s.handle(&mut b, InputCmd::Event(InputEvent::Scroll { dx: 0.0, dy: 0.4 })).unwrap();
         }
         assert_eq!(rec.0.lock().unwrap().clone(), vec!["scroll 0 1".to_string()]);
+    }
+
+    /// A keyboard whose Caps Lock a press toggles, like a computer's.
+    struct Lockable {
+        rec: Rec,
+        caps: Option<bool>,
+    }
+
+    impl Backend for Lockable {
+        fn key(&mut self, key: Key, down: bool) -> Result<()> {
+            if key == Key::CapsLock && down {
+                self.caps = self.caps.map(|c| !c);
+            }
+            self.rec.key(key, down)
+        }
+        fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
+            self.rec.mouse_abs(x, y)
+        }
+        fn button(&mut self, b: MouseButton, down: bool) -> Result<()> {
+            self.rec.button(b, down)
+        }
+        fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
+            self.rec.scroll(dx, dy)
+        }
+        fn text(&mut self, s: &str) -> Result<()> {
+            self.rec.text(s)
+        }
+        fn caps_lock(&mut self) -> Option<bool> {
+            self.caps
+        }
+    }
+
+    #[test]
+    fn caps_lock_follows_the_client() {
+        let rec = Rec::default();
+        let mut b = Lockable { rec: rec.clone(), caps: Some(true) };
+        let mut s = State::default();
+        // Stuck on here, off at the client: one press turns it off; the same again does nothing.
+        s.handle(&mut b, InputCmd::Locks { caps: false }).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: false }).unwrap();
+        assert_eq!(b.caps, Some(false));
+        assert_eq!(rec.0.lock().unwrap().clone(), ["key CapsLock true", "key CapsLock false"]);
+        s.handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        assert_eq!(b.caps, Some(true));
+
+        // Held by the client (the keys menu): left alone.
+        s.handle(&mut b, InputCmd::Event(InputEvent::Key { key: Key::CapsLock, down: true })).unwrap();
+        s.handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        assert_eq!(rec.0.lock().unwrap().len(), 5);
+
+        // A backend that cannot tell: nothing pressed.
+        let rec = Rec::default();
+        let mut b = Lockable { rec: rec.clone(), caps: None };
+        State::default().handle(&mut b, InputCmd::Locks { caps: true }).unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
     }
 }

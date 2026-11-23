@@ -50,6 +50,8 @@ enigo = "0.6"
 ashpd = { version = "0.14", default-features = false, features = ["async-io", "pipewire", "remote_desktop", "screencast"] }
 pipewire = "0.10"
 pollster = "1"
+# X11: Caps Lock's state (the version enigo already uses).
+x11rb = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 # The speakers' sound (WASAPI loopback).

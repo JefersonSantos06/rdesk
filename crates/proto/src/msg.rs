@@ -427,6 +427,11 @@ pub enum ExtClient {
     /// one lifts them all. Sent on every change, for pinches and other gestures of several
     /// fingers on a phone.
     Touch(Vec<TouchPoint>),
+    /// The lock keys as they are on the client's keyboard (input only, [`Feature::LockKeys`]):
+    /// the host presses Caps Lock where its own differs. Sent when the session starts, when
+    /// the window gets the keyboard back and whenever they change here, instead of the
+    /// Caps Lock key itself (a Mac's never reaches the window as a key).
+    Locks { caps: bool },
 }
 
 /// One finger in [`ExtClient::Touch`]: the same `id` from when it touches until it lifts.
@@ -523,6 +528,8 @@ pub enum Feature {
     TextKeys,
     /// Fingers on a phone's screen ([`ExtClient::Touch`]).
     MultiTouch,
+    /// The host knows its Caps Lock and matches the client's ([`ExtClient::Locks`]).
+    LockKeys,
 }
 
 /// What [`ExtClient::Power`] asks for.
@@ -536,8 +543,8 @@ pub enum PowerAction {
 
 /// Revision of the extensions protocol (1: picture size limit and pointer position;
 /// 2: second frame format, automatic quality, pointer image; 3: phones' system buttons and
-/// typing as text).
-pub const EXT_REV: u16 = 3;
+/// typing as text; 4: lock keys).
+pub const EXT_REV: u16 = 4;
 
 /// The client's side of a terminal stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

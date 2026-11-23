@@ -1453,6 +1453,7 @@ async fn extensions(
                     ExtClient::BlockInput { .. } => can(Feature::BlockInput),
                     ExtClient::Nav(_) => can(Feature::Nav),
                     ExtClient::Touch(_) => can(Feature::MultiTouch),
+                    ExtClient::Locks { .. } => can(Feature::LockKeys),
                     ExtClient::Hello { .. } => false,
                 };
                 if allowed {

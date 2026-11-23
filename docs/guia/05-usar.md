@@ -77,7 +77,7 @@ ela voltar):
 | ● nome · **ms** | quem você está acessando e a latência (passe o mouse para ver se a ligação é direta ou pelo relay) |
 | **Monitor** | escolher qual tela ver, se o outro tiver várias; *Atualizar imagem* se algo ficou estranho |
 | **Qualidade** | *Auto* (se adapta à conexão: baixa a qualidade e o tamanho quando ela não acompanha, sobe quando folga; mostra o que escolheu), *Velocidade* (mais fluido, menos nítido), *Qualidade* (mais nítido); ou ajuste o fps e a qualidade à mão. Muda na hora. |
-| **Teclas** | enviar **Ctrl+Alt+Del** e a **tecla Windows** (em computadores Windows), **Alt+Tab**, e ligar as **teclas de Mac** |
+| **Teclas** | enviar **Ctrl+Alt+Del** e a **tecla Windows** (em computadores Windows), **Alt+Tab**, **Caps Lock**, e ligar as **teclas de Mac** |
 | **Sessão** | ouvir o som do computador, **tela preta lá**, **bloquear o teclado e o mouse de lá**, **túnel de porta** e **reiniciar** (normal ou em modo de segurança). Aparece o que o outro computador oferece. |
 | **Arquivos** | abre o painel de arquivos |
 | **Terminal** | abre o painel de terminal |
@@ -93,6 +93,10 @@ Quando a janela é estreita, os botões viram só ícones (passe o mouse para ve
 - **Do Mac para Windows/Linux**: as **teclas de Mac** vêm ligadas: **Cmd** vira **Ctrl**
   (então Cmd+C copia), o **Option esquerdo** vira a tecla **Windows**, e o **Control** vira
   **Alt**. O Option direito continua AltGr. Desligue em *Teclas* se preferir.
+- **Caps Lock** acompanha o seu teclado: ao conectar, ao voltar para a janela e sempre que
+  você o liga ou desliga, o outro computador fica igual (Windows e Linux com X11). Em
+  computadores com uma versão anterior do rdesk, ou para mudá-lo só lá, use *Teclas* →
+  *Caps Lock*.
 - Atalhos do seu próprio sistema (como Alt+Tab no Windows) ficam com o seu computador; use o
   menu *Teclas* para mandá-los ao outro.
 

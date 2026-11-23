@@ -139,6 +139,7 @@ Rodar para cada par cliente → host relevante: **Mac → Windows**, **Linux →
 - [ ] Layout US e ABNT2 no host: digitar `ç ã é ~ ^ ' " / ?` (teclas `IntlRo`, `IntlBackslash`, teclas mortas).
 - [ ] AltGr (Windows) produz `@`, `€`, etc.
 - [ ] Mac cliente: Cmd+C / Cmd+V copiam/colam no Windows (troca Cmd⇄Ctrl).
+- [ ] Caps Lock: ligado no host e desligado no cliente (Mac ou Windows), conectar → desliga no host; ligar/desligar no cliente segue no host; *Teclas* → *Caps Lock* inverte só no host.
 - [ ] Atalhos: Ctrl+Shift+Esc, Alt+Tab (no Linux cliente), F1–F12, setas, Home/End, numpad com NumLock.
 
 ## Clipboard e arquivos

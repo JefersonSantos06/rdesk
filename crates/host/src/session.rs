@@ -358,6 +358,7 @@ pub async fn run(
                                     settings: &settings_tx,
                                     injector,
                                     screen: access.screen,
+                                    input: access.input,
                                     report: report_rx,
                                     capturer,
                                     clipboard,
@@ -489,6 +490,8 @@ struct ExtCtx<'a> {
     settings: &'a watch::Sender<VideoSettings>,
     injector: Injector,
     screen: bool,
+    /// Keyboard and mouse (for the lock keys).
+    input: bool,
     report: watch::Receiver<(u8, u8, u8)>,
     capturer: Capturer,
     /// The clipboard (full control only), and images copied here waiting for a client that
@@ -506,7 +509,7 @@ struct ExtCtx<'a> {
 /// second frame format and automatic quality.
 async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::SendStream, ctx: ExtCtx<'_>) -> Result<()> {
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-    let ExtCtx { settings, injector, screen, mut report, capturer, clipboard, clip_images, full, who } = ctx;
+    let ExtCtx { settings, injector, screen, input, mut report, capturer, clipboard, clip_images, full, who } = ctx;
     let (mut privacy_on, mut blocked) = (false, false);
     let ExtClient::Hello { rev } = expect_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? else {
         return Err(anyhow!("extensions stream must start with Hello"));
@@ -553,6 +556,10 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
         if caps.multitouch {
             features.push(Feature::MultiTouch);
         }
+    }
+    // Caps Lock as the client's keyboard has it.
+    if rev >= 4 && input && crate::input::locks_supported() {
+        features.push(Feature::LockKeys);
     }
     write_msg(w, &ExtHost::Hello { rev: rev.min(EXT_REV), features }).await?;
 
@@ -689,6 +696,7 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
                 }
                 ExtClient::Nav(action) if full => injector_local.send(InputCmd::Nav(action)),
                 ExtClient::Touch(points) if full => injector_local.send(InputCmd::Touch(points)),
+                ExtClient::Locks { caps } if input => injector_local.send(InputCmd::Locks { caps }),
                 ExtClient::BlockInput { on } if full => {
                     let (rtx, rrx) = tokio::sync::oneshot::channel();
                     injector_local.send(InputCmd::BlockLocal(on, rtx));

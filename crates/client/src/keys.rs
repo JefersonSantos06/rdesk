@@ -53,6 +53,34 @@ pub fn swap_cmd_ctrl(k: Key) -> Key {
     }
 }
 
+/// Whether Caps Lock is on on this keyboard, where the system says (Windows, macOS). A Mac's
+/// Caps Lock never reaches the window as a key (winit reports no event for it), so the
+/// viewer looks at it and tells the host instead.
+pub fn caps_lock() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
+        // SAFETY: no pointers; the low bit is the toggle.
+        Some(unsafe { GetKeyState(VK_CAPITAL as i32) } & 1 != 0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // CGEventSourceStateID kCGEventSourceStateHIDSystemState, CGEventFlags kCGEventFlagMaskAlphaShift.
+        const HID_SYSTEM_STATE: i32 = 1;
+        const ALPHA_SHIFT: u64 = 0x0001_0000;
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceFlagsState(state_id: i32) -> u64;
+        }
+        // SAFETY: a plain query with a valid state id.
+        Some(unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) } & ALPHA_SHIFT != 0)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
