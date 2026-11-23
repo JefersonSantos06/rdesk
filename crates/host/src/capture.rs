@@ -115,8 +115,37 @@ pub fn set_screen_source(make: fn() -> Box<dyn Backend>) {
     let _ = SOURCE.set(make);
 }
 
+/// This computer has no screen to share: built without one (`headless`), or a Linux host
+/// started with no display to capture (rdesk-host as a system service on a server). Its
+/// sessions get the terminal, files and tunnels ([`rdesk_common::auth::HostAuthConfig::screenless`]).
+pub fn screenless() -> bool {
+    #[cfg(headless)]
+    {
+        true
+    }
+    #[cfg(all(desktop, target_os = "linux"))]
+    {
+        static NO_DISPLAY: OnceLock<bool> = OnceLock::new();
+        *NO_DISPLAY.get_or_init(|| {
+            let no_x = std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty());
+            let none = no_x && !crate::wayland::active();
+            if none {
+                tracing::info!("no display (DISPLAY, WAYLAND_DISPLAY): no screen to share, terminal and files only");
+            }
+            none
+        })
+    }
+    #[cfg(not(any(headless, all(desktop, target_os = "linux"))))]
+    {
+        false
+    }
+}
+
 #[cfg(all(desktop, target_os = "linux"))]
 fn platform_backend() -> Box<dyn Backend> {
+    if screenless() {
+        return Box::new(NoScreen);
+    }
     if crate::wayland::active() {
         tracing::info!("Wayland: the screen comes through the desktop portal");
         Box::new(WaylandBackend::default())
@@ -136,10 +165,10 @@ fn platform_backend() -> Box<dyn Backend> {
     Box::new(NoScreen)
 }
 
-#[cfg(headless)]
+#[cfg(any(headless, all(desktop, target_os = "linux")))]
 struct NoScreen;
 
-#[cfg(headless)]
+#[cfg(any(headless, all(desktop, target_os = "linux")))]
 impl Backend for NoScreen {
     fn list(&mut self) -> Result<Vec<MonitorDesc>> {
         Ok(Vec::new())

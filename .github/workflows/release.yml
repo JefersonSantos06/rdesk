@@ -82,6 +82,14 @@ jobs:
           7z a "dist/rdesk-$VERSION-${{ matrix.platform }}.zip" ./target/release/rdesk.exe
           # Also on its own: the server's download page hands it out as rdesk@server.exe.
           cp target/release/rdesk.exe "dist/rdesk-$VERSION-${{ matrix.platform }}.exe"
+      # rdesk-host for Windows: the host alone (installed as the service, no app). The .exe is
+      # the download (rdesk-host@server.exe), the .zip what its service updates from.
+      - name: The host alone (Windows)
+        if: matrix.part == 'app' && runner.os == 'Windows'
+        run: |
+          cargo build --release --locked -p rdesk --no-default-features --features screen
+          7z a "dist/rdesk-host-$VERSION-${{ matrix.platform }}.zip" ./target/release/rdesk.exe
+          cp target/release/rdesk.exe "dist/rdesk-host-$VERSION-${{ matrix.platform }}.exe"
       - uses: taiki-e/install-action@v2
         if: matrix.part == 'app' && runner.os == 'Linux'
         with:
@@ -93,12 +101,12 @@ jobs:
           mkdir dist
           tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release rdesk
           cargo deb -p rdesk --no-build --output dist/
-      # rdesk-host_<version>_<arch>.deb: the host of a server without a screen (no app, no
-      # desktop libraries). Built after the app's package: it takes target/release/rdesk's place.
-      - name: The host for servers (Linux)
+      # rdesk-host_<version>_<arch>.deb: the host alone, for a computer that is only accessed (no
+      # app). Built after the app's package: it takes target/release/rdesk's place.
+      - name: The host alone (Linux)
         if: matrix.part == 'app' && runner.os == 'Linux'
         run: |
-          cargo build --release --locked -p rdesk --no-default-features --features host
+          cargo build --release --locked -p rdesk --no-default-features --features screen
           .github/scripts/glibc-max.sh target/release/rdesk
           cargo deb -p rdesk --variant host --no-build --output dist/
 

@@ -45,6 +45,7 @@ pub fn router(st: Shared) -> Router {
         .route("/", get(home))
         .route("/download", get(download::page_handler))
         .route("/download/windows", get(download::windows))
+        .route("/download/windows-host", get(download::windows_host))
         .route("/install.sh", get(download::install_sh))
         .route(paths::PATH_INFO, get(api::info))
         .route(paths::PATH_TOKEN, post(api::token))

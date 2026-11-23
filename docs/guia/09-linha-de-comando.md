@@ -146,6 +146,7 @@ que o `enroll`.
 rdesk install                                     # instala tudo (programa, serviço, menu, atualizações)
 rdesk install --only-share --key rdk_…            # computador só acessado, com chave
 rdesk install --only-share --owner voce@gmail.com --name "PC da vó"   # com aprovação
+.\rdesk-host@seu-servidor.exe install --key rdk_…  # rdesk-host: só o host, sem o app (já é "só acessado")
 rdesk uninstall                                   # desinstala (o ID do host é mantido)
 rdesk service install | uninstall | status        # só o serviço (terminal de administrador)
 ```

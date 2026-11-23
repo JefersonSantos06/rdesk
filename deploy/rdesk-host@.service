@@ -1,6 +1,6 @@
-# The rdesk host of a server without a screen (the rdesk-host package), as a system service
-# running as one user: sessions get that user's terminal, files and tunnels. The rdesk server's
-# install.sh with --headless sets it up. By hand:
+# The rdesk host of a server with no display, as a system service running as one user (from the
+# rdesk-host package): with no display to capture, sessions get that user's terminal, files and
+# tunnels. The rdesk server's install.sh with --headless sets it up. By hand:
 #
 #   /etc/rdesk/enroll-<user>.env (chmod 600, read by systemd before it switches to the user):
 #     RDESK_SERVER=rdesk.example.com
@@ -9,7 +9,7 @@
 #
 # The host keeps its identity in that user's ~/.config/rdesk/.
 [Unit]
-Description=rdesk host (no screen) for %i
+Description=rdesk host (no display) for %i
 After=network-online.target
 Wants=network-online.target
 

@@ -23,8 +23,6 @@ use rdesk_proto::release::FileKind;
 use crate::control::Reporter;
 use crate::server::Server;
 
-pub const PLATFORM: &str = "windows-x86_64";
-
 /// `%ProgramData%\rdesk\updates\<version>`.
 pub fn staging_dir(version: &str) -> Result<PathBuf> {
     Ok(config::service_dir().context("%ProgramData% is not set")?.join("updates").join(version))
@@ -79,7 +77,9 @@ async fn prepare(offer: &UpdateOffer) -> Result<Option<PathBuf>> {
     }
     let m = verify_manifest(offer.manifest.as_bytes(), &offer.signature)?;
     ensure!(m.version == offer.version, "the signed manifest is for {}, not {}", m.version, offer.version);
-    let file = file_for(&m, FileKind::App, PLATFORM).ok_or_else(|| anyhow!("no Windows file in {}", m.version))?;
+    // rdesk-host updates to rdesk-host, the app to the app.
+    let platform = rdesk_common::release::update_platform();
+    let file = file_for(&m, FileKind::App, &platform).ok_or_else(|| anyhow!("no {platform} file in {}", m.version))?;
     let data = download(&format!("{}{}", offer.download_base, file.name), file.size).await?;
     check_file(file, &data)?;
 

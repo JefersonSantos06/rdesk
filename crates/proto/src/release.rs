@@ -82,16 +82,27 @@ pub const ANDROID: &str = "android";
 /// ID when installing; there is no App Store build). Listed like [`ANDROID`].
 pub const IOS: &str = "ios";
 
-/// The host of a server without a screen (the `rdesk-host` package, `rdesk-host_<v>_amd64.deb`):
-/// platforms of their own, so each package updates to its own kind. Apps from before it only
-/// ever look for theirs.
+/// rdesk-host, the host alone (a computer that is only accessed: no app to reach others), has
+/// platforms of its own, so it updates to itself and the app to the app. Apps from before it
+/// only ever look for theirs. On Linux, `rdesk-host_<v>_amd64.deb|arm64.deb`.
 pub const LINUX_HOST: [&str; 2] = ["linux-x86_64-host", "linux-aarch64-host"];
+
+/// rdesk-host on Windows: `rdesk-host-<v>-windows-x86_64.exe` (the download) and `.zip` (what
+/// its service updates from).
+pub const WINDOWS_HOST: &str = "windows-x86_64-host";
 
 /// What an asset is, from its name:
 /// `rdesk-<v>-<platform>.zip|.tar.gz`, `rdesk-<v>-windows-x86_64.exe`,
 /// `rdesk-server-<v>-<platform>.tar.gz`, `rdesk_<v>_amd64.deb|arm64.deb`,
-/// `rdesk-host_<v>_amd64.deb|arm64.deb`.
+/// `rdesk-host_<v>_amd64.deb|arm64.deb`, `rdesk-host-<v>-windows-x86_64.zip|.exe`.
 pub fn classify(name: &str, version: &str) -> Option<(FileKind, &'static str)> {
+    if let Some(rest) = name.strip_prefix(&format!("rdesk-host-{version}-")) {
+        return match rest {
+            "windows-x86_64.zip" => Some((FileKind::App, WINDOWS_HOST)),
+            "windows-x86_64.exe" => Some((FileKind::Exe, WINDOWS_HOST)),
+            _ => None,
+        };
+    }
     if let Some(rest) = name.strip_prefix(&format!("rdesk-host_{version}_")) {
         let platform = match rest {
             "amd64.deb" => LINUX_HOST[0],
@@ -156,6 +167,9 @@ mod tests {
         assert_eq!(classify("rdesk-host_0.2.0_amd64.deb", v), Some((FileKind::Deb, "linux-x86_64-host")));
         assert_eq!(classify("rdesk-host_0.2.0_arm64.deb", v), Some((FileKind::Deb, "linux-aarch64-host")));
         assert_eq!(classify("rdesk-host_0.1.0_arm64.deb", v), None, "other version");
+        assert_eq!(classify("rdesk-host-0.2.0-windows-x86_64.zip", v), Some((FileKind::App, WINDOWS_HOST)));
+        assert_eq!(classify("rdesk-host-0.2.0-windows-x86_64.exe", v), Some((FileKind::Exe, WINDOWS_HOST)));
+        assert_eq!(classify("rdesk-host-0.2.0-linux-x86_64.tar.gz", v), None);
         assert_eq!(classify("rdesk-0.1.0-linux-x86_64.tar.gz", v), None, "other version");
         assert_eq!(classify("rdesk-0.2.0-windows-x86_64.tar.gz", v), None);
         assert_eq!(classify("rdesk-0.2.0-macos-aarch64.tar.gz", v), Some((FileKind::App, "macos-aarch64")));

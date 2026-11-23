@@ -1,6 +1,6 @@
 # The rdesk host of a computer that is only accessed (e.g. a Raspberry Pi), as a systemd
-# user service. The .deb installs it in /usr/lib/systemd/user/; the server's install.sh with
-# --host sets it up. By hand:
+# user service. The rdesk and rdesk-host packages install it in /usr/lib/systemd/user/; the
+# server's install.sh with --host sets it up (with rdesk-host). By hand:
 #
 #   ~/.config/rdesk-enroll.env (chmod 600):
 #     RDESK_SERVER=rdesk.example.com

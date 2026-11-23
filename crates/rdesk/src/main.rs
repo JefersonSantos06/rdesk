@@ -794,6 +794,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn main() -> Result<()> {
+    // Without the app: rdesk-host, which updates to its own files.
+    if !cfg!(feature = "client") {
+        rdesk_common::release::set_host_only();
+    }
     let cli = Cli::parse();
     #[cfg(feature = "client")]
     let app = matches!(cli.cmd, None | Some(Command::Ui { .. }));
@@ -857,6 +861,8 @@ fn main() -> Result<()> {
         Command::Service(s) => service_cmd(s),
         #[cfg(all(windows, feature = "host"))]
         Command::Install { only_share, server, owner, key, name } => {
+            // rdesk-host is only ever accessed: it always joins the server that way.
+            let only_share = only_share || !cfg!(feature = "client");
             install_cmd(rdesk_host::win::install::InstallOpts { only_share, server, owner, key, name })
         }
         #[cfg(all(windows, feature = "host"))]
@@ -895,7 +901,28 @@ fn no_command() -> Result<()> {
 fn no_command() -> Result<()> {
     use clap::CommandFactory as _;
     Cli::command().print_help()?;
+    // rdesk-host double-clicked on Windows: its console would close before anyone read this.
+    #[cfg(windows)]
+    if console_is_own() {
+        let exe = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        println!(
+            "\nrdesk-host is the host alone: this computer is accessed, it reaches no others. To install it, open \
+             PowerShell in this folder and run\n\n  .\\{} install --key rdk_...   (or --owner you@example.com)\n\n\
+             Press Enter to close.",
+            exe.as_deref().unwrap_or("rdesk-host.exe")
+        );
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
     Ok(())
+}
+
+/// Started by double-clicking: the console window is this program's alone.
+#[cfg(all(windows, not(feature = "client")))]
+fn console_is_own() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut pids = [0u32; 2];
+    // SAFETY: the buffer is valid for `pids.len()` entries.
+    unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) == 1 }
 }
 
 #[cfg(feature = "client")]
@@ -1408,7 +1435,7 @@ async fn groups_cmd(cmd: GroupsCmd) -> Result<()> {
 
 /// `rdesk update`: the released version, checked against the release keys built in here.
 async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()> {
-    use rdesk_common::release::{check_file, download, file_for, this_platform, verify_manifest};
+    use rdesk_common::release::{check_file, download, file_for, update_platform, verify_manifest};
     use rdesk_proto::release::{FileKind, parse_version};
     let base = account::normalize_server(server)?;
     let mut url = format!("{base}{}", rdesk_proto::api::PATH_UPDATE_LATEST);
@@ -1439,7 +1466,7 @@ async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()
         );
     }
     // The rdesk-host package (no app) updates to itself, not to the app.
-    let platform = if cfg!(feature = "client") { this_platform() } else { format!("{}-host", this_platform()) };
+    let platform = update_platform();
     let file =
         file_for(&m, FileKind::Deb, &platform).ok_or_else(|| anyhow!("{} has no package for {platform}", m.version))?;
     let data = download(&format!("{}{}", offer.download_base, file.name), file.size).await?;

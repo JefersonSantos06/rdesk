@@ -46,9 +46,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --release -p rdesk
-      # Ubuntu 22.04 and Debian 12 must be able to start it; the host for servers (rdesk-host,
-      # no screen) must keep building.
-      - name: glibc, and the host without a screen (Linux)
+      # The host alone (rdesk-host), and on Linux also built with no screen at all.
+      - run: cargo clippy --locked -p rdesk --no-default-features --features screen -- -D warnings
+      # Ubuntu 22.04 and Debian 12 must be able to start it.
+      - name: glibc, and the host with no screen (Linux)
         if: runner.os == 'Linux'
         run: |
           .github/scripts/glibc-max.sh target/release/rdesk

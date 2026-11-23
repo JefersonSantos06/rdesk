@@ -24,7 +24,7 @@ Acesso remoto pessoal em Rust, para substituir o AnyDesk: **QUIC com hole punchi
 ## Baixar
 
 Do seu servidor: **`https://seu-servidor/download`**. Ele lista a versão liberada para todos:
-- **Windows**: `rdesk@seu-servidor.exe`, que já sabe qual servidor usar. Abra, entre e, em *Este computador*, **Instalar** (serviço do Windows) (instala em `Program Files`, o serviço, o Menu Iniciar e *Configurações → Aplicativos*; atualiza sozinho). Pela linha de comando: `rdesk install` (ou `rdesk install --only-share --key rdk_…` para um computador só acessado), `rdesk uninstall`.
+- **Windows**: `rdesk@seu-servidor.exe`, que já sabe qual servidor usar. Abra, entre e, em *Este computador*, **Instalar** (serviço do Windows) (instala em `Program Files`, o serviço, o Menu Iniciar e *Configurações → Aplicativos*; atualiza sozinho). Pela linha de comando: `rdesk install` (ou `rdesk install --only-share --key rdk_…` para um computador só acessado), `rdesk uninstall`. Para um computador só acessado, sem o app: `rdesk-host@seu-servidor.exe install --key rdk_…` (só o host, como serviço; atualiza sozinho).
 - **Linux**: `curl -fsSL https://seu-servidor/install.sh | sudo sh` (instala o `.deb` e liga as atualizações; `… | sudo sh -s -- --host --key rdk_…` para um computador só acessado).
 - **Mac**: o `rdesk.app`.
 
@@ -134,7 +134,7 @@ As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` f
 4. Instale o serviço de usuário [`deploy/rdesk-host.service`](deploy/rdesk-host.service) (`systemctl --user enable rdesk-host`).
 5. No primeiro boot cada placa aparece em *My computers*. Terminada a leva, revogue a chave.
 
-**Servidor sem tela (VPS, rack)**: o pacote `rdesk-host` traz só o host, sem o app e sem as bibliotecas de área de trabalho (X11, PipeWire, som). A sessão não tem imagem: abre terminal, arquivos e túneis de porta, como o usuário do serviço. `curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --headless --key rdk_…` instala, liga as atualizações e o serviço de sistema [`rdesk-host@<usuário>`](deploy/rdesk-host@.service) (a chave vai em `/etc/rdesk/enroll-<usuário>.env`). Para compilar: `cargo build --release -p rdesk --no-default-features --features host`.
+**Só o host (`rdesk-host`)**: para um computador só acessado, o `rdesk-host` é o host sem o app (sem como acessar outros e sem interface). No Linux, `install.sh --host` instala ele em vez do `rdesk`; no Windows, `rdesk-host@seu-servidor.exe install --key rdk_…`. Num **servidor sem tela (VPS, rack)**, `curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --headless --key rdk_…` instala o mesmo pacote como serviço de sistema, [`rdesk-host@<usuário>`](deploy/rdesk-host@.service) (a chave vai em `/etc/rdesk/enroll-<usuário>.env`): sem display, a sessão abre terminal, arquivos e túneis de porta, como esse usuário. Para compilar: `cargo build --release -p rdesk --no-default-features --features screen` (com `--features host` no lugar, um host sem tela nenhuma, que só depende da libc).
 
 ### Host (PC de casa)
 

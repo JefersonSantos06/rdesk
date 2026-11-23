@@ -146,7 +146,7 @@ pub fn load_auth_config(
         ticket,
         require_local,
         direct: false,
-        screenless: cfg!(headless),
+        screenless: crate::capture::screenless(),
     })
 }
 

@@ -236,7 +236,12 @@ pub fn install() -> Result<String> {
         actions: Some(vec![restart.clone(), restart.clone(), restart]),
     })?;
     let firewall = firewall_allow(&exe);
-    start_menu_shortcut(&exe);
+    // rdesk-host has no app to open from there (and may replace one that had it).
+    if rdesk_common::release::is_host_only() {
+        remove_start_menu_shortcut();
+    } else {
+        start_menu_shortcut(&exe);
+    }
     service.start::<&str>(&[])?;
     wait_for(&service, ServiceState::Running, Duration::from_secs(20))?;
 
@@ -544,10 +549,19 @@ pub fn apply_update(version: &str) -> Result<()> {
     bail!("rdesk {version} did not start correctly; the previous version is back")
 }
 
+fn start_menu_lnk() -> Option<PathBuf> {
+    std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join(r"Microsoft\Windows\Start Menu\Programs\rdesk.lnk"))
+}
+
+pub(crate) fn remove_start_menu_shortcut() {
+    if let Some(lnk) = start_menu_lnk() {
+        let _ = std::fs::remove_file(lnk);
+    }
+}
+
 /// A Start menu entry for everyone, to the program the service keeps up to date.
 fn start_menu_shortcut(exe: &Path) {
-    let Some(data) = std::env::var_os("ProgramData") else { return };
-    let lnk = PathBuf::from(data).join(r"Microsoft\Windows\Start Menu\Programs\rdesk.lnk");
+    let Some(lnk) = start_menu_lnk() else { return };
     let script = format!(
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; \
          $s.WorkingDirectory = '{}'; $s.Description = 'rdesk'; $s.Save()",

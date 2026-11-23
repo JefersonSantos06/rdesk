@@ -596,6 +596,10 @@ fn platform_backend() -> Result<Box<dyn Backend>> {
 
 #[cfg(all(desktop, not(windows)))]
 fn platform_backend() -> Result<Box<dyn Backend>> {
+    // No display: nothing to type into (its sessions have no picture).
+    if crate::capture::screenless() {
+        return Ok(Box::new(LogBackend));
+    }
     #[cfg(target_os = "linux")]
     if crate::wayland::active() {
         return Ok(Box::new(crate::wayland::Input::new()?));

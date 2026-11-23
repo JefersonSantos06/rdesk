@@ -3,7 +3,6 @@
 //! an entry in Settings → Apps, and optionally a computer that is only accessed: it asks the
 //! server to add it (the owner approves it, or an enrollment key adds it at once).
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -44,7 +43,8 @@ fn set(name: &str, kind: &str, value: &str) -> Result<()> {
 fn register_uninstall() -> Result<()> {
     let exe = service::program_exe();
     let exe_s = exe.display().to_string();
-    set("DisplayName", "REG_SZ", "rdesk")?;
+    let name = if rdesk_common::release::is_host_only() { "rdesk host" } else { "rdesk" };
+    set("DisplayName", "REG_SZ", name)?;
     set("DisplayVersion", "REG_SZ", env!("CARGO_PKG_VERSION"))?;
     set("Publisher", "REG_SZ", "rdesk")?;
     set("InstallLocation", "REG_SZ", &service::program_dir().display().to_string())?;
@@ -79,6 +79,12 @@ pub fn install(o: &InstallOpts) -> Result<String> {
             " Ele pede a {server} para adicioná-lo{}.",
             if o.key.is_some() {
                 t!(" with the enrollment key", " com a chave de cadastro")
+            } else if rdesk_common::release::is_host_only() {
+                // No app here to show the code: the host writes it to its log.
+                t!(
+                    "; its owner approves it in their app, comparing the code in %ProgramData%\\rdesk\\logs\\host.log",
+                    "; o dono o aprova no app dele, conferindo o código em %ProgramData%\\rdesk\\logs\\host.log"
+                )
             } else {
                 t!(
                     "; its owner approves it in their app, comparing the code that rdesk (Start menu) shows here",
@@ -95,9 +101,7 @@ pub fn install(o: &InstallOpts) -> Result<String> {
 pub fn uninstall() -> Result<String> {
     let msg = service::uninstall()?;
     let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
-    if let Some(data) = std::env::var_os("ProgramData") {
-        let _ = std::fs::remove_file(PathBuf::from(data).join(r"Microsoft\Windows\Start Menu\Programs\rdesk.lnk"));
-    }
+    service::remove_start_menu_shortcut();
     // This program may be the one in Program Files: remove the folder once it has exited.
     let dir = service::program_dir();
     if dir.exists() {

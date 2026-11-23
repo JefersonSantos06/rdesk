@@ -55,6 +55,14 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
              (reachable before sign-in and kept up to date): <i>This computer → Install rdesk on this computer</i>. \
              Windows may warn the first time (the program is not signed with a certificate): <i>More info → Run anyway</i>.</p>"
         ));
+        if file(&m, FileKind::Exe, rdesk_proto::release::WINDOWS_HOST).is_some() {
+            body.push_str(&format!(
+                "<p>A computer that is only accessed (no app to reach others): \
+                 <a href=\"/download/windows-host\">rdesk-host@{server}.exe</a>. In PowerShell, in the folder it was saved to: \
+                 <code>.\\rdesk-host@{server}.exe install --key rdk_…</code> (or <code>--owner you@example.com</code>); \
+                 it installs the service, asks Windows for administrator rights and keeps itself up to date.</p>"
+            ));
+        }
     } else if let Some(l) = link(FileKind::App, "windows-x86_64", "rdesk (zip)") {
         // Releases before the plain .exe: the zip, and type the server on the sign-in page.
         body.push_str(&format!(
@@ -82,7 +90,8 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
         "<h2>Linux</h2><p>Debian 12+, Ubuntu 22.04+, Raspberry Pi OS: \
          <code>curl -fsSL https://{server}/install.sh | sudo sh</code> (installs the package and keeps it up to date). \
          A computer that is only accessed: <code>… | sudo sh -s -- --host --key rdk_…</code> (or <code>--owner you@example.com</code>). \
-         A server without a screen (terminal, files and tunnels; no app): <code>… | sudo sh -s -- --headless --key rdk_…</code>.</p>"
+         A server with no display (terminal, files and tunnels): <code>… | sudo sh -s -- --headless --key rdk_…</code>. \
+         Both install rdesk-host, the host alone (no app to reach others).</p>"
     ));
     let debs: Vec<String> = ["linux-x86_64", "linux-aarch64"]
         .iter()
@@ -101,7 +110,17 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
 
 /// `GET /download/windows`: the released Windows program, named after this server.
 pub async fn windows(State(st): State<Shared>) -> Response {
-    match windows_exe(&st).await {
+    exe_response(windows_exe(&st, "windows-x86_64", "rdesk").await)
+}
+
+/// `GET /download/windows-host`: rdesk-host for Windows (the host alone, for a computer that is
+/// only accessed), named after this server.
+pub async fn windows_host(State(st): State<Shared>) -> Response {
+    exe_response(windows_exe(&st, rdesk_proto::release::WINDOWS_HOST, "rdesk-host").await)
+}
+
+fn exe_response(r: anyhow::Result<(Vec<u8>, String)>) -> Response {
+    match r {
         Ok((bytes, name)) => (
             [
                 (header::CONTENT_TYPE, "application/vnd.microsoft.portable-executable".to_string()),
@@ -117,10 +136,11 @@ pub async fn windows(State(st): State<Shared>) -> Response {
     }
 }
 
-async fn windows_exe(st: &Shared) -> anyhow::Result<(Vec<u8>, String)> {
+/// The `.exe` for `platform`, named `<program>@<this server>.exe` (it then knows its server).
+async fn windows_exe(st: &Shared, platform: &str, program: &str) -> anyhow::Result<(Vec<u8>, String)> {
     let m = released(st).ok_or_else(|| anyhow::anyhow!("nothing released"))?;
-    let f = file(&m, FileKind::Exe, "windows-x86_64").ok_or_else(|| anyhow::anyhow!("{} has no .exe", m.version))?;
-    let name = format!("rdesk@{}.exe", host(st));
+    let f = file(&m, FileKind::Exe, platform).ok_or_else(|| anyhow::anyhow!("{} has no {platform} .exe", m.version))?;
+    let name = format!("{program}@{}.exe", host(st));
     // Kept next to the data after the first download.
     let cache = st.data_dir.get().map(|d| d.join("downloads").join(&m.version).join(&f.name));
     if let Some(c) = &cache
@@ -176,10 +196,10 @@ pub async fn install_sh(State(st): State<Shared>) -> Response {
 const SCRIPT: &str = r#"#!/bin/sh
 # rdesk @VERSION@ for Linux, from the rdesk server @SERVER@.
 #   curl -fsSL https://@SERVER@/install.sh | sudo sh
-#   … | sudo sh -s -- --host --key rdk_…              only accessed: added at once
+#   … | sudo sh -s -- --host --key rdk_…              only accessed (rdesk-host, no app): added at once
 #   … | sudo sh -s -- --host --owner you@example.com   only accessed: its owner approves it
-#   … | sudo sh -s -- --headless --key rdk_…          a server without a screen: the rdesk-host
-#                                                      package, run as the sudo user (or --user)
+#   … | sudo sh -s -- --headless --key rdk_…          only accessed, a server with no display: a
+#                                                      system service as the sudo user (or --user)
 #   (--name "PC da sala" names it on the server)
 set -eu
 SERVER="@SERVER@"
@@ -207,10 +227,14 @@ case "$(uname -m)" in
   aarch64|arm64) URL="@ARM_URL@"; SHA="@ARM_SHA@"; HURL="@HARM_URL@"; HSHA="@HARM_SHA@" ;;
   *) echo "No rdesk package for $(uname -m)." >&2; exit 1 ;;
 esac
+# Only accessed: the host alone (rdesk-host), which releases before 0.9 do not have.
 PKG=rdesk
-if [ "$HEADLESS" = 1 ]; then
-  [ -n "$HURL" ] || { echo "rdesk @VERSION@ has no rdesk-host package (servers without a screen); release a newer version." >&2; exit 1; }
-  URL="$HURL"; SHA="$HSHA"; PKG=rdesk-host
+if [ "$HOST" = 1 ] || [ "$HEADLESS" = 1 ]; then
+  if [ -n "$HURL" ]; then
+    URL="$HURL"; SHA="$HSHA"; PKG=rdesk-host
+  elif [ "$HEADLESS" = 1 ]; then
+    echo "rdesk @VERSION@ has no rdesk-host package (needed for --headless); release a newer version." >&2; exit 1
+  fi
 fi
 DEB="/tmp/${PKG}_@VERSION@.deb"
 echo "Downloading $PKG @VERSION@…"
@@ -254,7 +278,7 @@ elif [ "$HOST" = 1 ]; then
   loginctl enable-linger "$U"
   runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_U" systemctl --user daemon-reload
   runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_U" systemctl --user enable --now rdesk-host
-  echo "rdesk @VERSION@ is installed; this computer asks $SERVER to add it (the host needs the X11 desktop session)."
+  echo "$PKG @VERSION@ is installed; this computer asks $SERVER to add it (the host needs the X11 desktop session)."
 else
   echo "rdesk @VERSION@ is installed: open it from the applications menu, or run rdesk."
 fi

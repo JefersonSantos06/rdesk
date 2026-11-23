@@ -8,8 +8,9 @@ publish.workspace = true
 [features]
 default = ["host", "client", "screen"]
 host = ["dep:rdesk-host", "rdesk-client?/host"]
-# The screen, keyboard, mouse and sound (Linux). Without it and without `client`, the host of
-# a server reached by terminal, files and tunnels only (the rdesk-host package).
+# The screen, keyboard, mouse and sound (Linux; always there on Windows and Macs). With it and
+# without `client`: rdesk-host, the host alone. Without either: a host built for servers only
+# (terminal, files and tunnels), with no desktop libraries.
 screen = ["host", "rdesk-host/screen"]
 client = ["dep:rdesk-client", "dep:crossterm"]
 
@@ -61,17 +62,18 @@ assets = [
 ]
 
 # `cargo deb -p rdesk --variant host --no-build`, after building it with
-# `--no-default-features --features host` (release workflow): rdesk-host_<version>_<arch>.deb,
-# the host of a server without a screen, with no app and no desktop libraries.
+# `--no-default-features --features screen` (release workflow): rdesk-host_<version>_<arch>.deb,
+# the host alone, for a computer that is only accessed (no app to reach others).
 [package.metadata.deb.variants.host]
 default-features = false
-features = ["host"]
-extended-description = "The rdesk host for a server without a screen: reached from the rdesk app by terminal, files and port tunnels, with no app and no desktop libraries. Run it with rdesk-host@<user>.service."
+features = ["screen"]
+extended-description = "The rdesk host alone, for a computer that is only accessed: its screen, keyboard, files, terminal and port tunnels, with no app to reach other computers. On a desktop, rdesk-host.service (a user service); on a server with no display, rdesk-host@<user>.service (terminal, files and tunnels)."
 conflicts = "rdesk"
 replaces = "rdesk"
 assets = [
     ["target/release/rdesk", "usr/bin/", "755"],
     ["../../deploy/rdesk-update.service", "usr/lib/systemd/system/", "644"],
     ["../../deploy/rdesk-update.timer", "usr/lib/systemd/system/", "644"],
+    ["../../deploy/rdesk-host.service", "usr/lib/systemd/user/", "644"],
     ["../../deploy/rdesk-host@.service", "usr/lib/systemd/system/", "644"],
 ]

@@ -115,26 +115,35 @@ Há dois jeitos de autorizar a entrada:
 
 ### D2. No computador que vai ser acessado
 
+Em Windows e Linux, use o **`rdesk-host`**: só o host, sem o app. O computador é acessado
+normalmente (tela, teclado, arquivos, terminal), mas não tem como acessar outros, nem
+interface para abrir.
+
 **Windows** (fica como serviço, acessível sempre, mesmo sem ninguém mexer):
 
 1. No navegador desse computador, abra `https://rdesk.seu-dominio.com/download` e baixe o
-   arquivo do Windows (`rdesk@rdesk.seu-dominio.com.exe`).
+   **rdesk-host** do Windows (`rdesk-host@rdesk.seu-dominio.com.exe`).
 2. Abra o **PowerShell** (menu Iniciar → digite "PowerShell"), vá para Downloads e rode
    (com a sua chave e o nome que quiser):
 
    ```powershell
    cd $HOME\Downloads
-   .\rdesk@rdesk.seu-dominio.com.exe install --only-share --key rdk_COLE_A_CHAVE --name "PC da vó"
+   .\rdesk-host@rdesk.seu-dominio.com.exe install --key rdk_COLE_A_CHAVE --name "PC da vó"
    ```
 
-   Aceite a pergunta de administrador do Windows.
+   Aceite a pergunta de administrador do Windows. Ele aparece em *Configurações →
+   Aplicativos* como **rdesk host** e se atualiza sozinho.
 3. Pronto. Em segundos ele aparece na sua lista em **Computadores**.
 
 Com o **e-mail do dono** em vez da chave, troque `--key …` por `--owner voce@gmail.com`.
-Nesse computador, abra o **rdesk** pelo menu Iniciar: a tela de entrada mostra o **código**
-do pedido (ex.: `3F2A-91C0`). No seu app aparece o aviso **"1 computador aguarda sua
-aprovação"** → **Revisar** → confira se o código é o mesmo → **Aprovar…** (escolha o nome e
-quem pode ver).
+Sem app nesse computador, o **código** do pedido (ex.: `3F2A-91C0`) fica no registro do
+host, `C:\ProgramData\rdesk\logs\host.log`. No seu app aparece o aviso **"1 computador
+aguarda sua aprovação"** → **Revisar** → confira se o código é o mesmo → **Aprovar…**
+(escolha o nome e quem pode ver).
+
+> Quer o app completo nesse computador também (para acessar outros a partir dele)? Baixe o
+> `rdesk@rdesk.seu-dominio.com.exe` e rode `install --only-share --key …`; aí o código do
+> pedido aparece no app, aberto pelo menu Iniciar.
 
 **Linux** (Ubuntu 22.04+, Debian 12+, Raspberry Pi OS):
 
@@ -146,8 +155,8 @@ quem pode ver).
    curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --host --key rdk_COLE_A_CHAVE --name "Servidor da loja"
    ```
 
-   Isso instala o app, liga as atualizações e liga o host como serviço desse usuário (ele
-   sobe sozinho em todo boot).
+   Isso instala o **`rdesk-host`** (só o host, sem o app), liga as atualizações e liga o host
+   como serviço desse usuário (ele sobe sozinho em todo boot).
 3. Pronto: ele aparece na sua lista.
 
 Com o e-mail: troque `--key …` por `--owner voce@gmail.com`. O código que você vai
@@ -156,8 +165,8 @@ conferir aparece em `journalctl --user -u rdesk-host -f`.
 **Servidor Linux sem tela** (uma VPS, um servidor no rack: Ubuntu 22.04+, Debian 12+, x86_64
 ou ARM64):
 
-Aqui vai o pacote **`rdesk-host`**: só o host, sem o app e sem as bibliotecas de área de
-trabalho. Não há imagem para ver: a sessão abre o **terminal**, os **arquivos** e os
+O mesmo **`rdesk-host`**, agora como serviço de sistema. Sem ambiente gráfico não há imagem
+para ver: ele percebe isso sozinho e a sessão abre o **terminal**, os **arquivos** e os
 **túneis de porta**, como o usuário escolhido.
 
 1. Entre por SSH com o usuário cujo terminal e arquivos vão ser usados (não como root).
@@ -213,7 +222,7 @@ qualquer outro (veja [Compartilhar](06-compartilhar.md)).
    e **Quem pode ver os computadores que ela adiciona** (por exemplo, compartilhado com o
    grupo "Laboratório", com *controle total*). **Criar chave** e copie.
 2. Em cada computador, use a mesma chave:
-   - **Windows**: `.\rdesk@rdesk.seu-dominio.com.exe install --only-share --key rdk_…`
+   - **Windows**: `.\rdesk-host@rdesk.seu-dominio.com.exe install --key rdk_…`
      (o nome é o do computador; use `--name` para outro);
    - **Linux**: `curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --host --key rdk_…`.
 3. Cada um aparece na lista assim que liga, já compartilhado como a chave mandou.

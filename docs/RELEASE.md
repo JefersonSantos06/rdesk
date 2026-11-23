@@ -9,7 +9,8 @@ Cada versão é um GitHub Release com os binários e um `release.json` assinado.
 | `rdesk-<versão>-windows-x86_64.zip` | O app (cliente + host) para Windows |
 | `rdesk-<versão>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` | O app para Linux (PC e Raspberry/Orange Pi) |
 | `rdesk_<versão>_amd64.deb`, `…_arm64.deb` | O app como pacote Debian/Ubuntu/Raspberry Pi OS |
-| `rdesk-host_<versão>_amd64.deb`, `…_arm64.deb` | Só o host, para servidores sem tela (terminal, arquivos e túneis; sem o app e sem bibliotecas de área de trabalho); atualiza para o próprio pacote (plataformas `linux-x86_64-host`, `linux-aarch64-host` no `release.json`) |
+| `rdesk-host_<versão>_amd64.deb`, `…_arm64.deb` | Só o host (sem o app), para um computador só acessado; num servidor sem display, terminal, arquivos e túneis. Atualiza para o próprio pacote (plataformas `linux-x86_64-host`, `linux-aarch64-host` no `release.json`) |
+| `rdesk-host-<versão>-windows-x86_64.exe`, `.zip` | Só o host para Windows: o `.exe` é o download (`rdesk-host@servidor.exe`, que instala o serviço), o `.zip` é de onde o serviço se atualiza (plataforma `windows-x86_64-host`) |
 | `rdesk-<versão>-macos-aarch64.tar.gz` | O `rdesk.app` para Mac com Apple Silicon (assinado com o certificado próprio do rdesk, não o da Apple: na primeira vez, o macOS 15 em diante só abre por *Ajustes → Privacidade e Segurança → Abrir mesmo assim*) |
 | `rdesk-<versão>-android.apk` | O app do celular para Android (assinado com a chave de release do Android) |
 | `rdesk-<versão>-ios.ipa` | O app para iPhone, **sem assinatura**: o Sideloadly ou o AltStore assinam com o seu Apple ID ao instalar ([mobile/README.md](../mobile/README.md)) |

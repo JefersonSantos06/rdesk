@@ -51,6 +51,24 @@ pub fn this_platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+static HOST_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This program is the host alone (rdesk-host: no app to reach others), set once at start.
+/// It updates to the host's own files, never to the app.
+pub fn set_host_only() {
+    HOST_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_host_only() -> bool {
+    HOST_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The platform this program updates from: [`this_platform`], with `-host` for rdesk-host
+/// (`rdesk_proto::release::LINUX_HOST`, `WINDOWS_HOST`).
+pub fn update_platform() -> String {
+    if is_host_only() { format!("{}-host", this_platform()) } else { this_platform() }
+}
+
 /// Download a release file (following GitHub's redirect), refusing anything larger than
 /// `max` bytes. Check it with [`check_file`] before using it.
 pub async fn download(url: &str, max: u64) -> Result<Vec<u8>> {
