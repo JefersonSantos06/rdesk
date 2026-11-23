@@ -55,6 +55,8 @@ pub(crate) struct Server {
     /// Registered with a server: tickets are required (and checked against revocations).
     pub(crate) ticket: Option<TicketPolicy>,
     require_local: bool,
+    /// No screen to share ([`crate::capture::screenless`]; never with the test picture).
+    screenless: bool,
     /// Direct access is on: who may log in with this computer's own password or key alone.
     direct: Option<DirectConfig>,
     /// Run by the Windows service: it installs released versions by itself.
@@ -146,7 +148,8 @@ pub fn load_auth_config(
         ticket,
         require_local,
         direct: false,
-        screenless: crate::capture::screenless(),
+        // Set per connection, by the running host.
+        screenless: false,
     })
 }
 
@@ -362,6 +365,7 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         host_fp,
         ticket,
         require_local: cfg.require_local,
+        screenless: !opts.fake_capture && crate::capture::screenless(),
         direct: direct.then(|| cfg.direct.clone()),
         agent: opts.agent,
         local_nets: if direct { crate::localnet::LocalNets::watch() } else { Default::default() },
@@ -512,6 +516,7 @@ impl Server {
 
         let mut auth_cfg = load_auth_config(self.host_fp, self.ticket.clone(), self.require_local)?;
         auth_cfg.direct = direct;
+        auth_cfg.screenless = self.screenless;
         let peer_id = *conn.remote_id().as_bytes();
         let monitors = self.shared.capturer.monitors().await.unwrap_or_default();
         let initial = session::pick_initial(&monitors).map(|m| m.info.id).unwrap_or(0);

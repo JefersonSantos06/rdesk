@@ -254,17 +254,11 @@ pub trait Backend {
 /// ([`rdesk_proto::Feature::LockKeys`]): Windows and X11. Not a phone's, Wayland's (the portal
 /// does not say) or a Mac's (a pressed Caps Lock does not turn the light on there).
 pub fn locks_supported() -> bool {
-    if BACKEND.get().is_some() {
-        return false;
-    }
     #[cfg(all(desktop, target_os = "linux"))]
-    {
-        !crate::wayland::active()
-    }
+    let here = !crate::wayland::active();
     #[cfg(not(all(desktop, target_os = "linux")))]
-    {
-        cfg!(windows)
-    }
+    let here = cfg!(windows);
+    BACKEND.get().is_none() && here
 }
 
 #[derive(Default)]
