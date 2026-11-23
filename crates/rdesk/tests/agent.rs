@@ -8,16 +8,17 @@ use std::time::{Duration, Instant};
 
 use rand::rngs::OsRng;
 use rdesk_host::HostState;
-use rdesk_host::ipc::{Request, Response, request};
+use rdesk_host::ipc::{Request, Response, request_at};
 use ssh_key::{Algorithm, PrivateKey};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_pipe_and_stop() {
-    // The pipe has one name per computer: with the real service installed, it is taken.
-    if request(&Request::Status).await.is_ok() {
-        eprintln!("skipped: the rdesk service's host already owns the control pipe on this computer");
-        return;
-    }
+    // A pipe of its own: the installed service's host (if any) keeps the usual one.
+    let pipe = format!(r"\\.\pipe\rdesk-host-test-{}", std::process::id());
+    let request = |req: Request| {
+        let pipe = pipe.clone();
+        async move { request_at(&pipe, &req).await }
+    };
     let dir = tempfile::tempdir().unwrap();
     // Some login method, or the host refuses to start.
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
@@ -26,6 +27,7 @@ async fn agent_pipe_and_stop() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rdesk"))
         .args(["host", "run", "--agent", "--fake-capture", "--fake-input", "--port", "0"])
         .env("RDESK_CONFIG_DIR", dir.path())
+        .env("RDESK_HOST_PIPE", &pipe)
         .env_remove("RDESK_HOST_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -35,7 +37,7 @@ async fn agent_pipe_and_stop() {
 
     let mut ready = None;
     for _ in 0..150 {
-        if let Ok(Response::Status(s)) = request(&Request::Status).await
+        if let Ok(Response::Status(s)) = request(Request::Status).await
             && matches!(s.state, HostState::Listening(_))
         {
             ready = Some(s);
@@ -47,10 +49,10 @@ async fn agent_pipe_and_stop() {
     assert!(status.fingerprint.is_some(), "the host ID is in the status");
     assert!(status.session.is_none());
 
-    assert!(matches!(request(&Request::Disconnect).await.unwrap(), Response::Ok), "anyone may end the session");
+    assert!(matches!(request(Request::Disconnect).await.unwrap(), Response::Ok), "anyone may end the session");
     if !rdesk_host::elevation::is_elevated() {
         assert!(
-            matches!(request(&Request::Restart).await.unwrap(), Response::Error(_)),
+            matches!(request(Request::Restart).await.unwrap(), Response::Error(_)),
             "only administrators restart the host"
         );
     }
@@ -66,7 +68,7 @@ async fn agent_pipe_and_stop() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     assert!(code.success(), "a requested stop exits with 0 (the service restarts it without backoff): {code:?}");
-    assert!(request(&Request::Status).await.is_err(), "the pipe is gone with the host");
+    assert!(request(Request::Status).await.is_err(), "the pipe is gone with the host");
     assert!(dir.path().join("logs").join("host.log").exists(), "the agent logs to a file");
 }
 

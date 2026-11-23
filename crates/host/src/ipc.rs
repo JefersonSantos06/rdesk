@@ -13,6 +13,12 @@ use crate::control::{Ctl, HostState, HostStatus, Reporter};
 
 pub const PIPE: &str = r"\\.\pipe\rdesk-host";
 
+/// The control pipe: [`PIPE`], one per computer, unless `RDESK_HOST_PIPE` names another (tests,
+/// which must not meet the installed service's host).
+pub fn pipe_name() -> String {
+    std::env::var("RDESK_HOST_PIPE").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| PIPE.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Request {
@@ -50,13 +56,18 @@ pub async fn here(user_id: i64, scope: rdesk_proto::api::Here) -> Result<String>
 
 /// Ask the host run by the service.
 pub async fn request(req: &Request) -> Result<Response> {
+    request_at(&pipe_name(), req).await
+}
+
+/// Ask the host listening on `pipe`.
+pub async fn request_at(pipe: &str, req: &Request) -> Result<Response> {
     #[cfg(windows)]
     {
-        imp::request(req).await
+        imp::request(pipe, req).await
     }
     #[cfg(not(windows))]
     {
-        let _ = req;
+        let _ = (pipe, req);
         Err(anyhow!(t!("the rdesk service exists only on Windows", "o serviço do rdesk só existe no Windows")))
     }
 }
@@ -146,15 +157,15 @@ mod imp {
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
-    use super::{PIPE, Request, Response};
+    use super::{Request, Response, pipe_name};
     use crate::control::{Ctl, Reporter};
 
     const ERROR_PIPE_BUSY: i32 = 231;
 
-    pub async fn request(req: &Request) -> Result<Response> {
+    pub async fn request(name: &str, req: &Request) -> Result<Response> {
         let mut tries = 0;
         let pipe = loop {
-            match ClientOptions::new().open(PIPE) {
+            match ClientOptions::new().open(name) {
                 Ok(p) => break p,
                 Err(e) if tries < 20 && e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                     tries += 1;
@@ -186,7 +197,7 @@ mod imp {
         Ok(sd as usize)
     }
 
-    fn create(sd: usize, first: bool) -> std::io::Result<NamedPipeServer> {
+    fn create(name: &str, sd: usize, first: bool) -> std::io::Result<NamedPipeServer> {
         let mut sa = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: sd as PSECURITY_DESCRIPTOR,
@@ -196,7 +207,7 @@ mod imp {
             ServerOptions::new()
                 .first_pipe_instance(first)
                 .reject_remote_clients(true)
-                .create_with_security_attributes_raw(PIPE, (&mut sa as *mut SECURITY_ATTRIBUTES).cast())
+                .create_with_security_attributes_raw(name, (&mut sa as *mut SECURITY_ATTRIBUTES).cast())
         }
     }
 
@@ -276,10 +287,11 @@ mod imp {
     pub async fn serve(reporter: Reporter, ctl: mpsc::UnboundedSender<Ctl>) -> Result<()> {
         let sd = security_descriptor()?;
         // `first`: refuse to start if someone else already owns the name.
-        let mut next = create(sd, true).map_err(|e| anyhow!("creating {PIPE}: {e}"))?;
+        let name = pipe_name();
+        let mut next = create(&name, sd, true).map_err(|e| anyhow!("creating {name}: {e}"))?;
         loop {
             next.connect().await?;
-            let connected = std::mem::replace(&mut next, create(sd, false)?);
+            let connected = std::mem::replace(&mut next, create(&name, sd, false)?);
             let (reporter, ctl) = (reporter.clone(), ctl.clone());
             tokio::spawn(async move {
                 if let Err(e) = answer(connected, reporter, ctl).await {
