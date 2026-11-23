@@ -8,17 +8,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use rdesk_common::account::{self, Session};
+use rdesk_common::account;
+#[cfg(feature = "client")]
+use rdesk_common::account::Session;
 use rdesk_common::agent::{self, Agent};
 #[cfg(feature = "client")]
 use rdesk_common::auth;
-use rdesk_common::config::{self, AuthPref, ClientConfig, format_host_id};
+use rdesk_common::config::{self, AuthPref, format_host_id};
 #[cfg(feature = "client")]
-use rdesk_common::config::{HostEntry, NetworkConfig, parse_host_id};
+use rdesk_common::config::{ClientConfig, HostEntry, NetworkConfig, parse_host_id};
 #[cfg(feature = "client")]
 use rdesk_common::transport;
 #[cfg(feature = "host")]
 use rdesk_common::transport::HostIdentity;
+#[cfg(feature = "client")]
 use rdesk_proto::api::{
     GroupRole, Machine, MachineRequest, NewEnrollKey, SetShares, ShareRole, UpdateMachine, Visibility,
 };
@@ -33,6 +36,9 @@ struct Cli {
     /// More logging (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+    // rdesk-host (no app) signs in to no account: the computer reaches the server with its
+    // own token, only to be accessed.
+    #[cfg(feature = "client")]
     /// Use this saved account instead of the one in use, for this command only: its number
     /// in `rdesk server list`, its server, its server's name or its e-mail.
     #[arg(long, global = true, value_name = "ACCOUNT")]
@@ -96,23 +102,31 @@ enum Command {
     /// ID@address for an unregistered computer on the LAN.
     #[cfg(feature = "client")]
     Connect(ConnectArgs),
+    // Accounts and the server's computers, groups and users: the app's (a user's) alone.
+    // rdesk-host is only accessed: it signs in to no account, sees and manages no computers.
     /// Computers on your server: list, register this one, rename, who may access them.
+    #[cfg(feature = "client")]
     #[command(subcommand)]
     Machines(MachinesCmd),
     /// Groups of users (to share computers with).
+    #[cfg(feature = "client")]
     #[command(subcommand)]
     Groups(GroupsCmd),
     /// Sign in to an rdesk server (opens the browser: Google/GitHub + second factor). The
     /// account is saved next to the others and is used from now on.
+    #[cfg(feature = "client")]
     Login {
         /// Server address, e.g. rdesk.example.com (default: the last one used).
         server: Option<String>,
     },
     /// Sign out of the account in use (ends this computer's session on its server).
+    #[cfg(feature = "client")]
     Logout,
     /// Who is signed in, until when, and whether the relay answers.
+    #[cfg(feature = "client")]
     Whoami,
     /// The servers you signed in to: list them, change the one in use.
+    #[cfg(feature = "client")]
     #[command(subcommand)]
     Server(ServerCmd),
     /// Install the version released on your server (Linux, as root: the .deb; run by
@@ -129,6 +143,7 @@ enum Command {
         check: bool,
     },
     /// Allowed users of the server (system admins only).
+    #[cfg(feature = "client")]
     #[command(subcommand)]
     Users(UsersCmd),
     /// List the keys your SSH agent (1Password) offers.
@@ -299,6 +314,7 @@ enum HostCmd {
     },
 }
 
+#[cfg(feature = "client")]
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum VisArg {
     /// Only you.
@@ -309,6 +325,7 @@ enum VisArg {
     Everyone,
 }
 
+#[cfg(feature = "client")]
 impl From<VisArg> for Visibility {
     fn from(v: VisArg) -> Self {
         match v {
@@ -319,6 +336,7 @@ impl From<VisArg> for Visibility {
     }
 }
 
+#[cfg(feature = "client")]
 #[derive(Subcommand)]
 enum MachinesCmd {
     /// The computers you can reach (and yours).
@@ -385,6 +403,7 @@ enum MachinesCmd {
     Keys(KeysCmd),
 }
 
+#[cfg(feature = "client")]
 #[derive(Subcommand)]
 enum KeysCmd {
     List,
@@ -410,6 +429,7 @@ enum KeysCmd {
     },
 }
 
+#[cfg(feature = "client")]
 #[derive(Subcommand)]
 enum GroupsCmd {
     List,
@@ -446,6 +466,7 @@ enum GroupsCmd {
     },
 }
 
+#[cfg(feature = "client")]
 #[derive(Subcommand)]
 enum UsersCmd {
     List,
@@ -495,6 +516,7 @@ impl From<AuthArg> for AuthPref {
     }
 }
 
+#[cfg(feature = "client")]
 #[derive(Subcommand)]
 enum ServerCmd {
     /// The saved accounts (server and e-mail), the one in use marked with *.
@@ -838,6 +860,7 @@ fn main() -> Result<()> {
     } else if service {
         rdesk_common::i18n::set(rdesk_common::i18n::system());
     }
+    #[cfg(feature = "client")]
     if let Some(sel) = &cli.account {
         Session::pin(&Session::find(sel)?.key());
     }
@@ -869,13 +892,20 @@ fn main() -> Result<()> {
         Command::Uninstall => uninstall_cmd(),
         #[cfg(feature = "client")]
         Command::Connect(a) => connect(a),
+        #[cfg(feature = "client")]
         Command::Machines(m) => runtime()?.block_on(machines_cmd(m)),
+        #[cfg(feature = "client")]
         Command::Groups(g) => runtime()?.block_on(groups_cmd(g)),
+        #[cfg(feature = "client")]
         Command::Login { server } => runtime()?.block_on(login(server)),
+        #[cfg(feature = "client")]
         Command::Logout => runtime()?.block_on(logout()),
+        #[cfg(feature = "client")]
         Command::Whoami => runtime()?.block_on(whoami()),
+        #[cfg(feature = "client")]
         Command::Server(c) => server_cmd(c),
         Command::Update { server, machine, check } => runtime()?.block_on(update(&server, machine, check)),
+        #[cfg(feature = "client")]
         Command::Users(u) => runtime()?.block_on(users_cmd(u)),
         Command::AgentKeys { agent_sock } => runtime()?.block_on(agent_keys(agent_sock)),
         #[cfg(feature = "client")]
@@ -979,7 +1009,12 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             println!("Next steps:");
             println!("  rdesk host add-key --from-agent      # authorize your 1Password SSH key");
             println!("  rdesk host set-password --op op://…  # optional password fallback");
-            println!("  rdesk host run                       # or just `rdesk` for the app");
+            if cfg!(feature = "client") {
+                println!("  rdesk host run                       # or just `rdesk` for the app");
+            } else {
+                println!("  rdesk host enroll --server … --key …  # join your server (or --owner you@example.com)");
+                println!("  rdesk host run");
+            }
             Ok(())
         }
         HostCmd::Run { port, fake_capture, fake_input, agent } => {
@@ -1059,7 +1094,17 @@ fn host_cmd(cmd: HostCmd) -> Result<()> {
             }
             rdesk_host::enroll::save(config::EnrollConfig { server, owner, key, name })?;
             if rdesk_common::account::Registration::load().is_some() {
-                println!("Saved, but this computer is already registered: unregister it first to join another way.");
+                if cfg!(feature = "client") {
+                    println!(
+                        "Saved, but this computer is already registered: unregister it first to join another way."
+                    );
+                } else {
+                    // rdesk-host signs in to no account: its owner removes it from the server.
+                    println!(
+                        "Saved, but this computer is already registered: its owner removes it from the server in \
+                         their app first, to join another way."
+                    );
+                }
             } else {
                 println!("Saved. Start the host (`rdesk host run`, or the app): it asks the server to add it.");
             }
@@ -1103,10 +1148,11 @@ async fn host_check() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Client commands
+// Client commands (the app's only: rdesk-host signs in to no account)
 // ---------------------------------------------------------------------------
 
 /// Find a computer by name, host ID (or its first characters) or server id.
+#[cfg(feature = "client")]
 fn find_machine<'a>(list: &'a [Machine], what: &str) -> Result<&'a Machine> {
     let w = what.trim().to_lowercase();
     let hits: Vec<&Machine> = list
@@ -1122,6 +1168,7 @@ fn find_machine<'a>(list: &'a [Machine], what: &str) -> Result<&'a Machine> {
     }
 }
 
+#[cfg(feature = "client")]
 fn vis_label(v: Visibility) -> &'static str {
     match v {
         Visibility::Private => "private",
@@ -1131,6 +1178,7 @@ fn vis_label(v: Visibility) -> &'static str {
 }
 
 /// A waiting computer by its code (`3F2A-91C0`, any case, dash optional) or number.
+#[cfg(feature = "client")]
 fn find_request<'a>(list: &'a [MachineRequest], what: &str) -> Result<&'a MachineRequest> {
     let norm = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_uppercase();
     let w = norm(what);
@@ -1139,6 +1187,7 @@ fn find_request<'a>(list: &'a [MachineRequest], what: &str) -> Result<&'a Machin
         .ok_or_else(|| anyhow!("no computer waiting with code {what:?} (see `rdesk machines requests`)"))
 }
 
+#[cfg(feature = "client")]
 async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
     let s = session()?;
     let api = s.api()?;
@@ -1355,6 +1404,7 @@ async fn machines_cmd(cmd: MachinesCmd) -> Result<()> {
 }
 
 /// `name[:control|view|files]`.
+#[cfg(feature = "client")]
 fn split_role(spec: &str) -> Result<(String, ShareRole)> {
     match spec.rsplit_once(':') {
         Some((name, role)) => match ShareRole::parse(role.trim()) {
@@ -1365,6 +1415,7 @@ fn split_role(spec: &str) -> Result<(String, ShareRole)> {
     }
 }
 
+#[cfg(feature = "client")]
 async fn groups_cmd(cmd: GroupsCmd) -> Result<()> {
     let api = session()?.api()?;
     let find = async |name: &str| -> Result<rdesk_proto::api::Group> {
@@ -1485,6 +1536,7 @@ async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()
 }
 
 /// The saved session, or an error telling how to get one.
+#[cfg(feature = "client")]
 fn session() -> Result<Session> {
     Session::load().ok_or_else(|| match Session::active_key().and_then(|k| Session::find(&k).ok()) {
         Some(s) => anyhow!("the sign-in to {} ended: run `rdesk login {}`", s.label(), s.server),
@@ -1492,6 +1544,7 @@ fn session() -> Result<Session> {
     })
 }
 
+#[cfg(feature = "client")]
 fn server_cmd(c: ServerCmd) -> Result<()> {
     match c {
         ServerCmd::List => {
@@ -1522,6 +1575,7 @@ fn server_cmd(c: ServerCmd) -> Result<()> {
     }
 }
 
+#[cfg(feature = "client")]
 async fn login(server: Option<String>) -> Result<()> {
     let mut cfg: ClientConfig = config::load_toml(config::CLIENT_CONFIG)?;
     let server = match server.or_else(|| cfg.server.clone()) {
@@ -1543,6 +1597,7 @@ async fn login(server: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "client")]
 async fn logout() -> Result<()> {
     let Some(s) = Session::load() else {
         // Its sign-in had already ended: just forget it.
@@ -1563,6 +1618,7 @@ async fn logout() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "client")]
 async fn whoami() -> Result<()> {
     use rdesk_common::transport::{self, Role};
     let Some(s) = Session::load() else {
@@ -1599,6 +1655,7 @@ async fn whoami() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "client")]
 async fn users_cmd(cmd: UsersCmd) -> Result<()> {
     let api = session()?.api()?;
     let find = async |email: &str| -> Result<rdesk_proto::api::AdminUser> {

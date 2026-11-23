@@ -15,6 +15,14 @@ sem tela e para quem prefere o terminal. As mensagens da linha de comando são e
 Nos exemplos abaixo, troque `rdesk` pelo caminho do seu sistema. `rdesk --help` e
 `rdesk <comando> --help` mostram todas as opções.
 
+**No `rdesk-host`** (só o host, para um computador só acessado) existem apenas os comandos
+deste computador: `rdesk host …` ([Este computador](#este-computador-host)), `rdesk update`,
+`rdesk agent-keys` e, no Windows, `install`, `uninstall` e `service`. Ele não entra em conta
+nenhuma (não tem `login`, `whoami`, `server`), não vê nem gerencia outros computadores (não
+tem `machines`, `groups`, `users`) e não se conecta a eles (não tem `connect`, `shell`,
+`send`, `get`, `ls`, `tunnel`): entra no servidor com `rdesk host enroll` (ou o `install`) e
+usa só o token do próprio computador. Para tirá-lo do servidor, o dono o remove pelo app.
+
 ## Conta
 
 ```sh
