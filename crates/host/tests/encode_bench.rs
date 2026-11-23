@@ -23,7 +23,7 @@ fn lossless_sizes_on_this_screen() {
             rdesk_common::tiles::Frame { width: w, height: h, data: b[8..].to_vec() }
         }
         Err(_) => {
-            let f = rt.block_on(cap.grab(m.info.id)).expect("capture");
+            let f = std::sync::Arc::unwrap_or_clone(rt.block_on(cap.grab(m.info.id)).expect("capture").frame);
             let mut b = f.width.to_le_bytes().to_vec();
             b.extend_from_slice(&f.height.to_le_bytes());
             b.extend_from_slice(&f.data);

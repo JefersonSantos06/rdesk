@@ -21,7 +21,7 @@ use rdesk_proto::{FrameHeader, Tile, Tile2, TileData, VideoCaps, encode_into};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::autoq::{self, AutoQuality};
-use crate::capture::Capturer;
+use crate::capture::{Capturer, Changes};
 use crate::scroll::{self, RowHashes};
 use crate::tilecache::TileCache;
 
@@ -73,6 +73,9 @@ pub struct Scheduler {
     height: u32,
     cols: u32,
     tiles: Vec<TileState>,
+    /// The capture last planned, when its backend says what changes ([`Changes`]): its source
+    /// and read.
+    seen: Option<(u64, u64)>,
 }
 
 pub struct Planned {
@@ -97,7 +100,7 @@ pub enum Kind {
 impl Scheduler {
     pub fn new(width: u32, height: u32) -> Self {
         let (cols, rows) = tiles::grid(width, height);
-        Self { width, height, cols, tiles: vec![TileState::default(); (cols * rows) as usize] }
+        Self { width, height, cols, tiles: vec![TileState::default(); (cols * rows) as usize], seen: None }
     }
 
     pub fn dims(&self) -> (u32, u32) {
@@ -105,13 +108,40 @@ impl Scheduler {
     }
 
     /// Decide which tiles of `frame` to send in frame `frame_id`.
+    #[cfg(test)]
     pub fn plan(&mut self, frame: &Frame, frame_id: u64, now: Instant) -> Vec<Planned> {
-        let hashes: Vec<TileHash> =
-            (0..self.tiles.len()).into_par_iter().map(|i| frame.hash_tile(self.rect(i))).collect();
+        self.plan_changes(frame, frame_id, now, None)
+    }
+
+    /// [`Scheduler::plan`] for a capture whose backend says which tiles changed: the others
+    /// keep their hash instead of being hashed again.
+    pub fn plan_changes(
+        &mut self,
+        frame: &Frame,
+        frame_id: u64,
+        now: Instant,
+        changes: Option<&Changes>,
+    ) -> Vec<Planned> {
+        // Tiles unchanged since the capture planned last (same source, a later read).
+        let since = match (changes, self.seen) {
+            (Some(c), Some((source, seq))) if c.source == source && c.tiles.len() == self.tiles.len() => {
+                Some((&c.tiles, seq))
+            }
+            _ => None,
+        };
+        let hashes: Vec<Option<TileHash>> = (0..self.tiles.len())
+            .into_par_iter()
+            .map(|i| {
+                let same = since.is_some_and(|(tiles, seq)| tiles[i] <= seq) && self.tiles[i].current.is_some();
+                (!same).then(|| frame.hash_tile(self.rect(i)))
+            })
+            .collect();
+        self.seen = changes.map(|c| (c.source, c.seq));
         let mut out = Vec::new();
         let mut refinements = 0;
         for (i, hash) in hashes.into_iter().enumerate() {
             let t = &mut self.tiles[i];
+            let Some(hash) = hash.or(t.current) else { continue };
             if t.current != Some(hash) {
                 if t.current.is_some() {
                     t.changed_at = Some(now);
@@ -474,6 +504,7 @@ pub async fn run(
     let mut consecutive_errors = 0u32;
     let mut extras = opts.caps.map(Extras::new);
     let mut auto = AutoQuality::new(current.jpeg_quality, Instant::now());
+    name_tile_threads();
 
     // What happens when the client acknowledges a frame, or it is lost.
     let on_ack = |id: u64,
@@ -576,10 +607,10 @@ pub async fn run(
         }
         last_capture = Instant::now();
 
-        let frame = match capturer.grab(current.monitor).await {
-            Ok(f) => {
+        let shot = match capturer.grab(current.monitor).await {
+            Ok(s) => {
                 consecutive_errors = 0;
-                f
+                s
             }
             Err(e) => {
                 consecutive_errors += 1;
@@ -590,6 +621,7 @@ pub async fn run(
                 continue;
             }
         };
+        let frame = shot.frame;
         // The client's size limit, then what automatic quality chose.
         let (mut w, mut h) = crate::scale::fit(frame.width, frame.height, current.max_size.0, current.max_size.1)
             .unwrap_or((frame.width, frame.height));
@@ -600,10 +632,11 @@ pub async fn run(
             (current.jpeg_quality, 100)
         };
         (w, h) = autoq::scaled(w, h, scale_pct);
-        let frame = if (w, h) != (frame.width, frame.height) {
-            tokio::task::spawn_blocking(move || crate::scale::downscale(&frame, w, h)).await?
+        // Scaled, the backend's tiles are not these: all of them are compared.
+        let (frame, changes) = if (w, h) != (frame.width, frame.height) {
+            (Arc::new(tokio::task::spawn_blocking(move || crate::scale::downscale(&frame, w, h)).await?), None)
         } else {
-            frame
+            (frame, shot.changes)
         };
         if sched.as_ref().is_none_or(|s| s.dims() != (frame.width, frame.height)) {
             sched = Some(Scheduler::new(frame.width, frame.height));
@@ -612,8 +645,7 @@ pub async fn run(
         let s = sched.as_mut().expect("scheduler just set");
         let id = next_id;
         let sources = extras.as_ref().map(|_| s.copy_sources());
-        let mut planned = s.plan(&frame, id, Instant::now());
-        let frame = Arc::new(frame);
+        let mut planned = s.plan_changes(&frame, id, Instant::now(), changes.as_ref());
         if planned.is_empty() {
             if let Some(x) = extras.as_mut() {
                 x.prev = Some((frame, None));
@@ -714,6 +746,15 @@ pub async fn run(
             let _ = done.send(if ok { WriteDone::Ok } else { WriteDone::Failed(id) });
         });
     }
+}
+
+/// The thread pool hashing and encoding tiles, named for `top` (unnamed, its threads took the
+/// name of the tokio worker that started it).
+fn name_tile_threads() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rayon::ThreadPoolBuilder::new().thread_name(|i| format!("rdesk-tiles-{i}")).build_global();
+    });
 }
 
 async fn write_frame(conn: &transport::Connection, buf: &[u8], mut cancel: oneshot::Receiver<()>) -> bool {
@@ -966,6 +1007,24 @@ mod tests {
         assert!(s.plan(&f, 2, t0).is_empty());
         s.acked(1);
         assert!(s.plan(&f, 3, t0 + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn tiles_the_capture_says_unchanged_are_not_hashed_again() {
+        let changes = |seq, tiles: Vec<u64>| Changes { source: 1, seq, tiles: Arc::new(tiles) };
+        let mut s = Scheduler::new(128, 64);
+        let t0 = Instant::now();
+        let a = frame_with(128, 64, 1);
+        assert_eq!(s.plan_changes(&a, 1, t0, Some(&changes(1, vec![1, 1]))).len(), 2);
+        s.acked(1);
+        // Both tiles differ, but the capture says only the second changed (read 2): the
+        // first keeps its hash, so it is not sent.
+        let b = frame_with(128, 64, 9);
+        let p = s.plan_changes(&b, 2, t0, Some(&changes(2, vec![1, 2])));
+        assert_eq!(p.iter().map(|p| p.index).collect::<Vec<_>>(), [1]);
+        // Another source (a new picture): everything is compared again.
+        let other = Changes { source: 2, ..changes(2, vec![1, 2]) };
+        assert_eq!(s.plan_changes(&b, 3, t0, Some(&other)).len(), 1, "tile 0 now, tile 1 is in flight");
     }
 
     #[test]

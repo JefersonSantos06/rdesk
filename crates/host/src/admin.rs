@@ -319,13 +319,13 @@ pub async fn diagnose() -> Vec<CheckLine> {
                 let t = std::time::Instant::now();
                 let label = tf!("Screen {}", "Tela {}", m.info.name);
                 match cap.grab(m.info.id).await {
-                    Ok(f) => out.push(line(
+                    Ok(shot) => out.push(line(
                         &label,
                         tf!(
                             "{}x{}, captured in {} ms",
                             "{}x{}, capturada em {} ms",
-                            f.width,
-                            f.height,
+                            shot.frame.width,
+                            shot.frame.height,
                             t.elapsed().as_millis()
                         ),
                         true,

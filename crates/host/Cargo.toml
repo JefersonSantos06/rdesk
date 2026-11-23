@@ -55,8 +55,10 @@ enigo = { version = "0.6", optional = true }
 ashpd = { version = "0.14", default-features = false, features = ["async-io", "pipewire", "remote_desktop", "screencast"], optional = true }
 pipewire = { version = "0.10", optional = true }
 pollster = { version = "1", optional = true }
-# The version enigo already uses.
-x11rb = { version = "0.13", optional = true }
+# The version enigo already uses; also screen capture with MIT-SHM and DAMAGE (`x11`).
+x11rb = { version = "0.13", optional = true, features = ["shm", "damage", "randr"] }
+# System V shared memory for MIT-SHM.
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # The speakers' sound (WASAPI loopback).
@@ -81,7 +83,7 @@ default = ["screen"]
 # A Linux computer's screen, keyboard, mouse and sound (X11 and Wayland). Without it, a server
 # reached only by terminal, files and tunnels, with no X11, PipeWire or sound libraries to
 # install. Windows and Mac computers always have them; phones bring their own.
-screen = ["rdesk-common/h264", "dep:xcap", "dep:opus", "dep:enigo", "dep:ashpd", "dep:pipewire", "dep:pollster", "dep:x11rb"]
+screen = ["rdesk-common/h264", "dep:xcap", "dep:opus", "dep:enigo", "dep:ashpd", "dep:pipewire", "dep:pollster", "dep:x11rb", "dep:libc"]
 
 [dev-dependencies]
 iroh-base = "1.5"

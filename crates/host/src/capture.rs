@@ -6,7 +6,7 @@
 //! app's MediaProjection on Android), and a synthetic animated test pattern
 //! (`RDESK_FAKE_CAPTURE=1`) for tests and machines without a display.
 
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 #[cfg(desktop)]
@@ -34,7 +34,7 @@ pub struct InputRect {
 
 enum Req {
     List(oneshot::Sender<Result<Vec<MonitorDesc>>>),
-    Grab(u32, oneshot::Sender<Result<Frame>>),
+    Grab(u32, oneshot::Sender<Result<Shot>>),
     Cursor(oneshot::Sender<Option<crate::cursor::Current>>),
 }
 
@@ -68,7 +68,7 @@ impl Capturer {
                             let _ = reply.send(backend.list());
                         }
                         Req::Grab(id, reply) => {
-                            let _ = reply.send(backend.grab(id));
+                            let _ = reply.send(backend.shot(id));
                         }
                         Req::Cursor(reply) => {
                             let _ = reply.send(if fake { None } else { cursor.read() });
@@ -93,11 +93,28 @@ impl Capturer {
         rx.await.ok().flatten()
     }
 
-    pub async fn grab(&self, id: u32) -> Result<Frame> {
+    pub async fn grab(&self, id: u32) -> Result<Shot> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Req::Grab(id, tx)).map_err(|_| anyhow!("capture thread gone"))?;
         rx.await?
     }
+}
+
+/// A captured picture, and which of its tiles changed when the backend knows it.
+pub struct Shot {
+    pub frame: Arc<Frame>,
+    pub changes: Option<Changes>,
+}
+
+/// Which tiles ([`rdesk_proto::TILE`] grid) of a backend's picture changed, so that the video
+/// loop compares only those. The backend keeps the picture of `source` and numbers what it
+/// reads: `tiles[i]` is the read that last changed tile `i`, `seq` the newest read. Whoever
+/// saw read `s` of the same `source` needs to look again only at the tiles past `s`.
+#[derive(Clone)]
+pub struct Changes {
+    pub source: u64,
+    pub seq: u64,
+    pub tiles: Arc<Vec<u64>>,
 }
 
 /// Where the pictures come from. Runs on the capture thread, so it may block (briefly: the
@@ -105,6 +122,11 @@ impl Capturer {
 pub trait Backend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>>;
     fn grab(&mut self, id: u32) -> Result<Frame>;
+
+    /// [`Backend::grab`], saying what changed where the backend knows it.
+    fn shot(&mut self, id: u32) -> Result<Shot> {
+        Ok(Shot { frame: Arc::new(self.grab(id)?), changes: None })
+    }
 }
 
 static SOURCE: OnceLock<fn() -> Box<dyn Backend>> = OnceLock::new();
@@ -150,7 +172,50 @@ fn platform_backend() -> Box<dyn Backend> {
         tracing::info!("Wayland: the screen comes through the desktop portal");
         Box::new(WaylandBackend::default())
     } else {
-        Box::new(XcapBackend::default())
+        Box::new(X11Backend::default())
+    }
+}
+
+/// X11: [`crate::x11`] (MIT-SHM and DAMAGE), or xcap where that cannot read the screen.
+#[cfg(all(desktop, target_os = "linux"))]
+#[derive(Default)]
+struct X11Backend {
+    x11: Option<crate::x11::Capture>,
+    /// [`crate::x11`] could not start: xcap from then on.
+    xcap_only: bool,
+    xcap: XcapBackend,
+}
+
+#[cfg(all(desktop, target_os = "linux"))]
+impl Backend for X11Backend {
+    fn list(&mut self) -> Result<Vec<MonitorDesc>> {
+        // The same monitors (RandR outputs) either way; xcap names them.
+        self.xcap.list()
+    }
+
+    fn grab(&mut self, id: u32) -> Result<Frame> {
+        Ok(Arc::unwrap_or_clone(self.shot(id)?.frame))
+    }
+
+    fn shot(&mut self, id: u32) -> Result<Shot> {
+        if self.x11.is_none() && !self.xcap_only {
+            match crate::x11::Capture::open() {
+                Ok(c) => self.x11 = Some(c),
+                Err(e) => {
+                    tracing::info!("X11: capturing with xcap ({e:#})");
+                    self.xcap_only = true;
+                }
+            }
+        }
+        let Some(x11) = &mut self.x11 else {
+            return Ok(Shot { frame: Arc::new(self.xcap.grab(id)?), changes: None });
+        };
+        // A failure (the X server restarted, say) starts over with the next capture.
+        let shot = x11.grab(id);
+        if shot.is_err() {
+            self.x11 = None;
+        }
+        shot
     }
 }
 

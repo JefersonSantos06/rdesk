@@ -36,6 +36,8 @@ pub mod wake;
 pub mod wayland;
 #[cfg(windows)]
 pub mod win;
+#[cfg(all(desktop, target_os = "linux"))]
+pub mod x11;
 
 pub use control::{HostHandle, HostState, HostStatus, Reporter};
 pub use server::{RunOpts, run};
