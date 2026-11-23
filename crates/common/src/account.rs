@@ -665,6 +665,21 @@ impl Api {
         self.get(api::PATH_GROUPS).await
     }
 
+    /// The computers shared with a group (its members and system admins).
+    pub async fn group_machines(&self, id: i64) -> Result<Vec<rdesk_proto::api::GroupMachine>> {
+        // A server from before this list has no such route: a bare 404, unlike "no such group".
+        self.get(&format!("{}/{id}/machines", api::PATH_GROUPS)).await.map_err(|e| {
+            if e.to_string() == reqwest::StatusCode::NOT_FOUND.to_string() {
+                anyhow!(crate::t!(
+                    "This server does not list a group's computers yet: update it (Admin, Versions).",
+                    "Este servidor ainda não lista os computadores dos grupos: atualize-o (Admin, Versões)."
+                ))
+            } else {
+                e
+            }
+        })
+    }
+
     pub async fn all_groups(&self) -> Result<Vec<GroupRef>> {
         self.get(&format!("{}/all", api::PATH_GROUPS)).await
     }

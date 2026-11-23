@@ -88,6 +88,7 @@ pub fn router(st: Shared) -> Router {
         .route(&format!("{}/all", paths::PATH_GROUPS), get(groups::all))
         .route(&format!("{}/{{id}}", paths::PATH_GROUPS), axum::routing::patch(groups::rename).delete(groups::delete))
         .route(&format!("{}/{{id}}/members", paths::PATH_GROUPS), post(groups::add_member))
+        .route(&format!("{}/{{id}}/machines", paths::PATH_GROUPS), get(groups::machines))
         .route(
             &format!("{}/{{id}}/members/{{user}}", paths::PATH_GROUPS),
             axum::routing::patch(groups::set_role).delete(groups::remove_member),

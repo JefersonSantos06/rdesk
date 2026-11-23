@@ -508,6 +508,10 @@ impl eframe::App for App {
         self.settings.tick();
         self.admin.tick(ctx, self.account.session());
         self.groups.tick(ctx);
+        // A group's computer opens like one of the Computers page (its windows, its account).
+        if let Some((m, terminal)) = self.groups.open.take() {
+            self.computers.open_from_elsewhere(&m, terminal);
+        }
         if std::mem::take(&mut self.account.changed) {
             // A different account (or none): its list, nothing of the previous one's.
             self.computers.reset();

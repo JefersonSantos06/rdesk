@@ -46,14 +46,20 @@ Em vez de adicionar pessoa por pessoa em cada computador, crie um grupo (ex.: "F
 
 1. **Grupos** (barra lateral) → **Novo grupo** → nome → **Criar**. Quem cria vira
    **admin do grupo**.
-2. Selecione o grupo. Em **Adicionar uma pessoa**, digite o nome ou e-mail e clique em
-   **Adicionar** (marque *como admin do grupo* se for o caso).
+2. Selecione o grupo e abra a aba **Membros**. Em **Adicionar uma pessoa**, digite o nome ou
+   e-mail e clique em **Adicionar** (marque *como admin do grupo* se for o caso).
 3. No **⋯** de cada membro: **Tornar admin** / **Tornar membro** e **Remover do grupo…**.
 4. Para renomear, clique no lápis ao lado do nome do grupo.
 5. **Sair do grupo** e **Excluir grupo…** ficam no fim da página.
 
 Depois, compartilhe os computadores com o grupo em **Gerenciar acesso**. Quem entra no
 grupo ganha o acesso; quem sai perde na hora.
+
+A aba **Computadores** do grupo (a primeira) mostra tudo o que está compartilhado com ele,
+num lugar só: quem está online, de quem é cada um e o que o grupo pode fazer lá (*controle
+total*, *só visualizar*, *só arquivos*, *só terminal*). **Conectar** e o botão de terminal
+abrem a sessão dali mesmo. Um computador marcado **privado** guarda o compartilhamento, mas
+o grupo não acessa enquanto ele estiver em **Só eu**; só quem o gerencia o vê nessa lista.
 
 Excluir um grupo tira o acesso que ele dava aos membros.
 

@@ -4,22 +4,25 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use rdesk_proto::api::{AddMember, Group, GroupMember, GroupRef, GroupRole, NewGroup, SetRole, UserRef};
+use rdesk_proto::api::{
+    AddMember, Group, GroupMachine, GroupMember, GroupRef, GroupRole, NewGroup, SetRole, ShareRole, UserRef, Visibility,
+};
 
-use crate::access::GroupRow;
+use crate::access::{GroupRow, MachineRow};
 use crate::api::{Authed, Error};
-use crate::db::Session;
+use crate::db::{Session, User};
 use crate::state::Shared;
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Error {
     Error(code, msg.into())
 }
 
-fn view(st: &Shared, g: &GroupRow, viewer: i64) -> Group {
-    Group {
+fn view(st: &Shared, g: &GroupRow, viewer: &User) -> Result<Group, Error> {
+    Ok(Group {
         id: g.id,
         name: g.name.clone(),
-        my_role: g.members.iter().find(|(u, _)| *u == viewer).map(|(_, r)| *r),
+        machine_count: shared_with(st, g, viewer)?.len() as u32,
+        my_role: g.members.iter().find(|(u, _)| *u == viewer.id).map(|(_, r)| *r),
         members: g
             .members
             .iter()
@@ -31,7 +34,25 @@ fn view(st: &Shared, g: &GroupRow, viewer: i64) -> Group {
                     .map(|u| GroupMember { user: UserRef { id: u.id, email: u.email, name: u.name }, role: *r })
             })
             .collect(),
+    })
+}
+
+/// The computers shared with `g` that `viewer` sees listed, with the group's role and whether
+/// the share counts now: every active one, and inactive ones (a private computer) only for
+/// whoever manages that computer or a system admin.
+fn shared_with(st: &Shared, g: &GroupRow, viewer: &User) -> Result<Vec<(MachineRow, ShareRole, bool)>, Error> {
+    let mut out = Vec::new();
+    for id in st.db.machines_shared_with_group(g.id)? {
+        let Some(m) = st.db.machine(id)? else { continue };
+        let (_, groups) = st.db.shares(id)?;
+        let Some(role) = groups.iter().find(|(gid, _)| *gid == g.id).map(|(_, r)| *r) else { continue };
+        let active = m.visibility != Visibility::Private;
+        if active || viewer.is_admin || st.db.can_manage(viewer.id, &m)? {
+            out.push((m, role, active));
+        }
     }
+    out.sort_by_key(|(m, _, _)| m.name.to_lowercase());
+    Ok(out)
 }
 
 fn group(st: &Shared, id: i64) -> Result<GroupRow, Error> {
@@ -64,9 +85,29 @@ pub async fn list(State(st): State<Shared>, Authed(s): Authed) -> Result<Json<Ve
     Ok(Json(
         gs.iter()
             .filter(|g| s.user.is_admin || g.members.iter().any(|(u, _)| *u == s.user.id))
-            .map(|g| view(&st, g, s.user.id))
-            .collect(),
+            .map(|g| view(&st, g, &s.user))
+            .collect::<Result<_, _>>()?,
     ))
+}
+
+/// `GET /api/groups/{id}/machines`: the computers shared with the group (its members and
+/// system admins).
+pub async fn machines(
+    State(st): State<Shared>,
+    Authed(s): Authed,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<GroupMachine>>, Error> {
+    let g = group(&st, id)?;
+    if !s.user.is_admin && !g.members.iter().any(|(u, _)| *u == s.user.id) {
+        return Err(err(StatusCode::FORBIDDEN, "only the group's members see its computers"));
+    }
+    let list = shared_with(&st, &g, &s.user)?
+        .into_iter()
+        .map(|(m, role, active)| {
+            Ok(GroupMachine { machine: crate::machines::view(&st, &m, Some(s.user.id))?, role, active })
+        })
+        .collect::<Result<_, Error>>()?;
+    Ok(Json(list))
 }
 
 /// `GET /api/groups/all`: every group's name (to share a computer with).
@@ -81,7 +122,7 @@ pub async fn create(
 ) -> Result<Json<Group>, Error> {
     let id = st.db.create_group(&req.name, s.user.id)?;
     st.db.audit(Some(s.user.id), "group-created", req.name.trim());
-    Ok(Json(view(&st, &group(&st, id)?, s.user.id)))
+    Ok(Json(view(&st, &group(&st, id)?, &s.user)?))
 }
 
 pub async fn rename(
@@ -92,7 +133,7 @@ pub async fn rename(
 ) -> Result<Json<Group>, Error> {
     managed(&st, id, &s)?;
     st.db.rename_group(id, &req.name)?;
-    Ok(Json(view(&st, &group(&st, id)?, s.user.id)))
+    Ok(Json(view(&st, &group(&st, id)?, &s.user)?))
 }
 
 pub async fn delete(State(st): State<Shared>, Authed(s): Authed, Path(id): Path<i64>) -> Result<StatusCode, Error> {
@@ -114,7 +155,7 @@ pub async fn add_member(
         .user_by_email(&req.email)?
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("{} is not a user of this server", req.email.trim())))?;
     with_revocations(&st, id, || st.db.set_member(id, u.id, req.role))?;
-    Ok(Json(view(&st, &group(&st, id)?, s.user.id)))
+    Ok(Json(view(&st, &group(&st, id)?, &s.user)?))
 }
 
 pub async fn set_role(
@@ -128,7 +169,7 @@ pub async fn set_role(
         return Err(err(StatusCode::NOT_FOUND, "not a member"));
     }
     st.db.set_member(id, user, req.role)?;
-    Ok(Json(view(&st, &group(&st, id)?, s.user.id)))
+    Ok(Json(view(&st, &group(&st, id)?, &s.user)?))
 }
 
 /// Remove a member; anyone may remove themselves (leave).

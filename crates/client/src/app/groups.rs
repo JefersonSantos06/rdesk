@@ -1,18 +1,29 @@
 //! "Groups": groups of people to share computers with. Anyone can create one and becomes
 //! its admin; admins add and remove members and make other admins (there is no owner).
+//! Each group shows the computers shared with it, to open from there, and its members.
 
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use egui::{RichText, Ui};
 use rdesk_common::account::{Api, Session};
+use rdesk_common::i18n::role_label;
 use rdesk_common::{t, tf};
-use rdesk_proto::api::{Group, GroupRole, UserRef};
+use rdesk_proto::api::{Group, GroupMachine, GroupRole, Machine, UserRef, Visibility};
 
+use super::access::person_label;
 use super::account::{list_row, menu_item, menu_item_danger, more_menu, rows_card, spawn};
 use crate::ui::{self, Tone, icons, size, space};
 
 type Loaded = Result<(Vec<Group>, Vec<UserRef>), String>;
+type Machines = Result<Vec<GroupMachine>, String>;
+
+/// What the selected group shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tab {
+    Computers,
+    Members,
+}
 
 /// Something that asks first.
 #[derive(Clone, Debug)]
@@ -40,6 +51,14 @@ pub(super) struct GroupsPage {
     me: i64,
     sys_admin: bool,
     pub(super) toast: Option<(String, bool, Instant)>,
+    tab: Tab,
+    /// The computers of a group (its id), and their loading.
+    machines: Option<(i64, Machines)>,
+    machines_job: Option<(i64, Receiver<Machines>)>,
+    /// Filters a group's computers.
+    machine_search: String,
+    /// A session the Computers page opens (the computer, terminal only).
+    pub(super) open: Option<(Machine, bool)>,
 }
 
 impl GroupsPage {
@@ -58,13 +77,32 @@ impl GroupsPage {
             me: -1,
             sys_admin: false,
             toast: None,
+            tab: Tab::Computers,
+            machines: None,
+            machines_job: None,
+            machine_search: String::new(),
+            open: None,
         }
+    }
+
+    /// The computers shared with group `gid`.
+    fn load_machines(&mut self, ctx: &egui::Context, gid: i64) {
+        let Some(s) = Session::load() else { return };
+        self.machines_job = Some((
+            gid,
+            spawn(ctx, move || async move {
+                let api = s.api().map_err(|e| format!("{e:#}"))?;
+                api.group_machines(gid).await.map_err(|e| format!("{e:#}"))
+            }),
+        ));
     }
 
     pub(super) fn reload(&mut self, ctx: &egui::Context) {
         let Some(s) = Session::load() else { return };
         self.me = s.user.id;
         self.sys_admin = s.user.is_admin;
+        // Back on the page: the computers are read again too.
+        self.machines = None;
         self.load_job = Some(spawn(ctx, move || async move {
             let api = s.api().map_err(|e| format!("{e:#}"))?;
             let f = async { anyhow::Ok((api.groups().await?, api.directory().await?)) };
@@ -87,6 +125,12 @@ impl GroupsPage {
     }
 
     pub(super) fn tick(&mut self, ctx: &egui::Context) {
+        if let Some((gid, rx)) = &self.machines_job
+            && let Ok(r) = rx.try_recv()
+        {
+            self.machines = Some((*gid, r));
+            self.machines_job = None;
+        }
         if let Some(rx) = &self.load_job
             && let Ok(r) = rx.try_recv()
         {
@@ -229,7 +273,12 @@ impl GroupsPage {
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 ui::truncate(ui, RichText::new(&g.name).strong());
                                 let what = match g.my_role {
-                                    Some(_) => tf!("{} member(s)", "{} membro(s)", g.members.len()),
+                                    Some(_) => tf!(
+                                        "{} member(s) · {} computer(s)",
+                                        "{} membro(s) · {} computador(es)",
+                                        g.members.len(),
+                                        g.machine_count
+                                    ),
                                     None => t!("not a member", "não é membro").into(),
                                 };
                                 ui::truncate(ui, RichText::new(what).size(size::SMALL).color(p.muted));
@@ -246,12 +295,14 @@ impl GroupsPage {
                     self.selected = Some(g.id);
                     self.rename = None;
                     self.member_search.clear();
+                    self.machine_search.clear();
                 }
             }
         });
     }
 
-    /// The selected group: its name, members, adding a person, leaving and deleting.
+    /// The selected group: its name, its computers or its members (adding a person), leaving
+    /// and deleting.
     fn detail_ui(&mut self, ui: &mut Ui, groups: &[Group], people: &[UserRef]) {
         let ctx = ui.ctx().clone();
         let p = ui::pal(ui);
@@ -317,128 +368,148 @@ impl GroupsPage {
             Some(GroupRole::Member) => t!("you are a member", "você é membro"),
             None => t!("you are not a member", "você não é membro"),
         };
-        ui::caption(ui, &tf!("{} member(s) · {role}", "{} membro(s) · {role}", g.members.len()));
+        ui::caption(
+            ui,
+            &tf!(
+                "{} member(s) · {} computer(s) · {role}",
+                "{} membro(s) · {} computador(es) · {role}",
+                g.members.len(),
+                g.machine_count
+            ),
+        );
         ui.add_space(space::M);
 
-        // ---- members ----
-        ui::section(ui, t!("Members", "Membros"));
-        ui.add_space(space::XS);
-        rows_card(ui, &g.members, |ui, m| {
-            ui::row(
-                ui,
-                |ui| {
-                    let name = if m.user.name.is_empty() { &m.user.email } else { &m.user.name };
-                    ui::avatar(ui, name, 32.0);
-                    let first = if m.user.id == me { tf!("{name} · you", "{name} · você") } else { name.clone() };
-                    if m.user.name.is_empty() {
-                        // One line: centered like the avatar.
-                        ui::truncate(ui, first);
-                    } else {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
+        // ---- computers | members ----
+        let (computers, members) = (
+            tf!("Computers ({})", "Computadores ({})", g.machine_count),
+            tf!("Members ({})", "Membros ({})", g.members.len()),
+        );
+        ui::tabs(ui, &mut self.tab, &[(Tab::Computers, computers.as_str()), (Tab::Members, members.as_str())]);
+        ui.add_space(space::S);
+        if self.tab == Tab::Computers {
+            self.computers_ui(ui, &g);
+        } else {
+            // ---- members ----
+            rows_card(ui, &g.members, |ui, m| {
+                ui::row(
+                    ui,
+                    |ui| {
+                        let name = if m.user.name.is_empty() { &m.user.email } else { &m.user.name };
+                        ui::avatar(ui, name, 32.0);
+                        let first =
+                            if m.user.id == me { tf!("{name} · you", "{name} · você") } else { name.clone() };
+                        if m.user.name.is_empty() {
+                            // One line: centered like the avatar.
                             ui::truncate(ui, first);
-                            ui::truncate(ui, RichText::new(&m.user.email).size(size::SMALL).color(p.muted));
-                        });
-                    }
-                },
-                |ui| {
-                    if manage {
-                        ui.add_enabled_ui(!busy, |ui| {
-                            more_menu(ui, t!("More", "Mais"), |ui| {
-                                let (gid, uid, email) = (g.id, m.user.id, m.user.email.clone());
-                                let to = if m.role == GroupRole::Admin { GroupRole::Member } else { GroupRole::Admin };
-                                let (icon, label) = if to == GroupRole::Admin {
-                                    (icons::CROWN, t!("Make admin", "Tornar admin"))
-                                } else {
-                                    (icons::USER, t!("Make member", "Tornar membro"))
-                                };
-                                if menu_item(ui, icon, label).clicked() {
-                                    self.run(&ctx, move |api| async move {
-                                        api.set_member_role(gid, uid, to).await?;
-                                        Ok(tf!("Updated {email}.", "{email} atualizado."))
-                                    });
-                                }
-                                if m.user.id != me
-                                    && menu_item_danger(
-                                        ui,
-                                        icons::USER_MINUS,
-                                        t!("Remove from the group…", "Remover do grupo…"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.confirm =
-                                        Some(Confirm::RemoveMember { gid, uid, email: m.user.email.clone() });
-                                }
+                        } else {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui::truncate(ui, first);
+                                ui::truncate(ui, RichText::new(&m.user.email).size(size::SMALL).color(p.muted));
                             });
+                        }
+                    },
+                    |ui| {
+                        if manage {
+                            ui.add_enabled_ui(!busy, |ui| {
+                                more_menu(ui, t!("More", "Mais"), |ui| {
+                                    let (gid, uid, email) = (g.id, m.user.id, m.user.email.clone());
+                                    let to =
+                                        if m.role == GroupRole::Admin { GroupRole::Member } else { GroupRole::Admin };
+                                    let (icon, label) = if to == GroupRole::Admin {
+                                        (icons::CROWN, t!("Make admin", "Tornar admin"))
+                                    } else {
+                                        (icons::USER, t!("Make member", "Tornar membro"))
+                                    };
+                                    if menu_item(ui, icon, label).clicked() {
+                                        self.run(&ctx, move |api| async move {
+                                            api.set_member_role(gid, uid, to).await?;
+                                            Ok(tf!("Updated {email}.", "{email} atualizado."))
+                                        });
+                                    }
+                                    if m.user.id != me
+                                        && menu_item_danger(
+                                            ui,
+                                            icons::USER_MINUS,
+                                            t!("Remove from the group…", "Remover do grupo…"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.confirm =
+                                            Some(Confirm::RemoveMember { gid, uid, email: m.user.email.clone() });
+                                    }
+                                });
+                            });
+                        }
+                        if m.role == GroupRole::Admin {
+                            ui::badge(ui, "admin", Tone::Accent);
+                        } else {
+                            ui::badge(ui, t!("member", "membro"), Tone::Neutral);
+                        }
+                    },
+                );
+            });
+
+            // ---- adding a person ----
+            if manage {
+                ui.add_space(space::L);
+                ui::section(ui, t!("Add a person", "Adicionar uma pessoa"));
+                ui.add_space(space::XS);
+                ui::search(ui, &mut self.member_search, t!("Name or e-mail", "Nome ou e-mail"));
+                ui.checkbox(&mut self.new_member_admin, t!("as an admin of the group", "como admin do grupo"));
+                let q = self.member_search.trim().to_lowercase();
+                if !q.is_empty() {
+                    let found: Vec<&UserRef> = people
+                        .iter()
+                        .filter(|u| !g.members.iter().any(|m| m.user.id == u.id))
+                        .filter(|u| u.email.to_lowercase().contains(&q) || u.name.to_lowercase().contains(&q))
+                        .take(6)
+                        .collect();
+                    if found.is_empty() {
+                        ui::caption(
+                            ui,
+                            t!(
+                                "Nobody found (only people who can sign in to this server).",
+                                "Ninguém encontrado (só pessoas que podem entrar neste servidor)."
+                            ),
+                        );
+                    } else {
+                        rows_card(ui, &found, |ui, u| {
+                            ui::row(
+                                ui,
+                                |ui| {
+                                    ui::avatar(ui, if u.name.is_empty() { &u.email } else { &u.name }, 28.0);
+                                    if u.name.is_empty() {
+                                        ui::truncate(ui, &u.email);
+                                    } else {
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 0.0;
+                                            ui::truncate(ui, &u.name);
+                                            ui::truncate(ui, RichText::new(&u.email).size(size::SMALL).color(p.muted));
+                                        });
+                                    }
+                                },
+                                |ui| {
+                                    if ui
+                                        .add_enabled(
+                                            !busy,
+                                            egui::Button::new(ui::with_icon(icons::USER_PLUS, t!("Add", "Adicionar")))
+                                                .min_size(egui::vec2(0.0, 32.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        let (gid, email) = (g.id, u.email.clone());
+                                        let role =
+                                            if self.new_member_admin { GroupRole::Admin } else { GroupRole::Member };
+                                        self.run(&ctx, move |api| async move {
+                                            api.add_member(gid, &email, role).await?;
+                                            Ok(tf!("Added {email}.", "{email} adicionado."))
+                                        });
+                                    }
+                                },
+                            );
                         });
                     }
-                    if m.role == GroupRole::Admin {
-                        ui::badge(ui, "admin", Tone::Accent);
-                    } else {
-                        ui::badge(ui, t!("member", "membro"), Tone::Neutral);
-                    }
-                },
-            );
-        });
-
-        // ---- adding a person ----
-        if manage {
-            ui.add_space(space::L);
-            ui::section(ui, t!("Add a person", "Adicionar uma pessoa"));
-            ui.add_space(space::XS);
-            ui::search(ui, &mut self.member_search, t!("Name or e-mail", "Nome ou e-mail"));
-            ui.checkbox(&mut self.new_member_admin, t!("as an admin of the group", "como admin do grupo"));
-            let q = self.member_search.trim().to_lowercase();
-            if !q.is_empty() {
-                let found: Vec<&UserRef> = people
-                    .iter()
-                    .filter(|u| !g.members.iter().any(|m| m.user.id == u.id))
-                    .filter(|u| u.email.to_lowercase().contains(&q) || u.name.to_lowercase().contains(&q))
-                    .take(6)
-                    .collect();
-                if found.is_empty() {
-                    ui::caption(
-                        ui,
-                        t!(
-                            "Nobody found (only people who can sign in to this server).",
-                            "Ninguém encontrado (só pessoas que podem entrar neste servidor)."
-                        ),
-                    );
-                } else {
-                    rows_card(ui, &found, |ui, u| {
-                        ui::row(
-                            ui,
-                            |ui| {
-                                ui::avatar(ui, if u.name.is_empty() { &u.email } else { &u.name }, 28.0);
-                                if u.name.is_empty() {
-                                    ui::truncate(ui, &u.email);
-                                } else {
-                                    ui.vertical(|ui| {
-                                        ui.spacing_mut().item_spacing.y = 0.0;
-                                        ui::truncate(ui, &u.name);
-                                        ui::truncate(ui, RichText::new(&u.email).size(size::SMALL).color(p.muted));
-                                    });
-                                }
-                            },
-                            |ui| {
-                                if ui
-                                    .add_enabled(
-                                        !busy,
-                                        egui::Button::new(ui::with_icon(icons::USER_PLUS, t!("Add", "Adicionar")))
-                                            .min_size(egui::vec2(0.0, 32.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    let (gid, email) = (g.id, u.email.clone());
-                                    let role = if self.new_member_admin { GroupRole::Admin } else { GroupRole::Member };
-                                    self.run(&ctx, move |api| async move {
-                                        api.add_member(gid, &email, role).await?;
-                                        Ok(tf!("Added {email}.", "{email} adicionado."))
-                                    });
-                                }
-                            },
-                        );
-                    });
                 }
             }
         }
@@ -460,6 +531,121 @@ impl GroupsPage {
                 }
             });
         });
+    }
+
+    /// The computers shared with the group: whose each is, what the group may do there, and
+    /// opening it (through the Computers page, which keeps the session windows).
+    fn computers_ui(&mut self, ui: &mut Ui, g: &Group) {
+        let ctx = ui.ctx().clone();
+        let p = ui::pal(ui);
+        let loaded = self.machines.as_ref().filter(|(id, _)| *id == g.id).map(|(_, r)| r.clone());
+        let list = match loaded {
+            None => {
+                if self.machines_job.as_ref().is_none_or(|(id, _)| *id != g.id) {
+                    self.load_machines(&ctx, g.id);
+                }
+                ui::busy(ui, t!("Loading the computers…", "Carregando os computadores…"));
+                return;
+            }
+            Some(Err(e)) => {
+                if ui::banner(ui, Tone::Danger, &e, Some(t!("Try again", "Tentar de novo"))) {
+                    self.load_machines(&ctx, g.id);
+                }
+                return;
+            }
+            Some(Ok(list)) => list,
+        };
+        if list.is_empty() {
+            ui::empty_state(
+                ui,
+                icons::DESKTOP,
+                t!("No computer in this group", "Nenhum computador neste grupo"),
+                t!(
+                    "Share a computer with the group from its Manage access, on the Computers page.",
+                    "Compartilhe um computador com o grupo pelo Gerenciar acesso dele, na página Computadores."
+                ),
+            );
+            return;
+        }
+        let online = list.iter().filter(|m| m.active && m.machine.online).count();
+        ui::caption(ui, &tf!("{online} of {} online", "{online} de {} online", list.len()));
+        ui.add_space(space::XS);
+        if list.len() > 6 {
+            ui::search(ui, &mut self.machine_search, t!("Search computers", "Buscar computadores"));
+            ui.add_space(space::XS);
+        }
+        let q = self.machine_search.trim().to_lowercase();
+        let shown: Vec<&GroupMachine> = list
+            .iter()
+            .filter(|m| {
+                q.is_empty()
+                    || m.machine.name.to_lowercase().contains(&q)
+                    || person_label(&m.machine.owner).to_lowercase().contains(&q)
+            })
+            .collect();
+        if shown.is_empty() {
+            ui::caption(ui, t!("No computer matches.", "Nenhum computador encontrado."));
+            return;
+        }
+        let mut open = None;
+        rows_card(ui, &shown, |ui, gm| {
+            let m = &gm.machine;
+            ui::row(
+                ui,
+                |ui| {
+                    ui::dot(ui, if gm.active && m.online { p.success } else { p.muted }).on_hover_text(if m.online {
+                        t!("online", "online")
+                    } else {
+                        t!("offline", "offline")
+                    });
+                    ui.label(RichText::new(super::computers::os_icon(&m.os)).size(size::ICON + 2.0).color(p.muted));
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui::truncate(ui, RichText::new(&m.name).strong());
+                        let owner = person_label(&m.owner);
+                        let what = if !gm.active {
+                            t!("private: the group cannot reach it now", "privado: o grupo não acessa agora")
+                                .to_string()
+                        } else if m.visibility == Visibility::Everyone {
+                            tf!("{owner} · everyone on the server", "{owner} · todos do servidor")
+                        } else {
+                            tf!("{owner} · {}", "{owner} · {}", role_label(gm.role))
+                        };
+                        ui::truncate(ui, RichText::new(what).size(size::SMALL).color(p.muted));
+                    });
+                },
+                |ui| {
+                    if m.can_access {
+                        let offline = t!("It is offline", "Está offline");
+                        if m.access.screen {
+                            let b = egui::Button::new(ui::with_icon(icons::PLAY, t!("Connect", "Conectar")))
+                                .min_size(egui::vec2(0.0, 30.0));
+                            let r = ui.add_enabled(m.online, b);
+                            if r.on_disabled_hover_text(offline).clicked() {
+                                open = Some((m.clone(), false));
+                            }
+                        }
+                        if m.access.terminal {
+                            let b = egui::Button::new(RichText::new(icons::TERMINAL_WINDOW).size(size::ICON + 1.0))
+                                .min_size(egui::vec2(30.0, 30.0));
+                            let r = ui.add_enabled(m.online, b).on_hover_text(t!("Terminal", "Terminal"));
+                            if r.on_disabled_hover_text(offline).clicked() {
+                                open = Some((m.clone(), true));
+                            }
+                        }
+                    }
+                    if m.in_session {
+                        ui::badge(ui, t!("in use", "em uso"), Tone::Warning);
+                    }
+                    if !gm.active {
+                        ui::badge(ui, t!("private", "privado"), Tone::Neutral);
+                    }
+                },
+            );
+        });
+        if open.is_some() {
+            self.open = open;
+        }
     }
 
     /// "New group" and the questions asked before removing, leaving or deleting.
@@ -578,8 +764,44 @@ impl GroupsPage {
         let mut g = Self::new();
         g.me = 1;
         g.selected = groups.first().map(|g| g.id);
+        g.machines = g.selected.map(|id| (id, Ok(Self::sample_machines())));
         g.data = Some(Ok((groups, people)));
         g
+    }
+
+    /// One of each: full control, view only and in use, offline, terminal only, private (the
+    /// group does not reach it now), everyone on the server.
+    fn sample_machines() -> Vec<GroupMachine> {
+        use super::computers::sample::machine;
+        use rdesk_proto::Access;
+        use rdesk_proto::api::ShareRole;
+        let me = "jeferson.santos.silva@exemplo.com.br";
+        let ana = "ana.b@exemplo.com";
+        let item = |m: Machine, role: ShareRole, active: bool| GroupMachine { machine: m, role, active };
+        let mut viewed = machine(
+            2,
+            "Notebook da Ana Beatriz com um nome de computador muito, muito comprido para caber",
+            "macos",
+            ana,
+            false,
+            true,
+            true,
+        );
+        viewed.access = Access::VIEW;
+        let mut server = machine(4, "Servidor de arquivos", "linux", me, true, true, false);
+        server.access = Access::TERMINAL;
+        let mut old = machine(5, "PC antigo do escritório", "windows", me, true, false, false);
+        old.visibility = Visibility::Private;
+        let mut reception = machine(6, "Mac da recepção", "macos", ana, false, true, false);
+        reception.visibility = Visibility::Everyone;
+        vec![
+            item(machine(1, "PC da sala", "windows", me, true, true, false), ShareRole::Control, true),
+            item(viewed, ShareRole::View, true),
+            item(machine(3, "Raspberry Pi da oficina", "linux", ana, false, false, false), ShareRole::Control, true),
+            item(server, ShareRole::Terminal, true),
+            item(old, ShareRole::Control, false),
+            item(reception, ShareRole::Control, true),
+        ]
     }
 
     fn sample_people(n: usize) -> Vec<UserRef> {
@@ -622,11 +844,30 @@ impl GroupsPage {
                 name: "Equipe de suporte técnico do escritório central de São Paulo".into(),
                 my_role: Some(GroupRole::Admin),
                 members: members(12),
+                machine_count: 6,
             },
-            Group { id: 2, name: "Família".into(), my_role: Some(GroupRole::Member), members: members(3) },
-            Group { id: 3, name: "Servidores".into(), my_role: None, members: members(2) },
-            Group { id: 4, name: "Oficina de robótica".into(), my_role: Some(GroupRole::Admin), members: members(5) },
-            Group { id: 5, name: "Estagiários".into(), my_role: Some(GroupRole::Member), members: members(4) },
+            Group {
+                id: 2,
+                name: "Família".into(),
+                my_role: Some(GroupRole::Member),
+                members: members(3),
+                machine_count: 2,
+            },
+            Group { id: 3, name: "Servidores".into(), my_role: None, members: members(2), machine_count: 14 },
+            Group {
+                id: 4,
+                name: "Oficina de robótica".into(),
+                my_role: Some(GroupRole::Admin),
+                members: members(5),
+                machine_count: 0,
+            },
+            Group {
+                id: 5,
+                name: "Estagiários".into(),
+                my_role: Some(GroupRole::Member),
+                members: members(4),
+                machine_count: 1,
+            },
         ]
     }
 }
@@ -648,10 +889,32 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
         }),
         screen("groups-empty", || page(GroupsPage::sample(Vec::new(), GroupsPage::sample_people(3)))),
         screen("groups-many", || page(GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14)))),
+        screen("groups-computers-search", || {
+            let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14));
+            g.machine_search = "pc".into();
+            page(g)
+        }),
+        screen("groups-computers-none", || {
+            let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14));
+            g.selected = Some(4);
+            g.machines = Some((4, Ok(Vec::new())));
+            page(g)
+        }),
+        screen("groups-computers-error", || {
+            let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14));
+            g.machines = Some((1, Err("HTTP 404: o servidor ainda não tem esta lista (atualize o servidor)".into())));
+            page(g)
+        }),
+        screen("groups-members", || {
+            let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14));
+            g.tab = Tab::Members;
+            page(g)
+        }),
         screen("groups-add-person", || {
             let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(30));
             g.selected = Some(2);
             g.sys_admin = true;
+            g.tab = Tab::Members;
             g.member_search = "a".into();
             page(g)
         }),
@@ -667,6 +930,7 @@ pub(super) fn gallery() -> Vec<super::gallery::Screen> {
         }),
         screen("groups-confirm-remove", || {
             let mut g = GroupsPage::sample(GroupsPage::sample_groups(), GroupsPage::sample_people(14));
+            g.tab = Tab::Members;
             g.confirm = Some(Confirm::RemoveMember {
                 gid: 1,
                 uid: 2,

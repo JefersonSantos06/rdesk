@@ -469,6 +469,22 @@ pub struct Group {
     /// The requesting user's role (`None` for a system admin looking from outside).
     pub my_role: Option<GroupRole>,
     pub members: Vec<GroupMember>,
+    /// How many computers [`PATH_GROUPS`]`/{id}/machines` lists for the requesting user
+    /// (0 from servers before it).
+    #[serde(default)]
+    pub machine_count: u32,
+}
+
+/// `GET` [`PATH_GROUPS`]`/{id}/machines` (its members and system admins): a computer shared
+/// with the group, as the requesting user sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupMachine {
+    pub machine: Machine,
+    /// What the group's members may do there.
+    pub role: ShareRole,
+    /// The share lets the group in now. A private computer keeps its shares but lets nobody in
+    /// through them: only whoever manages it sees it listed then (to share it again).
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

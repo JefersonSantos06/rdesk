@@ -727,6 +727,12 @@ impl Computers {
         }
     }
 
+    /// Open a session to `m` asked for on another page (a group's computers): its screen, or
+    /// its terminal only.
+    pub(super) fn open_from_elsewhere(&mut self, m: &Machine, terminal: bool) {
+        self.open(m, if terminal { Open::Terminal } else { Open::Screen });
+    }
+
     fn open(&mut self, m: &Machine, how: Open) {
         if !m.can_access {
             self.notify(tf!("{} is not shared with you.", "{} não está compartilhado com você.", m.name), true);
@@ -2833,7 +2839,7 @@ fn item_icon(it: &Item) -> &'static str {
     }
 }
 
-fn os_icon(os: &str) -> &'static str {
+pub(super) fn os_icon(os: &str) -> &'static str {
     match os.to_ascii_lowercase().as_str() {
         "windows" => icons::WINDOWS_LOGO,
         "macos" | "ios" => icons::APPLE_LOGO,
@@ -2916,7 +2922,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod sample {
+pub(in crate::app) mod sample {
     use super::*;
     use rdesk_proto::api::{GroupRef, ShareRole};
 
@@ -2930,7 +2936,7 @@ mod sample {
             .collect()
     }
 
-    pub(super) fn machine(
+    pub(in crate::app) fn machine(
         id: i64,
         name: &str,
         os: &str,
