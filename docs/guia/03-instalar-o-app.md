@@ -71,8 +71,8 @@ código.
 
 ## Linux
 
-Funciona no **Ubuntu 24.04 ou mais novo**, **Debian 13** e **Raspberry Pi OS** atual
-(trixie), em PCs e em placas ARM64.
+Funciona no **Ubuntu 22.04 ou mais novo**, **Debian 12 ou mais novo** e **Raspberry Pi OS**
+(bookworm e trixie), em PCs e em placas ARM64.
 
 1. Abra um terminal e rode (troque o domínio):
 

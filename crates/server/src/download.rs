@@ -79,7 +79,7 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
         ));
     }
     body.push_str(&format!(
-        "<h2>Linux</h2><p>Debian, Ubuntu 24.04+, Raspberry Pi OS: \
+        "<h2>Linux</h2><p>Debian 12+, Ubuntu 22.04+, Raspberry Pi OS: \
          <code>curl -fsSL https://{server}/install.sh | sudo sh</code> (installs the package and keeps it up to date). \
          A computer that is only accessed: <code>… | sudo sh -s -- --host --key rdk_…</code> (or <code>--owner you@example.com</code>).</p>"
     ));

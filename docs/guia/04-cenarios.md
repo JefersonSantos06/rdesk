@@ -136,7 +136,7 @@ do pedido (ex.: `3F2A-91C0`). No seu app aparece o aviso **"1 computador aguarda
 aprovação"** → **Revisar** → confira se o código é o mesmo → **Aprovar…** (escolha o nome e
 quem pode ver).
 
-**Linux** (Ubuntu 24.04+, Debian 13, Raspberry Pi OS):
+**Linux** (Ubuntu 22.04+, Debian 12+, Raspberry Pi OS):
 
 1. Entre no computador com o **usuário da área de trabalho** (não como root), na sessão
    **X11**, e configure o **login automático** desse usuário.
