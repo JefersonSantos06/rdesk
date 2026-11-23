@@ -89,9 +89,18 @@ jobs:
       - name: Package (Linux)
         if: matrix.part == 'app' && runner.os == 'Linux'
         run: |
+          .github/scripts/glibc-max.sh target/release/rdesk
           mkdir dist
           tar -czf "dist/rdesk-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release rdesk
           cargo deb -p rdesk --no-build --output dist/
+      # rdesk-host_<version>_<arch>.deb: the host of a server without a screen (no app, no
+      # desktop libraries). Built after the app's package: it takes target/release/rdesk's place.
+      - name: The host for servers (Linux)
+        if: matrix.part == 'app' && runner.os == 'Linux'
+        run: |
+          cargo build --release --locked -p rdesk --no-default-features --features host
+          .github/scripts/glibc-max.sh target/release/rdesk
+          cargo deb -p rdesk --variant host --no-build --output dist/
 
       # macOS: rdesk.app, signed with rdesk's own certificate (not Apple's: the first launch
       # needs right-click → Open). Always the same certificate, so macOS keeps Screen Recording
@@ -157,6 +166,7 @@ jobs:
         run: |
           cargo test --locked -p rdesk-server -p rdesk-proto -p rdesk-release
           cargo build --release --locked -p rdesk-server
+          .github/scripts/glibc-max.sh target/release/rdesk-server
       - name: Package the server
         if: matrix.part == 'server'
         run: |
@@ -164,18 +174,6 @@ jobs:
           tar -czf "dist/rdesk-server-$VERSION-${{ matrix.platform }}.tar.gz"             -C target/release rdesk-server -C "$GITHUB_WORKSPACE/deploy" rdesk-server.service \
             rdesk-server-update.path rdesk-server-update.service
 
-      # Debian 12 has glibc 2.36, Ubuntu 22.04 2.35: nothing may need a newer one.
-      - name: glibc 2.35 at most (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          bin=target/release/${{ matrix.part == 'app' && 'rdesk' || 'rdesk-server' }}
-          need=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
-          echo "$bin needs glibc $need"
-          # In order (sort -C) only when it is 2.35 or older.
-          if ! printf '%s\n' "$need" 2.35 | sort -V -C; then
-            echo "::error::$bin needs glibc $need: it would not run on Ubuntu 22.04 / Debian 12"
-            exit 1
-          fi
       - uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.platform }}-${{ matrix.part }}

@@ -5,13 +5,13 @@
 //! Every encoder gives access units in Annex B, each key frame with its SPS and PPS, in the
 //! constrained baseline profile: what the clients' OpenH264 decoder reads.
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 pub use rdesk_common::h264::{H264Encoder, bitrate, usable};
 
 #[cfg(target_os = "android")]
 pub use mediacodec::{H264Encoder, bitrate, usable};
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", headless))]
 pub use none::{H264Encoder, bitrate, usable};
 
 /// RGBA → NV12 (Y plane, then interleaved U and V at half size), limited-range BT.601: the same
@@ -23,7 +23,7 @@ pub(crate) fn rgba_to_nv12(rgba: &[u8], width: usize, height: usize, out: &mut V
     out.resize(width * height * 3 / 2, 0);
     let (y_plane, uv_plane) = out.split_at_mut(width * height);
     for (y_row, px_row) in y_plane.chunks_exact_mut(width).zip(rgba.chunks_exact(width * 4)) {
-        for (y, px) in y_row.iter_mut().zip(px_row.chunks_exact(4)) {
+        for (y, px) in y_row.iter_mut().zip(px_row.as_chunks::<4>().0) {
             let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
             *y = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
         }
@@ -31,7 +31,7 @@ pub(crate) fn rgba_to_nv12(rgba: &[u8], width: usize, height: usize, out: &mut V
     for (j, uv_row) in uv_plane.chunks_exact_mut(width).enumerate() {
         let top = &rgba[2 * j * width * 4..][..width * 4];
         let bottom = &rgba[(2 * j + 1) * width * 4..][..width * 4];
-        for (i, uv) in uv_row.chunks_exact_mut(2).enumerate() {
+        for (i, uv) in uv_row.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let (mut r, mut g, mut b) = (0, 0, 0);
             for px in [
                 &top[i * 8..i * 8 + 4],
@@ -204,7 +204,7 @@ mod mediacodec {
     }
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", headless))]
 mod none {
     use anyhow::{Result, bail};
     use rdesk_common::tiles::Frame;
@@ -222,7 +222,7 @@ mod none {
 
     impl H264Encoder {
         pub fn new(_: u32, _: u32, _: u8, _: u32) -> Result<Self> {
-            bail!("no H.264 encoder on iPhones")
+            bail!("no H.264 encoder here (an iPhone, a computer without a screen)")
         }
 
         pub fn size(&self) -> (u32, u32) {

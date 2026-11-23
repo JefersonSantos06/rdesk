@@ -1,0 +1,24 @@
+# The rdesk host of a server without a screen (the rdesk-host package), as a system service
+# running as one user: sessions get that user's terminal, files and tunnels. The rdesk server's
+# install.sh with --headless sets it up. By hand:
+#
+#   /etc/rdesk/enroll-<user>.env (chmod 600, read by systemd before it switches to the user):
+#     RDESK_SERVER=rdesk.example.com
+#     RDESK_ENROLL_KEY=rdk_...        # or RDESK_OWNER=you@gmail.com (you approve it in the app)
+#   sudo systemctl enable --now rdesk-host@<user>
+#
+# The host keeps its identity in that user's ~/.config/rdesk/.
+[Unit]
+Description=rdesk host (no screen) for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=%i
+ExecStart=/usr/bin/rdesk host run
+EnvironmentFile=-/etc/rdesk/enroll-%i.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

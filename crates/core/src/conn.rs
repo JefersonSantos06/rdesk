@@ -924,7 +924,7 @@ async fn once(
     };
     *resume = Some((ok.session_id, ok.resume_token));
     notify(UiEvent::Connected(ok.host.clone()));
-    let access: rdesk_proto::Access = ok.access.into();
+    let access = ok.session_access();
     notify(UiEvent::Access(access));
     notify(UiEvent::Status(Status::Connected { host: ok.host.hostname.clone() }));
 

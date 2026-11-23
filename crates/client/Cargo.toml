@@ -38,7 +38,7 @@ ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256", "std"] }
 [features]
 default = []
 # Embed the host in the desktop app ("This computer" page).
-host = ["dep:rdesk-host"]
+host = ["dep:rdesk-host", "rdesk-host/screen"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
@@ -48,7 +48,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 
 [dev-dependencies]
-rdesk-host.workspace = true
+rdesk-host = { workspace = true, features = ["screen"] }
 tempfile = "3"
 # Renders the screens to PNG files to look at (the ui gallery test).
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }

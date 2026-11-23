@@ -46,17 +46,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --release -p rdesk
-      # Debian 12 has glibc 2.36, Ubuntu 22.04 2.35: nothing may need a newer one.
-      - name: glibc 2.35 at most
+      # Ubuntu 22.04 and Debian 12 must be able to start it; the host for servers (rdesk-host,
+      # no screen) must keep building.
+      - name: glibc, and the host without a screen (Linux)
         if: runner.os == 'Linux'
         run: |
-          need=$(objdump -T target/release/rdesk | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
-          echo "rdesk needs glibc $need"
-          # In order (sort -C) only when it is 2.35 or older.
-          if ! printf '%s\n' "$need" 2.35 | sort -V -C; then
-            echo "::error::rdesk needs glibc $need: it would not run on Ubuntu 22.04 / Debian 12"
-            exit 1
-          fi
+          .github/scripts/glibc-max.sh target/release/rdesk
+          cargo clippy --locked -p rdesk --no-default-features --features host -- -D warnings
       - uses: actions/upload-artifact@v6
         with:
           name: rdesk-${{ matrix.os }}

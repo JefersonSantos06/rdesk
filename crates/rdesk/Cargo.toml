@@ -6,9 +6,12 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-default = ["host", "client"]
+default = ["host", "client", "screen"]
 host = ["dep:rdesk-host", "rdesk-client?/host"]
-client = ["dep:rdesk-client"]
+# The screen, keyboard, mouse and sound (Linux). Without it and without `client`, the host of
+# a server reached by terminal, files and tunnels only (the rdesk-host package).
+screen = ["host", "rdesk-host/screen"]
+client = ["dep:rdesk-client", "dep:crossterm"]
 
 [dependencies]
 rdesk-proto.workspace = true
@@ -25,7 +28,7 @@ rpassword = "7"
 zeroize = "1"
 serde_json = "1"
 # `rdesk shell`: the local terminal in raw mode.
-crossterm = "0.29"
+crossterm = { version = "0.29", optional = true }
 directories = "6"
 
 [target.'cfg(windows)'.dependencies]
@@ -44,6 +47,9 @@ section = "net"
 priority = "optional"
 depends = "$auto"
 extended-description = "Remote desktop over QUIC (iroh) with a private rdesk server: client and host in one app."
+# Both put /usr/bin/rdesk in place: one or the other.
+conflicts = "rdesk-host"
+replaces = "rdesk-host"
 assets = [
     ["target/release/rdesk", "usr/bin/", "755"],
     ["../../deploy/rdesk-update.service", "usr/lib/systemd/system/", "644"],
@@ -52,4 +58,20 @@ assets = [
     # The applications menu entry and its icon.
     ["../../deploy/rdesk.desktop", "usr/share/applications/", "644"],
     ["../../deploy/rdesk.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+]
+
+# `cargo deb -p rdesk --variant host --no-build`, after building it with
+# `--no-default-features --features host` (release workflow): rdesk-host_<version>_<arch>.deb,
+# the host of a server without a screen, with no app and no desktop libraries.
+[package.metadata.deb.variants.host]
+default-features = false
+features = ["host"]
+extended-description = "The rdesk host for a server without a screen: reached from the rdesk app by terminal, files and port tunnels, with no app and no desktop libraries. Run it with rdesk-host@<user>.service."
+conflicts = "rdesk"
+replaces = "rdesk"
+assets = [
+    ["target/release/rdesk", "usr/bin/", "755"],
+    ["../../deploy/rdesk-update.service", "usr/lib/systemd/system/", "644"],
+    ["../../deploy/rdesk-update.timer", "usr/lib/systemd/system/", "644"],
+    ["../../deploy/rdesk-host@.service", "usr/lib/systemd/system/", "644"],
 ]

@@ -12,7 +12,9 @@ use rdesk_common::account::{self, Session};
 use rdesk_common::agent::{self, Agent};
 #[cfg(feature = "client")]
 use rdesk_common::auth;
-use rdesk_common::config::{self, AuthPref, ClientConfig, HostEntry, NetworkConfig, format_host_id, parse_host_id};
+use rdesk_common::config::{self, AuthPref, ClientConfig, format_host_id};
+#[cfg(feature = "client")]
+use rdesk_common::config::{HostEntry, NetworkConfig, parse_host_id};
 #[cfg(feature = "client")]
 use rdesk_common::transport;
 #[cfg(feature = "host")]
@@ -659,6 +661,7 @@ fn install_cmd(opts: rdesk_host::win::install::InstallOpts) -> Result<()> {
         return elevate_self();
     }
     println!("{}", rdesk_host::win::install::install(&opts)?);
+    #[cfg(feature = "client")]
     let exe = rdesk_host::win::service::program_exe();
     #[cfg(feature = "client")]
     if !opts.only_share {
@@ -1435,7 +1438,8 @@ async fn update(server: &str, machine: Option<String>, check: bool) -> Result<()
             "rdesk update installs Debian packages (Linux); on Windows the service and on a Mac the app update by themselves"
         );
     }
-    let platform = this_platform();
+    // The rdesk-host package (no app) updates to itself, not to the app.
+    let platform = if cfg!(feature = "client") { this_platform() } else { format!("{}-host", this_platform()) };
     let file =
         file_for(&m, FileKind::Deb, &platform).ok_or_else(|| anyhow!("{} has no package for {platform}", m.version))?;
     let data = download(&format!("{}{}", offer.download_base, file.name), file.size).await?;

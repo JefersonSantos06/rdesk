@@ -134,6 +134,8 @@ As variáveis `RDESK_SERVER`, `RDESK_OWNER`, `RDESK_ENROLL_KEY` e `RDESK_NAME` f
 4. Instale o serviço de usuário [`deploy/rdesk-host.service`](deploy/rdesk-host.service) (`systemctl --user enable rdesk-host`).
 5. No primeiro boot cada placa aparece em *My computers*. Terminada a leva, revogue a chave.
 
+**Servidor sem tela (VPS, rack)**: o pacote `rdesk-host` traz só o host, sem o app e sem as bibliotecas de área de trabalho (X11, PipeWire, som). A sessão não tem imagem: abre terminal, arquivos e túneis de porta, como o usuário do serviço. `curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --headless --key rdk_…` instala, liga as atualizações e o serviço de sistema [`rdesk-host@<usuário>`](deploy/rdesk-host@.service) (a chave vai em `/etc/rdesk/enroll-<usuário>.env`). Para compilar: `cargo build --release -p rdesk --no-default-features --features host`.
+
 ### Host (PC de casa)
 
 1. Logado (`rdesk login …`), cadastre o computador: `rdesk machines register` (ou pelo app, em *Este computador*). Sem login nele: `rdesk host enroll` (veja [Computador só acessado](#computador-só-acessado-sem-login-nele)).

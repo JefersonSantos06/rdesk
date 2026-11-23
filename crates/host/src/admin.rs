@@ -309,6 +309,8 @@ pub async fn diagnose() -> Vec<CheckLine> {
     }
     let cap = crate::capture::Capturer::spawn(false);
     match cap.monitors().await {
+        // A server without a screen says so below, as it should be.
+        Ok(ms) if ms.is_empty() && cfg!(headless) => {}
         Ok(ms) if ms.is_empty() => {
             out.push(line(t!("Screens", "Telas"), t!("none found", "nenhuma encontrada"), false))
         }
@@ -349,7 +351,16 @@ pub async fn diagnose() -> Vec<CheckLine> {
         let input = input_allowed();
         out.push(line(t!("Accessibility", "Acessibilidade"), if input { yes } else { no }, input));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(headless)]
+    out.push(line(
+        t!("Screen", "Tela"),
+        t!(
+            "none (rdesk-host for servers): terminal, files and tunnels",
+            "nenhuma (rdesk-host para servidores): terminal, arquivos e túneis"
+        ),
+        true,
+    ));
+    #[cfg(all(desktop, target_os = "linux"))]
     {
         // Wayland goes through the desktop portal, which asks once before sharing the screen.
         let wayland = crate::wayland::active();

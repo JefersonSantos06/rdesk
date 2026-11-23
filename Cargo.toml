@@ -11,7 +11,8 @@ publish = false
 rdesk-proto = { path = "crates/proto" }
 rdesk-common = { path = "crates/common" }
 rdesk-core = { path = "crates/core" }
-rdesk-host = { path = "crates/host" }
+# Without its `screen` feature (a server with no screen): who needs the screen turns it on.
+rdesk-host = { path = "crates/host", default-features = false }
 rdesk-client = { path = "crates/client" }
 
 anyhow = "1"

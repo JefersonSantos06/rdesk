@@ -81,10 +81,18 @@ pub async fn page_handler(State(st): State<Shared>) -> Html<String> {
     body.push_str(&format!(
         "<h2>Linux</h2><p>Debian 12+, Ubuntu 22.04+, Raspberry Pi OS: \
          <code>curl -fsSL https://{server}/install.sh | sudo sh</code> (installs the package and keeps it up to date). \
-         A computer that is only accessed: <code>… | sudo sh -s -- --host --key rdk_…</code> (or <code>--owner you@example.com</code>).</p>"
+         A computer that is only accessed: <code>… | sudo sh -s -- --host --key rdk_…</code> (or <code>--owner you@example.com</code>). \
+         A server without a screen (terminal, files and tunnels; no app): <code>… | sudo sh -s -- --headless --key rdk_…</code>.</p>"
     ));
-    let debs: Vec<String> =
-        ["linux-x86_64", "linux-aarch64"].iter().filter_map(|p| link(FileKind::Deb, p, &format!(".deb {p}"))).collect();
+    let debs: Vec<String> = ["linux-x86_64", "linux-aarch64"]
+        .iter()
+        .filter_map(|p| link(FileKind::Deb, p, &format!(".deb {p}")))
+        .chain(
+            rdesk_proto::release::LINUX_HOST
+                .iter()
+                .filter_map(|p| link(FileKind::Deb, p, &format!("rdesk-host .deb {}", p.trim_end_matches("-host")))),
+        )
+        .collect();
     if !debs.is_empty() {
         body.push_str(&format!("<p>Or by hand: {}.</p>", debs.join(" · ")));
     }
@@ -148,7 +156,14 @@ pub async fn install_sh(State(st): State<Shared>) -> Response {
     let (Some(amd), Some(arm)) = (deb("linux-x86_64"), deb("linux-aarch64")) else {
         return (StatusCode::NOT_FOUND, "echo 'This version has no Debian packages.' >&2; exit 1\n").into_response();
     };
+    // The rdesk-host packages (servers without a screen) came later: absent from older releases.
+    let host_deb = |p: &str| file(&m, FileKind::Deb, p).map(|f| (github(&st, &m, &f), f.sha256)).unwrap_or_default();
+    let (hamd, harm) = (host_deb(rdesk_proto::release::LINUX_HOST[0]), host_deb(rdesk_proto::release::LINUX_HOST[1]));
     let script = SCRIPT
+        .replace("@HAMD_URL@", &hamd.0)
+        .replace("@HAMD_SHA@", &hamd.1)
+        .replace("@HARM_URL@", &harm.0)
+        .replace("@HARM_SHA@", &harm.1)
         .replace("@SERVER@", &host(&st))
         .replace("@VERSION@", &m.version)
         .replace("@AMD_URL@", &github(&st, &m, &amd))
@@ -163,13 +178,17 @@ const SCRIPT: &str = r#"#!/bin/sh
 #   curl -fsSL https://@SERVER@/install.sh | sudo sh
 #   … | sudo sh -s -- --host --key rdk_…              only accessed: added at once
 #   … | sudo sh -s -- --host --owner you@example.com   only accessed: its owner approves it
+#   … | sudo sh -s -- --headless --key rdk_…          a server without a screen: the rdesk-host
+#                                                      package, run as the sudo user (or --user)
 #   (--name "PC da sala" names it on the server)
 set -eu
 SERVER="@SERVER@"
-HOST=0; KEY=""; OWNER=""; NAME=""
+HOST=0; HEADLESS=0; KEY=""; OWNER=""; NAME=""; RUN_AS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST=1 ;;
+    --headless) HEADLESS=1 ;;
+    --user) RUN_AS="$2"; shift ;;
     --key) KEY="$2"; shift ;;
     --owner) OWNER="$2"; shift ;;
     --name) NAME="$2"; shift ;;
@@ -178,13 +197,23 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ "$(id -u)" = 0 ] || { echo "Run it with sudo." >&2; exit 1; }
+if [ "$HEADLESS" = 1 ]; then
+  U="${RUN_AS:-${SUDO_USER:-}}"
+  [ -n "$U" ] && [ "$U" != root ] || { echo "--headless: run it with sudo from the account whose terminal and files to share, or pass --user NAME." >&2; exit 1; }
+  id "$U" >/dev/null 2>&1 || { echo "--headless: no user $U." >&2; exit 1; }
+fi
 case "$(uname -m)" in
-  x86_64) URL="@AMD_URL@"; SHA="@AMD_SHA@" ;;
-  aarch64|arm64) URL="@ARM_URL@"; SHA="@ARM_SHA@" ;;
+  x86_64) URL="@AMD_URL@"; SHA="@AMD_SHA@"; HURL="@HAMD_URL@"; HSHA="@HAMD_SHA@" ;;
+  aarch64|arm64) URL="@ARM_URL@"; SHA="@ARM_SHA@"; HURL="@HARM_URL@"; HSHA="@HARM_SHA@" ;;
   *) echo "No rdesk package for $(uname -m)." >&2; exit 1 ;;
 esac
-DEB="/tmp/rdesk_@VERSION@.deb"
-echo "Downloading rdesk @VERSION@…"
+PKG=rdesk
+if [ "$HEADLESS" = 1 ]; then
+  [ -n "$HURL" ] || { echo "rdesk @VERSION@ has no rdesk-host package (servers without a screen); release a newer version." >&2; exit 1; }
+  URL="$HURL"; SHA="$HSHA"; PKG=rdesk-host
+fi
+DEB="/tmp/${PKG}_@VERSION@.deb"
+echo "Downloading $PKG @VERSION@…"
 curl -fsSL -o "$DEB" "$URL"
 echo "$SHA  $DEB" | sha256sum -c --quiet
 apt-get install -y "$DEB" >/dev/null
@@ -195,7 +224,20 @@ printf 'RDESK_SERVER=%s\n' "$SERVER" > /etc/default/rdesk-update
 systemctl daemon-reload
 systemctl enable --now rdesk-update.timer >/dev/null
 
-if [ "$HOST" = 1 ]; then
+if [ "$HEADLESS" = 1 ]; then
+  install -d -m 755 /etc/rdesk
+  ENV="/etc/rdesk/enroll-$U.env"
+  # Only root reads it (systemd, before it switches to the user).
+  install -m 600 /dev/null "$ENV"
+  {
+    printf 'RDESK_SERVER=%s\n' "$SERVER"
+    [ -n "$KEY" ] && printf 'RDESK_ENROLL_KEY=%s\n' "$KEY"
+    [ -n "$OWNER" ] && printf 'RDESK_OWNER=%s\n' "$OWNER"
+    [ -n "$NAME" ] && printf 'RDESK_NAME=%s\n' "$NAME"
+  } > "$ENV"
+  systemctl enable --now "rdesk-host@$U" >/dev/null
+  echo "rdesk-host @VERSION@ is installed and runs as $U (rdesk-host@$U); this server asks $SERVER to add it."
+elif [ "$HOST" = 1 ]; then
   U="${SUDO_USER:-}"
   [ -n "$U" ] && [ "$U" != root ] || { echo "--host: run it with sudo from the desktop user's account." >&2; exit 1; }
   HOME_U=$(getent passwd "$U" | cut -d: -f6)

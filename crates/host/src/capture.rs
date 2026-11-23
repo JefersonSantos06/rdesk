@@ -9,7 +9,7 @@
 use std::sync::{OnceLock, mpsc};
 use std::time::Instant;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use rdesk_common::tiles::Frame;
@@ -115,7 +115,7 @@ pub fn set_screen_source(make: fn() -> Box<dyn Backend>) {
     let _ = SOURCE.set(make);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(desktop, target_os = "linux"))]
 fn platform_backend() -> Box<dyn Backend> {
     if crate::wayland::active() {
         tracing::info!("Wayland: the screen comes through the desktop portal");
@@ -125,9 +125,28 @@ fn platform_backend() -> Box<dyn Backend> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
+#[cfg(all(desktop, not(target_os = "linux")))]
 fn platform_backend() -> Box<dyn Backend> {
     Box::new(XcapBackend::default())
+}
+
+/// A server without a screen: no monitors, so sessions get the terminal, files and tunnels.
+#[cfg(headless)]
+fn platform_backend() -> Box<dyn Backend> {
+    Box::new(NoScreen)
+}
+
+#[cfg(headless)]
+struct NoScreen;
+
+#[cfg(headless)]
+impl Backend for NoScreen {
+    fn list(&mut self) -> Result<Vec<MonitorDesc>> {
+        Ok(Vec::new())
+    }
+    fn grab(&mut self, _: u32) -> Result<Frame> {
+        Err(anyhow!("this computer has no screen"))
+    }
 }
 
 /// Phones whose app brought no screen ([`set_screen_source`]): the test pattern.
@@ -137,11 +156,11 @@ fn platform_backend() -> Box<dyn Backend> {
     Box::new(Synthetic::new())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(desktop, target_os = "linux"))]
 #[derive(Default)]
 struct WaylandBackend(crate::wayland::Capture);
 
-#[cfg(target_os = "linux")]
+#[cfg(all(desktop, target_os = "linux"))]
 impl Backend for WaylandBackend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>> {
         self.0.list()
@@ -190,7 +209,7 @@ pub fn packed_to_rgba(src: &[u8], order: Pixels, width: u32, height: u32, stride
     Some(out)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 #[derive(Default)]
 struct XcapBackend {
     monitors: Vec<xcap::Monitor>,
@@ -253,7 +272,7 @@ impl DxgiState {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 impl XcapBackend {
     fn refresh(&mut self) -> Result<()> {
         self.monitors = xcap::Monitor::all().context("listing monitors")?;
@@ -268,7 +287,7 @@ impl XcapBackend {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 impl Backend for XcapBackend {
     fn list(&mut self) -> Result<Vec<MonitorDesc>> {
         self.refresh()?;

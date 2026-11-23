@@ -113,14 +113,14 @@ impl Resampler {
 }
 
 /// Opus encoding of 48 kHz stereo samples into 20 ms packets.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 pub struct Encoder {
     enc: opus::Encoder,
     pending: Vec<f32>,
     out: Vec<u8>,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(desktop)]
 impl Encoder {
     pub fn new() -> Result<Self> {
         let mut enc = opus::Encoder::new(RATE, opus::Channels::Stereo, opus::Application::Audio)?;

@@ -36,6 +36,7 @@ async fn start_host(
         ticket: None,
         require_local: false,
         direct: false,
+        screenless: false,
     };
     let ep2 = ep.clone();
     let task = tokio::spawn(async move {

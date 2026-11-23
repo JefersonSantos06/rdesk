@@ -256,6 +256,9 @@ pub struct HostAuthConfig {
     /// This connection came straight from the local network (or Tailscale) and direct
     /// access is on: this computer's own password or SSH key are enough, ticket or not.
     pub direct: bool,
+    /// A computer without a screen (rdesk-host on a server): sessions get no picture, keyboard
+    /// or mouse, and `AuthOk` says so, so the client opens the terminal and files instead.
+    pub screenless: bool,
 }
 
 /// Parse an OpenSSH `authorized_keys` file (options are not supported and rejected).
@@ -449,7 +452,14 @@ where
 
         let resume_token = store.issue(session_id, ticket_user.clone());
         // Logins without a server ticket (LAN, password/key) may do everything.
-        let access = ticket_user.as_ref().map_or(rdesk_proto::Access::FULL, |u| u.access);
+        let mut access = ticket_user.as_ref().map_or(rdesk_proto::Access::FULL, |u| u.access);
+        if cfg.screenless {
+            access.screen = false;
+            access.input = false;
+            if access.is_none() {
+                return Err(fail(w, "this computer has no screen, and this access is only to see or control it").await);
+            }
+        }
         write_msg(
             w,
             &HostMsg::AuthOk(AuthOk {

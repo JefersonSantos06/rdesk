@@ -153,6 +153,30 @@ quem pode ver).
 Com o e-mail: troque `--key …` por `--owner voce@gmail.com`. O código que você vai
 conferir aparece em `journalctl --user -u rdesk-host -f`.
 
+**Servidor Linux sem tela** (uma VPS, um servidor no rack: Ubuntu 22.04+, Debian 12+, x86_64
+ou ARM64):
+
+Aqui vai o pacote **`rdesk-host`**: só o host, sem o app e sem as bibliotecas de área de
+trabalho. Não há imagem para ver: a sessão abre o **terminal**, os **arquivos** e os
+**túneis de porta**, como o usuário escolhido.
+
+1. Entre por SSH com o usuário cujo terminal e arquivos vão ser usados (não como root).
+2. Rode (com a sua chave e o nome):
+
+   ```sh
+   curl -fsSL https://rdesk.seu-dominio.com/install.sh | sudo sh -s -- --headless --key rdk_COLE_A_CHAVE --name "VPS"
+   ```
+
+   Isso instala o `rdesk-host`, liga as atualizações e liga o serviço de sistema
+   `rdesk-host@SEU_USUÁRIO` (sobe sozinho em todo boot, sem ninguém logado). Para outro
+   usuário, acrescente `--user NOME`.
+3. Pronto: ele aparece na sua lista. Ao conectar, a janela abre direto em **Arquivos** e
+   **Terminal**; pela linha de comando, `rdesk shell "VPS"` e `rdesk tunnel "VPS" -L …`.
+
+Com o e-mail: troque `--key …` por `--owner voce@gmail.com`; o código aparece em
+`journalctl -u rdesk-host@SEU_USUÁRIO -f`. O `rdesk-host` e o `rdesk` não ficam instalados
+juntos: instalar um remove o outro.
+
 **Mac** (ou qualquer computador, pelo app):
 
 1. [Instale o app](03-instalar-o-app.md) (no Mac, dê as permissões de Gravação de Tela e

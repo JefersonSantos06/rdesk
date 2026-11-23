@@ -79,6 +79,20 @@ impl From<Access> for WireAccess {
     }
 }
 
+impl AuthOk {
+    /// What this session may do, as the client can tell. The wire says nothing of the
+    /// terminal (see [`WireAccess`]): it comes with full control, and on a computer without a
+    /// screen (rdesk-host on a server, whose sessions never see or control one) with any
+    /// session; the host refuses it if this one may not.
+    pub fn session_access(&self) -> Access {
+        let mut a = Access::from(self.access);
+        if self.host.monitors.is_empty() && !a.screen && !a.input {
+            a.terminal = true;
+        }
+        a
+    }
+}
+
 impl From<WireAccess> for Access {
     /// Full control includes the terminal; the wire does not say more.
     fn from(w: WireAccess) -> Self {

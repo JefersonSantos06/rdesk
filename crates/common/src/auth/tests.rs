@@ -29,6 +29,7 @@ fn host_cfg(keys: &[&PrivateKey], password: Option<&str>) -> HostAuthConfig {
         ticket: None,
         require_local: false,
         direct: false,
+        screenless: false,
     }
 }
 
@@ -200,6 +201,20 @@ async fn password_ok() {
     let (h, c) = run(&cfg, &store, [3; 32], [3; 32], HOST_FP, &mut auth).await;
     assert_eq!(h.unwrap().kind, AuthKind::Password);
     c.unwrap();
+}
+
+/// A server without a screen: the session gets the terminal and files, and the client is told.
+#[tokio::test]
+async fn screenless_hosts_give_no_screen_or_input() {
+    let mut cfg = host_cfg(&[], Some("pw"));
+    cfg.screenless = true;
+    let store = ResumeStore::default();
+    let mut auth = client(vec![], Some("pw"));
+    let (h, c) = run(&cfg, &store, [3; 32], [3; 32], HOST_FP, &mut auth).await;
+    let want = rdesk_proto::Access { screen: false, input: false, files: true, terminal: true };
+    assert_eq!(h.unwrap().access, want);
+    // The wire leaves the terminal out; with no monitors the client offers it.
+    assert_eq!(c.unwrap().session_access(), want);
 }
 
 #[tokio::test]

@@ -257,11 +257,11 @@ pub fn locks_supported() -> bool {
     if BACKEND.get().is_some() {
         return false;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(desktop, target_os = "linux"))]
     {
         !crate::wayland::active()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(desktop, target_os = "linux")))]
     {
         cfg!(windows)
     }
@@ -588,7 +588,13 @@ fn platform_backend() -> Result<Box<dyn Backend>> {
     Err(anyhow::anyhow!("remote control of a phone is not available yet"))
 }
 
-#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
+/// A server without a screen: no keyboard or mouse to drive (its sessions have no picture).
+#[cfg(headless)]
+fn platform_backend() -> Result<Box<dyn Backend>> {
+    Ok(Box::new(LogBackend))
+}
+
+#[cfg(all(desktop, not(windows)))]
 fn platform_backend() -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "linux")]
     if crate::wayland::active() {
@@ -603,7 +609,7 @@ fn platform_backend() -> Result<Box<dyn Backend>> {
     }))
 }
 
-#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
+#[cfg(all(desktop, not(windows)))]
 struct EnigoBackend {
     enigo: enigo::Enigo,
     /// The X server, to ask it for Caps Lock.
@@ -613,7 +619,7 @@ struct EnigoBackend {
 
 /// Caps Lock and Num Lock on X11: the modifiers the server reports with the pointer (Lock,
 /// and Mod2, where every common keymap puts Num Lock).
-#[cfg(target_os = "linux")]
+#[cfg(all(desktop, target_os = "linux"))]
 mod x11_locks {
     use x11rb::connection::Connection as _;
     use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask, Window};
@@ -646,7 +652,7 @@ mod x11_locks {
     }
 }
 
-#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
+#[cfg(all(desktop, not(windows)))]
 impl Backend for EnigoBackend {
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         use enigo::{Direction, Keyboard};

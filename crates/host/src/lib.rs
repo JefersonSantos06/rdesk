@@ -32,7 +32,7 @@ pub mod tunnel;
 pub mod update;
 pub mod video;
 pub mod wake;
-#[cfg(target_os = "linux")]
+#[cfg(all(desktop, target_os = "linux"))]
 pub mod wayland;
 #[cfg(windows)]
 pub mod win;
