@@ -205,9 +205,89 @@ fn make_backend(fake: bool) -> Box<dyn Backend> {
     match platform_backend() {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("input injection unavailable ({e:#}); remote input will be ignored");
-            Box::new(LogBackend)
+            tracing::warn!("input injection unavailable for now ({e:#}); trying again when input comes");
+            Box::new(Retrying::new(platform_backend, e, RETRY_EVERY))
         }
+    }
+}
+
+/// How often [`Retrying`] tries again.
+const RETRY_EVERY: Duration = Duration::from_secs(2);
+
+/// A backend that could not start yet: a host started with the computer, before the desktop
+/// it drives (X11 on a Raspberry Pi whose user services start at boot), would otherwise ignore
+/// input until restarted. It tries again when input comes, at most every `every`; until then
+/// input fails with the reason, which the session hears about.
+struct Retrying {
+    make: fn() -> Result<Box<dyn Backend>>,
+    inner: Option<Box<dyn Backend>>,
+    last_try: Instant,
+    every: Duration,
+    why: String,
+}
+
+impl Retrying {
+    fn new(make: fn() -> Result<Box<dyn Backend>>, first: anyhow::Error, every: Duration) -> Self {
+        Self { make, inner: None, last_try: Instant::now(), every, why: format!("{first:#}") }
+    }
+
+    fn get(&mut self) -> Result<&mut dyn Backend> {
+        if self.inner.is_none() && self.last_try.elapsed() >= self.every {
+            self.last_try = Instant::now();
+            match (self.make)() {
+                Ok(b) => {
+                    tracing::info!("input injection ready");
+                    self.inner = Some(b);
+                }
+                Err(e) => {
+                    tracing::debug!("input injection still unavailable: {e:#}");
+                    self.why = format!("{e:#}");
+                }
+            }
+        }
+        match self.inner.as_deref_mut() {
+            Some(b) => Ok(b),
+            None => Err(anyhow::anyhow!("keyboard and mouse are not available yet ({})", self.why)),
+        }
+    }
+}
+
+impl Backend for Retrying {
+    fn key(&mut self, key: Key, down: bool) -> Result<()> {
+        self.get()?.key(key, down)
+    }
+    fn mouse_abs(&mut self, x: i32, y: i32) -> Result<()> {
+        self.get()?.mouse_abs(x, y)
+    }
+    fn button(&mut self, b: MouseButton, down: bool) -> Result<()> {
+        self.get()?.button(b, down)
+    }
+    fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
+        self.get()?.scroll(dx, dy)
+    }
+    fn text(&mut self, s: &str) -> Result<()> {
+        self.get()?.text(s)
+    }
+    fn secure_attention(&mut self) -> Result<bool> {
+        self.get()?.secure_attention()
+    }
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        self.get().ok()?.pointer()
+    }
+    fn block_local(&mut self, on: bool) -> Result<()> {
+        self.get()?.block_local(on)
+    }
+    fn nav(&mut self, action: NavAction) -> Result<()> {
+        self.get()?.nav(action)
+    }
+    fn touch(&mut self, fingers: &[(u8, i32, i32)]) -> Result<()> {
+        self.get()?.touch(fingers)
+    }
+    fn caps_lock(&mut self) -> Option<bool> {
+        self.get().ok()?.caps_lock()
+    }
+    fn num_lock(&mut self) -> Option<bool> {
+        self.get().ok()?.num_lock()
     }
 }
 
@@ -960,6 +1040,34 @@ mod tests {
         let mut b = Lockable { rec: rec.clone(), caps: None, num: None };
         State::default().handle(&mut b, InputCmd::Locks { caps: true, num: Some(true) }).unwrap();
         assert!(rec.0.lock().unwrap().is_empty());
+    }
+
+    /// The desktop is not there yet: input fails with the reason, then works once it is.
+    #[test]
+    fn input_waits_for_the_desktop() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TRIES: AtomicU32 = AtomicU32::new(0);
+        fn make() -> Result<Box<dyn Backend>> {
+            if TRIES.fetch_add(1, Ordering::SeqCst) < 2 {
+                anyhow::bail!("no X server yet")
+            }
+            Ok(Box::new(Rec::default()))
+        }
+        let Err(first) = make() else { panic!("the first try must fail") };
+        let mut b = Retrying::new(make, first, Duration::ZERO);
+        let e = b.mouse_abs(1, 2).unwrap_err();
+        assert!(format!("{e:#}").contains("no X server yet"), "{e:#}");
+        assert_eq!(b.pointer(), None);
+        // The third try finds it: input flows from then on, with no more tries.
+        b.button(MouseButton::Left, true).unwrap();
+        b.button(MouseButton::Left, false).unwrap();
+        assert_eq!(TRIES.load(Ordering::SeqCst), 3);
+
+        // Not more often than asked.
+        let mut slow = Retrying::new(make, anyhow::anyhow!("not yet"), Duration::from_secs(3600));
+        let before = TRIES.load(Ordering::SeqCst);
+        assert!(slow.key(Key::KeyA, true).is_err());
+        assert_eq!(TRIES.load(Ordering::SeqCst), before);
     }
 
     #[test]
