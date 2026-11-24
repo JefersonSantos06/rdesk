@@ -1,6 +1,7 @@
 //! A computer that has a screen but no monitor right now (a Raspberry Pi started with its
 //! monitor unplugged): a login with full access gets a session with the terminal and files,
-//! told why there is no picture, instead of a connection closed for want of a monitor.
+//! told why there is no picture, and port tunnels, instead of a connection closed for want of
+//! a monitor.
 
 use std::time::Duration;
 
@@ -12,8 +13,11 @@ use rdesk_common::tiles::Frame;
 use rdesk_common::transport::{self, Role};
 use rdesk_host::capture::{Backend, MonitorDesc};
 use rdesk_host::{HostHandle, HostState, Reporter, RunOpts};
-use rdesk_proto::{ClientMsg, HostMsg, MAX_CONTROL_MSG, expect_msg, write_msg};
+use rdesk_proto::{
+    ClientMsg, HostMsg, MAX_CONTROL_MSG, MAX_SMALL_MSG, StreamOpen, TunnelReq, TunnelResp, expect_msg, write_msg,
+};
 use ssh_key::{Algorithm, PrivateKey};
+use tokio::io::AsyncReadExt as _;
 
 /// A screen with no monitor on it.
 struct NoMonitor;
@@ -88,6 +92,20 @@ async fn no_monitor_still_gives_the_terminal_and_files() {
         }
     };
     assert!(matches!(pong, HostMsg::Pong { t_us: 7 }));
+
+    // Port tunnels too: full control, all but the screen.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap().port();
+    let (mut tw, mut tr) = c.conn.open_bi().await.unwrap();
+    write_msg(&mut tw, &StreamOpen::Tunnel).await.unwrap();
+    write_msg(&mut tw, &TunnelReq { host: "127.0.0.1".into(), port: target }).await.unwrap();
+    let resp: TunnelResp = expect_msg(&mut tr, MAX_SMALL_MSG).await.unwrap();
+    assert_eq!(resp, TunnelResp::Ok, "a tunnel from a session without a screen");
+    let (mut sock, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.unwrap().unwrap();
+    tw.write_all(b"ping").await.unwrap();
+    let mut got = [0u8; 4];
+    sock.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ping");
 
     c.conn.close(transport::close::NORMAL, b"");
     h.shutdown().await;

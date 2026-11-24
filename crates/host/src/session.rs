@@ -51,6 +51,10 @@ pub async fn run(
 ) -> Result<()> {
     let peer = transport::describe_peer(&conn);
     let access = auth.access;
+    // Port tunnels need full control: everything the login was given, which on a computer
+    // with no screen now is all but the screen, keyboard and mouse (a terminal reaches as far).
+    let granted = auth.user.as_ref().map_or(rdesk_proto::Access::FULL, |u| u.access);
+    let tunnels = granted == rdesk_proto::Access::FULL && access.files && access.terminal;
     let files_as_user = shared.files_as_user;
     let reporter = shared.reporter.clone();
     let who = match &auth.user {
@@ -344,8 +348,7 @@ pub async fn run(
                             }
                             StreamOpen::Audio => serve_audio(&mut r, &mut w, access.screen).await,
                             StreamOpen::Tunnel => {
-                                let full = access == rdesk_proto::Access::FULL;
-                                crate::tunnel::serve(&mut r, &mut w, full, |to| {
+                                crate::tunnel::serve(&mut r, &mut w, tunnels, |to| {
                                     reporter.event(
                                         tf!("{who} opened a tunnel to {to}", "{who} abriu um túnel para {to}"),
                                         false,
@@ -364,6 +367,7 @@ pub async fn run(
                                     clipboard,
                                     clip_images,
                                     full: access == rdesk_proto::Access::FULL,
+                                    tunnels,
                                     who: who.clone(),
                                 };
                                 serve_extensions(&mut r, &mut w, ext).await
@@ -500,6 +504,8 @@ struct ExtCtx<'a> {
     clip_images: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>>,
     /// Full control (restart, black screen, blocking the local keyboard).
     full: bool,
+    /// Port tunnels (full control, with or without a screen).
+    tunnels: bool,
     /// Who is connected (for the restart's reason).
     who: String,
 }
@@ -509,7 +515,8 @@ struct ExtCtx<'a> {
 /// second frame format and automatic quality.
 async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::SendStream, ctx: ExtCtx<'_>) -> Result<()> {
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-    let ExtCtx { settings, injector, screen, input, mut report, capturer, clipboard, clip_images, full, who } = ctx;
+    let ExtCtx { settings, injector, screen, input, mut report, capturer, clipboard, clip_images, full, tunnels, who } =
+        ctx;
     let (mut privacy_on, mut blocked) = (false, false);
     let ExtClient::Hello { rev } = expect_msg::<_, ExtClient>(r, MAX_SMALL_MSG).await? else {
         return Err(anyhow!("extensions stream must start with Hello"));
@@ -530,9 +537,11 @@ async fn serve_extensions(r: &mut transport::RecvStream, w: &mut transport::Send
     if rev >= 2 && clipboard.is_some() && ClipboardSync::supports_images() {
         features.push(Feature::ClipboardImage);
     }
-    // Restarting, the black screen, blocking the local keyboard, tunnels: full control only.
-    if rev >= 2 && full {
+    if rev >= 2 && tunnels {
         features.push(Feature::Tunnel);
+    }
+    // Restarting, the black screen, blocking the local keyboard: full control only.
+    if rev >= 2 && full {
         if crate::restart::supported() {
             features.push(Feature::Power);
         }

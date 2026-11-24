@@ -1200,14 +1200,16 @@ impl App {
                 self.sound = on;
                 self.send(Cmd::Audio(on));
             }
-        } else {
+        } else if self.host_is_windows() {
             ui::caption(
                 ui,
                 t!(
-                    "This computer does not send its sound (only Windows computers with rdesk 0.7 or newer do).",
-                    "Este computador não envia o som (só computadores Windows com rdesk 0.7 ou mais novo)."
+                    "This computer sends no sound: update its rdesk.",
+                    "Este computador não envia o som: atualize o rdesk dele."
                 ),
             );
+        } else {
+            ui::caption(ui, t!("Only Windows computers send their sound.", "Só computadores Windows enviam o som."));
         }
         self.session_actions(ui);
     }
@@ -1231,10 +1233,11 @@ impl App {
                 }
             }
         }
-        if !(has(Feature::Privacy) || has(Feature::BlockInput) || has(Feature::Power)) {
-            return;
+        // Each part when the host offers it: a Linux or Mac computer has the tunnel alone.
+        let windows_only = has(Feature::Privacy) || has(Feature::BlockInput) || has(Feature::Power);
+        if has(Feature::Privacy) || has(Feature::BlockInput) {
+            ui.separator();
         }
-        ui.separator();
         if has(Feature::Privacy) {
             let mut on = self.privacy;
             let label = ui::with_icon(icons::EYE_SLASH, t!("Black screen over there", "Tela preta lá"));
@@ -1264,48 +1267,7 @@ impl App {
         }
         if has(Feature::Tunnel) {
             ui.separator();
-            ui.label(
-                RichText::new(ui::with_icon(icons::ARROWS_LEFT_RIGHT, t!("Port tunnel", "Túnel de porta"))).strong(),
-            );
-            ui::caption(
-                ui,
-                t!(
-                    "A port on this computer that leads to one reachable from there (its remote desktop, SSH, a \
-                     router's page): LOCAL:HOST:PORT, like 13389:localhost:3389.",
-                    "Uma porta neste computador que leva a uma alcançável de lá (a área de trabalho remota dele, \
-                     SSH, a página do roteador): LOCAL:HOST:PORTA, como 13389:localhost:3389."
-                ),
-            );
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.tunnel_text)
-                        .hint_text("13389:localhost:3389")
-                        .desired_width(200.0),
-                );
-                if ui.button(t!("Open", "Abrir")).clicked() {
-                    match rdesk_core::tunnel::TunnelSpec::parse(self.tunnel_text.trim()) {
-                        Ok(spec) => {
-                            self.toasts.push(
-                                tf!(
-                                    "Tunnel: localhost:{} leads to {}:{} there",
-                                    "Túnel: localhost:{} leva a {}:{} de lá",
-                                    spec.local,
-                                    spec.host,
-                                    spec.port
-                                ),
-                                false,
-                            );
-                            self.tunnels.push(spec.clone());
-                            self.send(Cmd::Tunnel(spec));
-                            self.tunnel_text.clear();
-                        }
-                        Err(e) => self.toasts.push(tf!("Tunnel: {e:#}", "Túnel: {e:#}"), true),
-                    }
-                }
-            });
-            for t in &self.tunnels {
-                ui::caption(ui, &format!("localhost:{} → {}:{}", t.local, t.host, t.port));
-            }
+            self.tunnel_ui(ui);
         }
         if has(Feature::Power) {
             ui.separator();
@@ -1323,6 +1285,73 @@ impl App {
                 self.confirm = Some(Confirm::Restart { safe_mode: true });
                 ui.close();
             }
+        }
+        // With full control, say where the rest is instead of leaving it out unexplained.
+        if !windows_only && self.access == rdesk_proto::Access::FULL && !has(Feature::Nav) {
+            ui.separator();
+            ui::caption(
+                ui,
+                if self.host_is_windows() {
+                    t!(
+                        "Restarting it, a black screen there and blocking its keyboard and mouse need rdesk \
+                         installed as a service on it.",
+                        "Reiniciar, a tela preta lá e bloquear o teclado e o mouse de lá precisam do rdesk \
+                         instalado como serviço nesse computador."
+                    )
+                } else {
+                    t!(
+                        "Restarting it, a black screen there and blocking its keyboard and mouse are for Windows \
+                         computers.",
+                        "Reiniciar, a tela preta lá e bloquear o teclado e o mouse de lá são para computadores \
+                         Windows."
+                    )
+                },
+            );
+        }
+    }
+
+    /// Opening a port tunnel ([`Feature::Tunnel`]), and those open: in the Session menu, and in
+    /// the Info tab of a session without a screen.
+    fn tunnel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new(ui::with_icon(icons::ARROWS_LEFT_RIGHT, t!("Port tunnel", "Túnel de porta"))).strong());
+        ui::caption(
+            ui,
+            t!(
+                "A port on this computer that leads to one reachable from there (its remote desktop, SSH, a \
+                     router's page): LOCAL:HOST:PORT, like 13389:localhost:3389.",
+                "Uma porta neste computador que leva a uma alcançável de lá (a área de trabalho remota dele, \
+                     SSH, a página do roteador): LOCAL:HOST:PORTA, como 13389:localhost:3389."
+            ),
+        );
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.tunnel_text)
+                    .hint_text("13389:localhost:3389")
+                    .desired_width(200.0),
+            );
+            if ui.button(t!("Open", "Abrir")).clicked() {
+                match rdesk_core::tunnel::TunnelSpec::parse(self.tunnel_text.trim()) {
+                    Ok(spec) => {
+                        self.toasts.push(
+                            tf!(
+                                "Tunnel: localhost:{} leads to {}:{} there",
+                                "Túnel: localhost:{} leva a {}:{} de lá",
+                                spec.local,
+                                spec.host,
+                                spec.port
+                            ),
+                            false,
+                        );
+                        self.tunnels.push(spec.clone());
+                        self.send(Cmd::Tunnel(spec));
+                        self.tunnel_text.clear();
+                    }
+                    Err(e) => self.toasts.push(tf!("Tunnel: {e:#}", "Túnel: {e:#}"), true),
+                }
+            }
+        });
+        for t in &self.tunnels {
+            ui::caption(ui, &format!("localhost:{} → {}:{}", t.local, t.host, t.port));
         }
     }
 
@@ -1803,8 +1832,14 @@ impl App {
                 .collect::<Vec<_>>();
             items.push((t!("Monitors", "Monitores"), if monitors.is_empty() { dash() } else { monitors.join("\n") }));
         }
+        // Without a screen there is no Session menu: tunnels are opened here.
+        let tunnels = !self.screen() && self.features.contains(&Feature::Tunnel);
         egui::ScrollArea::vertical().id_salt("session-info").auto_shrink([false, false]).show(ui, |ui| {
             ui::facts(ui, "session-facts", &items);
+            if tunnels {
+                ui.separator();
+                self.tunnel_ui(ui);
+            }
         });
     }
 
