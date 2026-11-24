@@ -155,6 +155,12 @@ pub fn style(dark: bool) -> egui::Style {
     // Scroll bars that show there is more (not thin ones that appear on hover).
     sp.scroll = egui::style::ScrollStyle::solid();
 
+    // Text and icons are not selectable: a selectable label takes the click and drag for
+    // itself, so a click on a card's name or icon would select it instead of opening the
+    // card. What is worth copying (ids, keys, commands, passwords) has a copy button.
+    s.interaction.selectable_labels = false;
+    s.interaction.multi_widget_text_select = false;
+
     let v = &mut s.visuals;
     v.panel_fill = p.bg;
     v.window_fill = p.surface;
