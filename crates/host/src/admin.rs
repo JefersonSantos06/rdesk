@@ -311,9 +311,14 @@ pub async fn diagnose() -> Vec<CheckLine> {
     match cap.monitors().await {
         // A server without a screen says so below, as it should be.
         Ok(ms) if ms.is_empty() && crate::capture::screenless() => {}
-        Ok(ms) if ms.is_empty() => {
-            out.push(line(t!("Screens", "Telas"), t!("none found", "nenhuma encontrada"), false))
-        }
+        Ok(ms) if ms.is_empty() => out.push(line(
+            t!("Screens", "Telas"),
+            t!(
+                "none now (no monitor connected?): sessions get the terminal, files and tunnels",
+                "nenhuma agora (nenhum monitor ligado?): as sessões têm terminal, arquivos e túneis"
+            ),
+            false,
+        )),
         Ok(ms) => {
             for m in ms {
                 let t = std::time::Instant::now();
@@ -334,7 +339,14 @@ pub async fn diagnose() -> Vec<CheckLine> {
                 }
             }
         }
-        Err(e) => out.push(line(t!("Screens", "Telas"), format!("{e:#}"), false)),
+        Err(e) => out.push(line(
+            t!("Screens", "Telas"),
+            tf!(
+                "{e:#}: sessions get the terminal, files and tunnels",
+                "{e:#}: as sessões têm terminal, arquivos e túneis"
+            ),
+            false,
+        )),
     }
     #[cfg(target_os = "macos")]
     {

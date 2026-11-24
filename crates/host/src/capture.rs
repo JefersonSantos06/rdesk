@@ -32,6 +32,9 @@ pub struct InputRect {
     pub h: u32,
 }
 
+/// How long [`Capturer::monitors`] waits for the capture thread.
+const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
 enum Req {
     List(oneshot::Sender<Result<Vec<MonitorDesc>>>),
     Grab(u32, oneshot::Sender<Result<Shot>>),
@@ -80,10 +83,16 @@ impl Capturer {
         Self { tx }
     }
 
+    /// The monitors now. Logins ask for them, so a display server that does not answer (gone,
+    /// stuck, a desktop portal waiting for someone at the computer) gives an error after
+    /// [`ANSWER_WITHIN`] instead of holding up every session, terminals and files too.
     pub async fn monitors(&self) -> Result<Vec<MonitorDesc>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Req::List(tx)).map_err(|_| anyhow!("capture thread gone"))?;
-        rx.await?
+        match tokio::time::timeout(ANSWER_WITHIN, rx).await {
+            Ok(r) => r?,
+            Err(_) => Err(anyhow!("the screen did not answer within {} s", ANSWER_WITHIN.as_secs())),
+        }
     }
 
     /// The pointer's image now (see [`crate::cursor`]); `None` if it cannot be told.
@@ -181,10 +190,17 @@ fn platform_backend() -> Box<dyn Backend> {
 #[derive(Default)]
 struct X11Backend {
     x11: Option<crate::x11::Capture>,
-    /// [`crate::x11`] could not start: xcap from then on.
-    xcap_only: bool,
+    /// [`crate::x11`] could not start: xcap until then (the X server may come later: a
+    /// computer started with no monitor, its desktop started once one is connected).
+    xcap_until: Option<std::time::Instant>,
+    /// Why it could not, as last said in the log.
+    why: String,
     xcap: XcapBackend,
 }
+
+/// How long [`X11Backend`] keeps to xcap before trying [`crate::x11`] again.
+#[cfg(all(desktop, target_os = "linux"))]
+const X11_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(all(desktop, target_os = "linux"))]
 impl Backend for X11Backend {
@@ -198,12 +214,19 @@ impl Backend for X11Backend {
     }
 
     fn shot(&mut self, id: u32) -> Result<Shot> {
-        if self.x11.is_none() && !self.xcap_only {
+        if self.x11.is_none() && self.xcap_until.is_none_or(|t| Instant::now() >= t) {
             match crate::x11::Capture::open() {
-                Ok(c) => self.x11 = Some(c),
+                Ok(c) => {
+                    self.x11 = Some(c);
+                    self.why.clear();
+                }
                 Err(e) => {
-                    tracing::info!("X11: capturing with xcap ({e:#})");
-                    self.xcap_only = true;
+                    let why = format!("{e:#}");
+                    if why != self.why {
+                        tracing::info!("X11: capturing with xcap ({why})");
+                        self.why = why;
+                    }
+                    self.xcap_until = Some(Instant::now() + X11_RETRY);
                 }
             }
         }

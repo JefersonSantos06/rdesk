@@ -340,6 +340,13 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
         reporter: reporter.clone(),
     });
     match shared.capturer.monitors().await {
+        Ok(m) if m.is_empty() && !opts.fake_capture && !crate::capture::screenless() => reporter.event(
+            t!(
+                "No monitor right now: sessions get the terminal, files and tunnels until one is connected",
+                "Nenhuma tela agora: as sessões têm terminal, arquivos e túneis até uma ser ligada"
+            ),
+            true,
+        ),
         Ok(m) => {
             for d in &m {
                 tracing::info!(
@@ -469,6 +476,22 @@ pub async fn serve(opts: RunOpts, reporter: Reporter, mut outer: mpsc::Unbounded
 }
 
 impl Server {
+    /// The monitors to offer a session. None now (no monitor connected, the display server
+    /// gone or not answering) means no screen for that session: the terminal, files and
+    /// tunnels still work, and the next session looks again.
+    async fn screens(&self) -> Vec<crate::capture::MonitorDesc> {
+        if self.screenless {
+            return Vec::new();
+        }
+        let why = match self.shared.capturer.monitors().await {
+            Ok(m) if !m.is_empty() => return m,
+            Ok(_) => "no monitor connected".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        tracing::info!("no screen to show now ({why}): the session gets the terminal, files and tunnels");
+        Vec::new()
+    }
+
     async fn handle(self: Arc<Self>, incoming: Incoming) -> Result<()> {
         let (ip, peer, straight) = match incoming.remote_addr() {
             IncomingAddr::Ip(sa) => (sa.ip().to_canonical(), sa.ip().to_canonical().to_string(), true),
@@ -516,9 +539,10 @@ impl Server {
 
         let mut auth_cfg = load_auth_config(self.host_fp, self.ticket.clone(), self.require_local)?;
         auth_cfg.direct = direct;
-        auth_cfg.screenless = self.screenless;
+        let monitors = self.screens().await;
+        // No screen now: this session gets the terminal, files and tunnels, not a refusal.
+        auth_cfg.screenless = monitors.is_empty();
         let peer_id = *conn.remote_id().as_bytes();
-        let monitors = self.shared.capturer.monitors().await.unwrap_or_default();
         let initial = session::pick_initial(&monitors).map(|m| m.info.id).unwrap_or(0);
         let info = HostInfo {
             hostname: rdesk_common::local_hostname(),
@@ -561,12 +585,6 @@ impl Server {
         self.limiter.success(ip);
         drop(_permit);
         transport::raise_stream_limits(&conn);
-
-        // Without a screen, only sessions that need none (terminal, files) are possible.
-        if monitors.is_empty() && authed.access.screen {
-            conn.close(close::PROTOCOL, b"host has no capturable monitor");
-            bail!("no monitors to share (macOS: grant Screen Recording; Linux: needs X11)");
-        }
 
         // One session at a time. The same person's newer session wins (their old link is
         // probably half-dead); someone else's waits until it ends instead of throwing them out.
@@ -656,6 +674,16 @@ impl Server {
         let reporter = self.reporter.clone();
         let c2 = conn.clone();
         let me = self.clone();
+        if monitors.is_empty() && !self.screenless {
+            // A computer that has one, without it now: say why the picture is missing.
+            let text = t!(
+                "This computer shows no screen right now (no monitor connected, or its desktop is not running): \
+                 the terminal, files and tunnels still work.",
+                "Este computador está sem tela agora (nenhum monitor ligado, ou a área de trabalho não está \
+                 rodando): o terminal, os arquivos e os túneis continuam funcionando."
+            );
+            let _ = write_msg(&mut w, &HostMsg::Notice { text: text.into() }).await;
+        }
         let task = tokio::spawn(async move {
             if let Err(e) = session::run(c2, w, r, authed, shared, monitors).await {
                 tracing::warn!("session error: {e:#}");
